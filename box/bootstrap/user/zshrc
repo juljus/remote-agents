@@ -1,0 +1,11 @@
+# zsh config of the box user, installed by user/setup.sh; ~/.zshrc.local adds to it.
+HISTFILE="$HOME/.zsh_history"
+HISTSIZE=2000
+SAVEHIST=1000
+PROMPT='%F{81}%n@%m %F{11}%~ %f%# '
+
+export PATH="$HOME/.local/bin:$PATH"
+
+if [[ -f "$HOME/.zshrc.local" ]]; then
+  source "$HOME/.zshrc.local"
+fi

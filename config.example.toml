@@ -1,0 +1,16 @@
+# ~/.config/remote-agents/config.toml
+host = "box.example"                # ssh destination of the box
+workdir = "/home/agent/work"        # every session runs here; must exist on the box
+
+# [link]
+# opener = "/usr/bin/open"          # laptop command that opens box URLs; the default
+
+# [cmux]                            # only with cmux
+# wrapper = "/Applications/cmux.app/Contents/Resources/bin/cmux-claude-wrapper"
+
+[agents.claude]                     # run with rclaude
+command = "claude"
+kind = "claude"
+# Go before the arguments of every rclaude. Join option values with "=" (--model=opus):
+# Claude reads a separate value of some options as a list that would take your prompt.
+# args = ["--dangerously-skip-permissions"]

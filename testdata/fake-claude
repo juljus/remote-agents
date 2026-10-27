@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Stands in for Claude Code in end-to-end tests: same session flags, prints
+# claude's resume hint on exit, and answers a few line commands. adopt <id>
+# switches to another session, as the resume picker or --continue would;
+# hook <name> [event] sends a hook for it. prompt and stop report a turn to
+# the box's activity hook; bg <s> runs a sleep the way the Bash tool does,
+# and busy <s> and leave <s> leave a CPU-busy loop or a sleep behind its
+# shell; daemon <s> starts a sleep that detaches into its own session.
+echo "fake-claude args=$*"
+id=""
+act=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session-id|--resume|-r) id="$2"; shift 2 ;;
+    --settings)
+      # The box's activity hooks run '<box binary>' activity.
+      case "$2" in *"remote-agents-box' activity"*) act="${2#*\"command\":\"}"; act="${act%% activity*}" ;; esac
+      shift 2 ;;
+    *) shift ;;
+  esac
+done
+resume_hint() { printf 'Resume this session with:\nclaude --resume %s\n' "$id"; }
+echo "fake-claude session=$id pid=$$ cwd=$PWD"
+echo "fake-claude env BROWSER=$BROWSER SESSION=$REMOTE_AGENTS_SESSION TERM=$TERM HOOKBIN=${CMUX_CLAUDE_HOOK_CMUX_BIN:-none}"
+# hook <cmux hook name> <event> relays a hook payload like Claude's.
+hook() { echo '{"session_id":"'"$id"'","hook_event_name":"'"$2"'"}' | "$CMUX_CLAUDE_HOOK_CMUX_BIN" hooks claude "$1"; }
+transcript="$HOME/remote-agents-test/transcripts/$id.jsonl"
+# activity <event> [extra json fields] reports to the box like Claude's hooks, writing the transcript as Claude would.
+activity() {
+  [ -n "$act" ] || return 0
+  mkdir -p "${transcript%/*}" && echo "{\"event\":\"$1\"}" >> "$transcript"
+  printf '{"hook_event_name":"%s","session_id":"%s","transcript_path":"%s"%s}' "$1" "$id" "$transcript" "$2" | eval "$act activity"
+}
+snapshot="source $HOME/.claude/shell-snapshots/snapshot-bash-fake.sh 2>/dev/null || true"
+# Like Claude, report the session at startup once it is known.
+if [ -n "$id" ] && [ -n "$CMUX_CLAUDE_HOOK_CMUX_BIN" ]; then hook session-start SessionStart >/dev/null; fi
+if [ -n "$id" ]; then activity SessionStart; fi
+trap 'echo; resume_hint; exit 0' INT
+# bash runs a trap only once read returns, so read in short slices to end promptly on SIGINT, as Claude does.
+while true; do
+  read -r -t 1 cmd arg1 arg2
+  status=$?
+  if [ "$status" -gt 128 ]; then continue; fi
+  if [ "$status" -ne 0 ]; then break; fi
+  case "$cmd" in
+    whoami) echo "fake-claude pid=$$" ;;
+    adopt) id="$arg1"; echo "fake-claude adopted $id" ;;
+    exit) resume_hint; exit "$arg1" ;;
+    exitin) (sleep "$arg1"; kill -USR1 $$) & trap 'resume_hint; exit '"$arg2" USR1 ;;
+    hook) hook "$arg1" "${arg2:-$arg1}"; echo "hook exit=$?" ;;
+    paste) xclip -selection clipboard -t TARGETS -o; echo "targets exit=$?" ;;
+    prompt) activity UserPromptSubmit; echo "activity exit=$?" ;;
+    stop) activity Stop ',"background_tasks":[],"session_crons":[]'; echo "activity exit=$?" ;;
+    # Like Claude's, the command does not end the script, so bash cannot exec it in place of the shell.
+    bg) bash -c "$snapshot; sleep $arg1; pwd -P >/dev/null" & echo "bg started" ;;
+    daemon) bash -c "$snapshot; setsid sleep $arg1 >/dev/null 2>&1 &"; echo "daemon started" ;;
+    leave) bash -c "$snapshot; sleep $arg1 >/dev/null 2>&1 &"; echo "leave started" ;;
+    busy) bash -c "$snapshot; timeout $arg1 sh -c 'while :; do :; done' >/dev/null 2>&1 &"; echo "busy started" ;;
+    *) echo "got: $cmd $arg1 $arg2" ;;
+  esac
+done

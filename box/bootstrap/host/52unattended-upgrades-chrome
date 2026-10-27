@@ -1,0 +1,4 @@
+// Google Chrome loads arbitrary pages for the Playwright MCP, so it updates with security fixes.
+Unattended-Upgrade::Origins-Pattern {
+  "origin=Google LLC,codename=stable";
+};

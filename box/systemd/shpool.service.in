@@ -1,0 +1,10 @@
+[Unit]
+Description=@NAME@ shpool daemon
+Requires=@NAME@-shpool.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/@NAME@/bin/shpool --config-file %h/.config/@NAME@/shpool.toml daemon
+KillMode=mixed
+TimeoutStopSec=2s
+SendSIGHUP=yes

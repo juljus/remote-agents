@@ -1,0 +1,7 @@
+# Key-only SSH for the box user; no root login.
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthenticationMethods publickey
+AllowUsers @BOX_USER@
+X11Forwarding no

@@ -1,0 +1,10 @@
+[Unit]
+Description=@NAME@ shpool socket
+
+[Socket]
+ListenStream=%h/.local/state/@NAME@/shpool.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target

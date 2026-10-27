@@ -1,0 +1,7 @@
+# shpool config for remote-agents sessions; installed by box/install.sh.
+# Sessions run an agent, not a shell, and the laptop terminal must behave
+# exactly like a local one: no prompt prefix and no detach keybinding.
+prompt_prefix = ""
+keybinding = []
+session_restore_mode = "screen"
+nodaemonize = true

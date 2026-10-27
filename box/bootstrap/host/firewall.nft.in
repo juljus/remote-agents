@@ -1,0 +1,23 @@
+# Public NIC filter. Inbound: only replies, ICMP essentials and Tailscale's WireGuard port reach the
+# box; everything else is dropped. Outbound: private and CGNAT destinations are dropped, because
+# Hetzner reads them as a network scan. bootstrap.sh fills in the NIC and the optional SSH rule.
+table inet box_firewall
+flush table inet box_firewall
+table inet box_firewall {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname != "@PUBLIC_NIC@" accept
+    ct state established,related accept
+    icmp type { echo-request, destination-unreachable, time-exceeded, parameter-problem } accept
+    icmpv6 type { echo-request, destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept
+    udp dport 41641 accept
+    @PUBLIC_SSH@
+    counter drop
+  }
+  chain postrouting {
+    type filter hook postrouting priority filter; policy accept;
+    oifname != "@PUBLIC_NIC@" accept
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } counter drop
+    ip6 daddr fc00::/7 counter drop
+  }
+}
