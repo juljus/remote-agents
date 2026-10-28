@@ -151,3 +151,28 @@ func TestResumeBaseKeepsOptionsButNotTheSessionOrPrompt(t *testing.T) {
 		}
 	}
 }
+
+func TestLastSettingsFindsTheSettingsClaudeApplies(t *testing.T) {
+	cases := []struct {
+		name  string
+		args  []string
+		want  SettingsArg
+		found bool
+	}{
+		{"none", []string{"--model", "x", "fix it"}, SettingsArg{}, false},
+		{"separate value", []string{"--model", "x", "--settings", "{}"}, SettingsArg{Index: 3}, true},
+		{"joined", []string{"--settings={}", "--verbose"}, SettingsArg{Index: 0, Joined: true}, true},
+		{"last of several", []string{"--settings", "a.json", "--settings={}", "--settings", "{}"}, SettingsArg{Index: 4}, true},
+		{"value of another option", []string{"--append-system-prompt", "--settings"}, SettingsArg{}, false},
+		{"after double dash", []string{"--", "--settings", "{}"}, SettingsArg{}, false},
+		{"without a value", []string{"--settings"}, SettingsArg{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := LastSettings(tc.args)
+			if found != tc.found || got != tc.want {
+				t.Fatalf("LastSettings(%q) = %+v, %v; want %+v, %v", tc.args, got, found, tc.want, tc.found)
+			}
+		})
+	}
+}

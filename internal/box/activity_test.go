@@ -18,7 +18,7 @@ import (
 
 func TestActivitySettingsRunTheBoxBinaryForEveryEvent(t *testing.T) {
 	l := boxlayout.Layout{Home: "/home/agent", Name: "remote-agents-e2e"}
-	argv, err := withActivityHooks(l, []string{"claude", "--model", "x"})
+	argv, err := withActivityHooks(l, []string{"claude", "--model", "x"}, "/home/agent/work")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,12 +36,121 @@ func TestActivitySettingsRunTheBoxBinaryForEveryEvent(t *testing.T) {
 	for _, event := range reaper.HookEvents {
 		m := settings.Hooks[event]
 		if len(m) != 1 || len(m[0].Hooks) != 1 || m[0].Hooks[0].Type != "command" ||
-			m[0].Hooks[0].Command != "'/home/agent/.local/share/remote-agents-e2e/bin/remote-agents-box' activity" {
+			m[0].Hooks[0].Command != activityCommand {
 			t.Fatalf("%s hooks = %+v", event, m)
 		}
 	}
 	if len(settings.Hooks) != len(reaper.HookEvents) {
 		t.Fatalf("hooks = %+v", settings.Hooks)
+	}
+}
+
+const activityCommand = "'/home/agent/.local/share/remote-agents-e2e/bin/remote-agents-box' activity"
+
+// cmuxSettings is the shape of the --settings cmux's wrapper passes.
+const cmuxSettings = `{"preferredNotifChannel":"notifications_disabled","hooks":{` +
+	`"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"cmux hooks claude session-start","timeout":10}]}],` +
+	`"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"cmux hooks claude pre-tool-use","timeout":5,"async":true}]}]}}`
+
+// hookCommands lists the commands of each event's hooks in settings, in order.
+func hookCommands(t *testing.T, settings string) map[string][]string {
+	t.Helper()
+	var s struct {
+		Hooks map[string][]struct {
+			Hooks []struct{ Command string }
+		}
+	}
+	if err := json.Unmarshal([]byte(settings), &s); err != nil {
+		t.Fatalf("settings %s: %v", settings, err)
+	}
+	out := map[string][]string{}
+	for event, matchers := range s.Hooks {
+		for _, m := range matchers {
+			for _, h := range m.Hooks {
+				out[event] = append(out[event], h.Command)
+			}
+		}
+	}
+	return out
+}
+
+func TestActivityHooksJoinTheSettingsClaudeApplies(t *testing.T) {
+	l := boxlayout.Layout{Home: "/home/agent", Name: "remote-agents-e2e"}
+	// Claude applies only the last --settings, so a second flag would drop cmux's hooks or ours.
+	for name, tc := range map[string]struct {
+		argv  []string
+		value func([]string) string
+	}{
+		"separate value": {[]string{"claude", "--settings", "{}", "--settings", cmuxSettings, "fix it"},
+			func(a []string) string { return a[4] }},
+		"joined": {[]string{"claude", "--settings=" + cmuxSettings, "fix it"},
+			func(a []string) string { return strings.TrimPrefix(a[1], "--settings=") }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			argv, err := withActivityHooks(l, tc.argv, "/home/agent/work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(argv) != len(tc.argv) || argv[len(argv)-1] != "fix it" || (name == "separate value" && argv[2] != "{}") {
+				t.Fatalf("argv = %q", argv)
+			}
+			value := tc.value(argv)
+			got := hookCommands(t, value)
+			if !slices.Equal(got["SessionStart"], []string{"cmux hooks claude session-start", activityCommand}) ||
+				!slices.Equal(got["PreToolUse"], []string{"cmux hooks claude pre-tool-use"}) {
+				t.Fatalf("hooks = %v", got)
+			}
+			for _, event := range reaper.HookEvents {
+				if !slices.Contains(got[event], activityCommand) {
+					t.Fatalf("%s hooks = %v", event, got[event])
+				}
+			}
+			var rest map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(value), &rest); err != nil {
+				t.Fatal(err)
+			}
+			if string(rest["preferredNotifChannel"]) != `"notifications_disabled"` {
+				t.Fatalf("settings lost other keys: %s", value)
+			}
+			if !strings.Contains(value, `"timeout":5,"async":true`) {
+				t.Fatalf("settings lost hook fields: %s", value)
+			}
+		})
+	}
+}
+
+func TestActivityHooksJoinASettingsFile(t *testing.T) {
+	l := boxlayout.Layout{Home: "/home/agent", Name: "remote-agents-e2e"}
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "s.json"), []byte(cmuxSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	argv, err := withActivityHooks(l, []string{"claude", "--settings", "s.json"}, workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hookCommands(t, argv[2]); !slices.Equal(got["SessionStart"], []string{"cmux hooks claude session-start", activityCommand}) {
+		t.Fatalf("hooks = %v", got)
+	}
+}
+
+func TestActivityHooksJoinNullHooks(t *testing.T) {
+	l := boxlayout.Layout{Home: "/home/agent", Name: "remote-agents-e2e"}
+	argv, err := withActivityHooks(l, []string{"claude", "--settings", `{"hooks":null}`}, "/home/agent/work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hookCommands(t, argv[2]); !slices.Equal(got["Stop"], []string{activityCommand}) {
+		t.Fatalf("hooks = %v", got)
+	}
+}
+
+func TestActivityHooksRejectBrokenSettings(t *testing.T) {
+	l := boxlayout.Layout{Home: "/home/agent", Name: "remote-agents-e2e"}
+	for _, value := range []string{"{not json", "[]", "null", `{"hooks":[]}`, "missing.json"} {
+		if argv, err := withActivityHooks(l, []string{"claude", "--settings", value}, t.TempDir()); err == nil {
+			t.Fatalf("--settings %s: argv = %q, want an error", value, argv)
+		}
 	}
 }
 

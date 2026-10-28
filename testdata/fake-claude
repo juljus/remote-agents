@@ -13,8 +13,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --session-id|--resume|-r) id="$2"; shift 2 ;;
     --settings)
-      # The box's activity hooks run '<box binary>' activity.
-      case "$2" in *"remote-agents-box' activity"*) act="${2#*\"command\":\"}"; act="${act%% activity*}" ;; esac
+      # Like Claude, apply only the last --settings. The box's activity hooks run '<box binary>' activity.
+      act=""
+      case "$2" in *"remote-agents-box' activity"*) act="${2%%remote-agents-box\' activity*}"; act="${act##*\"command\":\"}remote-agents-box'" ;; esac
       shift 2 ;;
     *) shift ;;
   esac

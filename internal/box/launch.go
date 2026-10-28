@@ -154,7 +154,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 	}
 	var w *watcher
 	if s.Claude != nil {
-		if s.Argv, err = withActivityHooks(l, s.Argv); err != nil {
+		if s.Argv, err = withActivityHooks(l, s.Argv, s.Workdir); err != nil {
 			return fail(err)
 		}
 		if w, err = newWatcher(l, s.Session, now); err != nil {
