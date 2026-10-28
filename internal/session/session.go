@@ -20,6 +20,7 @@ import (
 
 	"remote-agents/internal/control"
 	"remote-agents/internal/linkproto"
+	"remote-agents/internal/paste"
 	"remote-agents/internal/reconnect"
 	"remote-agents/internal/spec"
 	"remote-agents/internal/sshrun"
@@ -100,7 +101,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		go keepRegistered(ctx, opts, held)
 	}
 
-	keys := &keyWatcher{fd: fd, onInterrupt: func() { cancel(detached{syscall.SIGINT}) }, onError: func(err error) { cancel(err) }}
+	keys := &input{fd: fd, logf: opts.Logf, onInterrupt: func() { cancel(detached{syscall.SIGINT}) }, onError: func(err error) { cancel(err) }}
 	go keys.run(ctx)
 
 	status := &outage{
@@ -114,9 +115,28 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		interval: statusInterval,
 		logf:     opts.Logf,
 	}
-	obs := &observer{opts: opts, fd: fd, keys: keys, status: status}
+	obs := &observer{keys: keys, status: status}
 	// ssh's stderr is only captured, so the session's output is the one other writer to the terminal.
-	stdout := outputGate{w: opts.Stdout, outage: status}
+	stdout := newScreenOut(opts.Stdout, status, status.width, opts.Logf)
+	defer stdout.close()
+	// ssh reads a terminal of its own, so the terminal stays raw throughout and resizes are passed on.
+	if _, err := term.MakeRaw(fd); err != nil {
+		return 0, fmt.Errorf("making the terminal raw: %w", err)
+	}
+	attached := &current{outer: opts.Stdin, logf: opts.Logf}
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	defer signal.Stop(winch)
+	go func() {
+		for {
+			select {
+			case <-winch:
+				attached.resize()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	attempts := 0
 	loop := reconnect.Loop{
 		// The loop runs one attempt at a time; each is numbered so the box can tell a late one from its successor.
@@ -128,7 +148,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			if err != nil {
 				return reconnect.Result{Err: err}
 			}
-			res := sshrun.Run(ctx, sshrun.SessionArgv(opts.SSH, opts.Box, token), sshrun.Stdio{Stdin: opts.Stdin, Stdout: stdout}, 2*time.Second)
+			res := runAttempt(ctx, opts, keys, attached, stdout, token)
 			if !res.Transport && res.ExitCode == spec.ExitStaleAttempt {
 				res.Transport, res.Detail = true, "a newer connection attempt holds the session"
 			}
@@ -141,7 +161,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		StableAfter: 10 * time.Second,
 	}
 	code, loopErr := loop.Run(ctx)
-	keys.Pause()
+	keys.stop()
 	statusShown := status.End()
 	var d detached
 	isDetach := loopErr != nil && errors.As(context.Cause(ctx), &d)
@@ -215,82 +235,123 @@ func keepRegistered(ctx context.Context, opts Options, held *control.Held) {
 const statusInterval = 100 * time.Millisecond
 
 type observer struct {
-	opts   Options
-	fd     int
-	keys   *keyWatcher
+	keys   *input
 	status *outage
 	// dropped records that the link failed at least once during the run.
 	dropped bool
 }
 
-func (o *observer) AttemptStarting(int) {
-	o.keys.Pause()
-}
+func (o *observer) AttemptStarting(int) {}
 
 func (o *observer) AttemptEnded(_ int, r reconnect.Result) {
 	if !r.Transport {
 		return
 	}
-	// ssh restored the terminal to whatever it found; take raw mode back so
-	// keystrokes during the outage are read here instead of echoed.
-	if _, err := term.MakeRaw(o.fd); err != nil {
-		o.opts.Logf("%s: restoring raw mode during the outage: %v", o.opts.Spec.Session, err)
-	}
 	o.dropped = true
 	o.status.Down(r.Detail)
-	o.keys.Resume()
+	o.keys.watch()
 }
 
 func (o *observer) Triggered(string) {}
 
-// keyWatcher reads the terminal between connection attempts, discarding
-// input and detaching on Ctrl+C. Pause blocks until no read is in flight so
-// it never steals input from the next ssh.
-type keyWatcher struct {
+// runAttempt runs one ssh connection on a terminal of its own, which the
+// user's keystrokes reach through the paste filter.
+func runAttempt(ctx context.Context, opts Options, keys *input, attached *current, out *screenOut, token string) reconnect.Result {
+	t, err := openInner(opts.Stdin, out, opts.Logf)
+	if err != nil {
+		return reconnect.Result{Err: err}
+	}
+	attached.set(t)
+	pasteCtx, cancelPaste := context.WithCancel(ctx)
+	defer cancelPaste()
+	keys.forward(&paste.Filter{W: t, Rewrite: pasteRewriter(pasteCtx, opts, out)})
+	res := sshrun.Run(ctx, sshrun.SessionArgv(opts.SSH, opts.Box, token), sshrun.Stdio{Stdin: t.slave, Stdout: out, Terminal: true}, 2*time.Second)
+	attached.set(nil)
+	// An upload or a keystroke write in flight holds the input; both end here.
+	cancelPaste()
+	if err := t.Close(); err != nil && res.Err == nil {
+		res.Err = fmt.Errorf("closing ssh's terminal: %w", err)
+	}
+	keys.stop()
+	return res
+}
+
+// input reads the user's terminal while the session runs. During an attempt
+// the keystrokes go to its terminal through the paste filter; between
+// attempts they are dropped, and Ctrl+C detaches. stop blocks until no read
+// is in flight, so input is never taken from whatever reads the terminal next.
+type input struct {
 	fd          int
+	logf        func(format string, args ...any)
 	onInterrupt func()
 	onError     func(error)
-	mu          sync.Mutex
-	active      atomic.Bool
+
+	mu     sync.Mutex
+	active atomic.Bool
+	// filter is the running attempt's; nil between attempts.
+	filter *paste.Filter
 }
 
-func (w *keyWatcher) Pause() {
-	w.active.Store(false)
-	w.mu.Lock()
-	defer w.mu.Unlock()
+func (in *input) forward(f *paste.Filter) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.filter = f
+	in.active.Store(true)
 }
 
-func (w *keyWatcher) Resume() { w.active.Store(true) }
+func (in *input) watch() {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.filter = nil
+	in.active.Store(true)
+}
 
-func (w *keyWatcher) run(ctx context.Context) {
-	buf := make([]byte, 512)
+func (in *input) stop() {
+	in.active.Store(false)
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.filter = nil
+}
+
+func (in *input) run(ctx context.Context) {
+	buf := make([]byte, 32<<10)
 	for ctx.Err() == nil {
-		if !w.active.Load() {
+		if !in.active.Load() {
 			time.Sleep(20 * time.Millisecond)
 			continue
 		}
-		if err := w.poll(buf); err != nil {
-			w.onError(fmt.Errorf("reading terminal: %w", err))
+		if err := in.poll(buf); err != nil {
+			in.onError(fmt.Errorf("reading terminal: %w", err))
 			return
 		}
 	}
 }
 
-func (w *keyWatcher) poll(buf []byte) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.active.Load() {
+func (in *input) poll(buf []byte) error {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if !in.active.Load() {
 		return nil
 	}
-	fds := []unix.PollFd{{Fd: int32(w.fd), Events: unix.POLLIN}}
-	n, err := unix.Poll(fds, 100)
-	if errors.Is(err, unix.EINTR) || n == 0 {
+	wait := 100 * time.Millisecond
+	if in.filter != nil && in.filter.HoldFor() > 0 {
+		wait = in.filter.HoldFor()
+	}
+	fds := []unix.PollFd{{Fd: int32(in.fd), Events: unix.POLLIN}}
+	n, err := unix.Poll(fds, int(wait/time.Millisecond))
+	if errors.Is(err, unix.EINTR) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	k, err := unix.Read(w.fd, buf)
+	if n == 0 {
+		if in.filter != nil && in.filter.HoldFor() > 0 {
+			in.deliver(in.filter.Flush())
+		}
+		return nil
+	}
+	k, err := unix.Read(in.fd, buf)
 	if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) {
 		return nil
 	}
@@ -300,8 +361,25 @@ func (w *keyWatcher) poll(buf []byte) error {
 	if k == 0 {
 		return io.EOF
 	}
-	if isInterrupt(buf[:k]) {
-		w.onInterrupt()
+	if in.filter == nil {
+		if isInterrupt(buf[:k]) {
+			in.onInterrupt()
+		}
+		return nil
 	}
+	_, err = in.filter.Write(buf[:k])
+	in.deliver(err)
 	return nil
+}
+
+// deliver handles a failed write to the attempt's terminal: the attempt is
+// ending, so the keystrokes go nowhere until the next one.
+func (in *input) deliver(err error) {
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, os.ErrClosed) {
+		in.logf("passing keystrokes to ssh: %v", err)
+	}
+	in.filter = nil
 }

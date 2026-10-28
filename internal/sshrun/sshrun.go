@@ -51,6 +51,11 @@ func SessionArgv(ssh string, b Box, token string) []string {
 	return argv(ssh, []string{"-tt", "-e", "none"}, b.Host, b.command("attach", token))
 }
 
+// PasteArgv stores the image files framed on its stdin in the box's pasted dir.
+func PasteArgv(ssh string, b Box) []string {
+	return argv(ssh, []string{"-T"}, b.Host, b.command("paste-store"))
+}
+
 func ExecArgv(ssh string, b Box, token string, tty bool) []string {
 	opts := []string{"-T"}
 	if tty {
@@ -84,6 +89,10 @@ type Stdio struct {
 	Stdout io.Writer
 	// Stderr, when set, also receives ssh's stderr; it is always captured for Detail.
 	Stderr io.Writer
+	// Terminal is set when Stdin is a terminal of ssh's own. ssh then runs in
+	// a session of its own with it as the controlling terminal, so resizing
+	// the terminal signals ssh.
+	Terminal bool
 }
 
 // lastLine keeps the last non-empty line written to it.
@@ -129,6 +138,9 @@ func Run(ctx context.Context, argv []string, stdio Stdio, killAfter time.Duratio
 	stderr := &lastLine{}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin, cmd.Stdout = stdio.Stdin, stdio.Stdout
+	if stdio.Terminal {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	}
 	cmd.Stderr = stderr
 	if stdio.Stderr != nil {
 		cmd.Stderr = io.MultiWriter(stdio.Stderr, stderr)

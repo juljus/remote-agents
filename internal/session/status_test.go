@@ -151,10 +151,11 @@ func TestOutageKeepsOneRowAtWidth40(t *testing.T) {
 	}
 }
 
-func TestOutputGateClearsTheStatusBeforeTheSessionRedraws(t *testing.T) {
+func TestScreenOutClearsTheStatusBeforeTheSessionRedraws(t *testing.T) {
 	scr := &recordingScreen{screen: newScreen(40)}
 	o := newOutage(scr, 40, &fakeClock{}, time.Hour)
-	g := outputGate{w: scr, outage: o}
+	g := newScreenOut(scr, o, func() (int, error) { return 40, nil }, t.Logf)
+	defer g.close()
 	o.Down(timedOut)
 	fmt.Fprint(g, "redrawn")
 	if rows := scr.used(); len(rows) != 1 || rows[0] != "redrawn" {
@@ -233,5 +234,30 @@ func TestOutageLogsAnUnreadableWidthOnce(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "reconnecting") {
 		t.Fatalf("drew without a width: %q", out.String())
+	}
+}
+
+func TestNoticesWaitForTheOutputToPause(t *testing.T) {
+	var out lockedBuffer
+	o := newOutage(&recordingScreen{screen: newScreen(40)}, 40, &fakeClock{}, time.Hour)
+	g := newScreenOut(&out, o, func() (int, error) { return 40, nil }, t.Logf)
+	defer g.close()
+	g.notify("pasted image not uploaded: \x1b[31mdisk full")
+	// Output keeps the notice back until it pauses.
+	for range 6 {
+		fmt.Fprint(g, "x")
+		time.Sleep(noticeQuiet / 3)
+	}
+	if strings.Contains(out.String(), "remote-agents") {
+		t.Fatalf("notice drawn while output flowed: %q", out.String())
+	}
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(out.String(), "[remote-agents]") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	// It goes on the bottom row, cut to the width, with the cursor put back.
+	want := "xxxxxx\x1b7\x1b[999;1H\x1b[2K[remote-agents] pasted image not upload\x1b8"
+	if out.String() != want {
+		t.Fatalf("output %q, want %q", out.String(), want)
 	}
 }

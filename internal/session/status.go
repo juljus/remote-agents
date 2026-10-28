@@ -162,15 +162,3 @@ func (o *outage) End() bool {
 	<-stopped
 	return true
 }
-
-// outputGate passes the session's output through; output means the session
-// is back, so the status line is cleared before the first byte of the redraw.
-type outputGate struct {
-	w      io.Writer
-	outage *outage
-}
-
-func (g outputGate) Write(p []byte) (int, error) {
-	g.outage.End()
-	return g.w.Write(p)
-}

@@ -46,6 +46,15 @@ func TestLinkArgv(t *testing.T) {
 	}
 }
 
+func TestPasteArgv(t *testing.T) {
+	got := PasteArgv("ssh", testBox)
+	want := append(append([]string{"ssh"}, commonOptions...), "-T", "box",
+		`exec "$HOME/.local/share/ra-test/bin/remote-agents-box" paste-store`)
+	if !slices.Equal(got, want) {
+		t.Fatalf("argv =\n%q\nwant\n%q", got, want)
+	}
+}
+
 func TestTunnelArgv(t *testing.T) {
 	got := TunnelArgv("ssh", "box", 8250)
 	want := append(append([]string{"ssh"}, commonOptions...), "-W", "localhost:8250", "box")
