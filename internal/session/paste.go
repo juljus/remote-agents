@@ -34,7 +34,7 @@ func pasteRewriter(ctx context.Context, opts Options, out *screenOut) func([]byt
 			boxPaths, err = upload(ctx, opts, images)
 		}
 		if ctx.Err() != nil {
-			opts.Logf("%s: the link went down while a pasted image was uploading; the paste is lost with it", opts.Spec.Session)
+			opts.Logf("%s: the attempt ended while a pasted image was uploading; the paste went with it", opts.Spec.Session)
 			return content
 		}
 		if err != nil {

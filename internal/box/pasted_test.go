@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,4 +101,39 @@ var onePixelPNG = []byte{
 	0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0x50,
 	0x0f, 0x00, 0x04, 0x85, 0x01, 0x80, 0x84, 0xa9, 0x8c, 0x21, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
 	0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+}
+
+func TestAStalledUploadDoesNotHoldUpOthers(t *testing.T) {
+	l := testLayout(t)
+	stalled, feed := io.Pipe()
+	defer feed.Close()
+	go func() {
+		// The first frame arrives; the rest never does, as when the laptop's link dies.
+		_ = pastefile.WriteFrame(feed, onePixelPNG)
+	}()
+	stored := make(chan struct{})
+	go func() { _ = StorePasted(l, stalled, firstLine{stored: stored}, time.Now()) }()
+	<-stored
+	done := make(chan error, 1)
+	go func() { done <- StorePasted(l, frames(t, onePixelPNG), io.Discard, time.Now()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a stalled upload held up another store")
+	}
+}
+
+// firstLine closes stored once the first path is written to it.
+type firstLine struct{ stored chan struct{} }
+
+func (f firstLine) Write(p []byte) (int, error) {
+	select {
+	case <-f.stored:
+	default:
+		close(f.stored)
+	}
+	return len(p), nil
 }

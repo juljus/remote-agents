@@ -20,22 +20,18 @@ const pastedTTL = 7 * 24 * time.Hour
 
 // StorePasted keeps each image file the laptop sends on r in the pasted dir,
 // named by its content hash, and writes its path to w, one per line. Files
-// pasted more than pastedTTL ago go first; pasting one again keeps it. One
-// store runs at a time, so a prune never removes a file another just kept.
+// pasted more than pastedTTL ago go first; pasting one again keeps it. The
+// prune and each file's store hold the pasted lock, so a prune never removes
+// a file another store just kept; reading the laptop's upload does not, so a
+// stalled upload holds up no other.
 func StorePasted(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) error {
 	dir := l.PastedDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating pasted dir: %w", err)
 	}
-	return withFlock(l.PastedLock(), func() error {
-		if err := pruneOlderThan(dir, pastedTTL, now); err != nil {
-			return err
-		}
-		return storeFrames(dir, r, w, now)
-	})
-}
-
-func storeFrames(dir string, r io.Reader, w io.Writer, now time.Time) error {
+	if err := withFlock(l.PastedLock(), func() error { return pruneOlderThan(dir, pastedTTL, now) }); err != nil {
+		return err
+	}
 	frames := pastefile.NewReader(r)
 	for {
 		data, err := frames.Next()
@@ -45,8 +41,11 @@ func storeFrames(dir string, r io.Reader, w io.Writer, now time.Time) error {
 		if err != nil {
 			return err
 		}
-		path, err := storePasted(dir, data, now)
-		if err != nil {
+		var path string
+		if err := withFlock(l.PastedLock(), func() (err error) {
+			path, err = storePasted(dir, data, now)
+			return err
+		}); err != nil {
 			return err
 		}
 		if _, err := fmt.Fprintln(w, path); err != nil {
