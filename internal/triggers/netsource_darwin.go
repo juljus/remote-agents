@@ -1,6 +1,7 @@
 package triggers
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -84,60 +85,88 @@ func defaultRoute(zero route.Addr) (string, bool, error) {
 		return "", false, fmt.Errorf("opening routing socket: %w", err)
 	}
 	defer syscall.Close(fd)
-	timeout := syscall.NsecToTimeval(routeReplyTimeout.Nanoseconds())
-	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &timeout); err != nil {
-		return "", false, fmt.Errorf("setting routing socket timeout: %w", err)
-	}
-	seq := int(routeSeq.Add(1))
-	req := route.RouteMessage{
-		Version: syscall.RTM_VERSION,
-		Type:    syscall.RTM_GET,
-		ID:      uintptr(os.Getpid()),
-		Seq:     seq,
-		Addrs:   []route.Addr{syscall.RTAX_DST: zero, syscall.RTAX_NETMASK: zero},
-	}
-	msg, err := req.Marshal()
-	if err != nil {
-		return "", false, fmt.Errorf("encoding route request: %w", err)
-	}
-	if _, err := syscall.Write(fd, msg); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			return "", false, nil
+	pid := os.Getpid()
+	seq := 0
+	// request sends a new RTM_GET; it reports false when there is no default route.
+	request := func() (bool, error) {
+		seq = int(routeSeq.Add(1))
+		req := route.RouteMessage{
+			Version: syscall.RTM_VERSION,
+			Type:    syscall.RTM_GET,
+			ID:      uintptr(pid),
+			Seq:     seq,
+			Addrs:   []route.Addr{syscall.RTAX_DST: zero, syscall.RTAX_NETMASK: zero},
 		}
-		return "", false, fmt.Errorf("requesting default route: %w", err)
+		msg, err := req.Marshal()
+		if err != nil {
+			return false, fmt.Errorf("encoding route request: %w", err)
+		}
+		if _, err := syscall.Write(fd, msg); errors.Is(err, syscall.ESRCH) {
+			return false, nil
+		} else if err != nil {
+			return false, fmt.Errorf("requesting default route: %w", err)
+		}
+		return true, nil
 	}
-	// The socket also receives every routing change on the system; skip to the reply.
+	if exists, err := request(); !exists || err != nil {
+		return "", false, err
+	}
+	deadline := time.Now().Add(routeReplyTimeout)
 	buf := make([]byte, 4096)
 	for {
-		n, err := syscall.Read(fd, buf)
-		if errors.Is(err, syscall.EAGAIN) {
+		left := time.Until(deadline)
+		// A zero timeout would block for good.
+		if left < time.Millisecond {
 			return "", false, fmt.Errorf("no answer to the default route request within %s", routeReplyTimeout)
 		}
-		if err != nil {
+		timeout := syscall.NsecToTimeval(left.Nanoseconds())
+		if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &timeout); err != nil {
+			return "", false, fmt.Errorf("setting routing socket timeout: %w", err)
+		}
+		n, err := syscall.Read(fd, buf)
+		switch {
+		case errors.Is(err, syscall.EINTR), errors.Is(err, syscall.EAGAIN):
+			continue
+		case errors.Is(err, syscall.ENOBUFS):
+			// The socket also receives every routing change on the system; when
+			// they overflow it, the answer may be among the dropped messages.
+			if exists, err := request(); !exists || err != nil {
+				return "", false, err
+			}
+			continue
+		case err != nil:
 			return "", false, fmt.Errorf("reading default route: %w", err)
 		}
-		// Byte 3 of a routing message is its type.
-		if n < 4 || buf[3] != syscall.RTM_GET {
+		if !isReply(buf[:n], pid, seq) {
 			continue
 		}
 		msgs, err := route.ParseRIB(route.RIBTypeRoute, buf[:n])
 		if err != nil {
 			return "", false, fmt.Errorf("parsing default route: %w", err)
 		}
-		for _, m := range msgs {
-			rm, ok := m.(*route.RouteMessage)
-			if !ok || rm.Type != syscall.RTM_GET || rm.ID != req.ID || rm.Seq != seq {
-				continue
-			}
-			if rm.Err != nil {
-				return "", false, fmt.Errorf("default route: %w", rm.Err)
-			}
-			if rm.Flags&syscall.RTF_UP == 0 || len(rm.Addrs) <= syscall.RTAX_GATEWAY || rm.Addrs[syscall.RTAX_GATEWAY] == nil {
-				return "", false, nil
-			}
-			return fmt.Sprintf("if%d via %s", rm.Index, addrString(rm.Addrs[syscall.RTAX_GATEWAY])), true, nil
+		if len(msgs) != 1 {
+			return "", false, fmt.Errorf("default route answer holds %d messages", len(msgs))
 		}
+		rm, ok := msgs[0].(*route.RouteMessage)
+		if !ok {
+			return "", false, fmt.Errorf("default route answer is a %T", msgs[0])
+		}
+		if rm.Err != nil {
+			return "", false, fmt.Errorf("default route: %w", rm.Err)
+		}
+		if rm.Flags&syscall.RTF_UP == 0 || len(rm.Addrs) <= syscall.RTAX_GATEWAY || rm.Addrs[syscall.RTAX_GATEWAY] == nil {
+			return "", false, nil
+		}
+		return fmt.Sprintf("if%d via %s", rm.Index, addrString(rm.Addrs[syscall.RTAX_GATEWAY])), true, nil
 	}
+}
+
+// isReply reports whether msg is the answer to RTM_GET seq from pid, going by
+// the rt_msghdr fields: type at byte 3, pid at 16, seq at 20.
+func isReply(msg []byte, pid, seq int) bool {
+	return len(msg) >= 24 && msg[3] == syscall.RTM_GET &&
+		int(int32(binary.NativeEndian.Uint32(msg[16:]))) == pid &&
+		int(int32(binary.NativeEndian.Uint32(msg[20:]))) == seq
 }
 
 // routeReplyTimeout bounds the wait for the kernel's answer to an RTM_GET.

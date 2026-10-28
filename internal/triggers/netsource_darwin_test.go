@@ -6,7 +6,10 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+
+	"golang.org/x/net/route"
 )
 
 func TestSystemNetworkReadsDefaultRoute(t *testing.T) {
@@ -41,7 +44,8 @@ func routeGetDefault(t *testing.T, family string) string {
 	if err != nil {
 		t.Fatalf("interface %q: %v", fields["interface"], err)
 	}
-	gateway := fields["gateway"]
+	// route prints a link-local gateway with its zone, as fe80::1%en0.
+	gateway, _, _ := strings.Cut(fields["gateway"], "%")
 	if gateway == "" {
 		gateway = fmt.Sprintf("link%d", iface.Index)
 	}
@@ -61,5 +65,30 @@ func TestDefaultRoutesMatchRouteGet(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("defaultRoutes = %q, route get says %q", got, want)
+	}
+}
+
+func TestIsReplyMatchesTypePidAndSeq(t *testing.T) {
+	msg := func(typ, pid, seq int) []byte {
+		m := route.RouteMessage{Version: syscall.RTM_VERSION, Type: typ, ID: uintptr(pid), Seq: seq,
+			Addrs: []route.Addr{syscall.RTAX_DST: &route.Inet4Addr{}}}
+		b, err := m.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	if !isReply(msg(syscall.RTM_GET, 42, 7), 42, 7) {
+		t.Fatal("the answer was not recognised")
+	}
+	for name, m := range map[string][]byte{
+		"other type":    msg(syscall.RTM_ADD, 42, 7),
+		"other process": msg(syscall.RTM_GET, 43, 7),
+		"other request": msg(syscall.RTM_GET, 42, 8),
+		"truncated":     msg(syscall.RTM_GET, 42, 7)[:20],
+	} {
+		if isReply(m, 42, 7) {
+			t.Fatalf("%s taken for the answer", name)
+		}
 	}
 }
