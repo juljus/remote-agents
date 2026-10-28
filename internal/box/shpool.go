@@ -31,7 +31,10 @@ func shpoolAttachArgv(l boxlayout.Layout, session, token string) []string {
 
 // Attach runs shpool attached to the spec's session and returns its exit
 // code. shpool also exits 0 when another terminal takes the session over, so
-// a session still running after a clean exit is reported as taken over.
+// a session still running after a clean exit is reported as taken over. A
+// stale attempt of a run, one a newer attempt replaced, attaches nothing; if
+// one took the session between its claim and its attach, Attach takes the
+// session back.
 func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 	if s.Mode != spec.ModeSession && s.Mode != spec.ModeReattach {
 		return 1, fmt.Errorf("attach needs a session or reattach spec, got mode %q", s.Mode)
@@ -40,31 +43,48 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	argv := shpoolAttachArgv(l, s.Session, token)
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio.Stdin, stdio.Stdout, stdio.Stderr
-	err = cmd.Run()
-	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) {
-		return 1, fmt.Errorf("running shpool: %w", err)
-	}
-	code := cmd.ProcessState.ExitCode()
-	if code == 255 {
-		fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: the agent exited with status 255, reported as %d\r\n", spec.ExitAgent255)
-		return spec.ExitAgent255, nil
-	}
-	if code != 0 {
-		return code, nil
-	}
-	running, err := outlives(l, s.Session, takeoverGrace)
+	claimed, err := claimAttachment(l, s)
 	if err != nil {
 		return 1, err
 	}
-	if running {
-		fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: another terminal took over %s; it keeps running\r\n", s.Session)
-		return spec.ExitTakenOver, nil
+	if !claimed {
+		fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: a newer connection attempt holds %s\r\n", s.Session)
+		return spec.ExitStaleAttempt, nil
 	}
-	return 0, nil
+	argv := shpoolAttachArgv(l, s.Session, token)
+	for {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio.Stdin, stdio.Stdout, stdio.Stderr
+		err = cmd.Run()
+		var exitErr *exec.ExitError
+		if err != nil && !errors.As(err, &exitErr) {
+			return 1, fmt.Errorf("running shpool: %w", err)
+		}
+		code := cmd.ProcessState.ExitCode()
+		if code == 255 {
+			fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: the agent exited with status 255, reported as %d\r\n", spec.ExitAgent255)
+			return spec.ExitAgent255, nil
+		}
+		if code != 0 {
+			return code, nil
+		}
+		running, err := outlives(l, s.Session, takeoverGrace)
+		if err != nil {
+			return 1, err
+		}
+		if !running {
+			return 0, nil
+		}
+		// Every other attachment claims the session first, except a stale attempt of this run.
+		owns, err := ownsAttachment(l, s)
+		if err != nil {
+			return 1, err
+		}
+		if !owns {
+			fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: another terminal took over %s; it keeps running\r\n", s.Session)
+			return spec.ExitTakenOver, nil
+		}
+	}
 }
 
 // takeoverGrace covers shpool still tearing down a session whose agent just exited.

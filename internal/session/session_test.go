@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -285,5 +286,36 @@ func TestNoResumeHintUnlessTheAgentExited(t *testing.T) {
 	h.waitFor(t, "reattach with")
 	if strings.Contains(h.output(), "Resume on the box") {
 		t.Fatalf("hint printed on detach: %q", h.output())
+	}
+}
+
+func TestEachAttemptCarriesTheNextAttemptNumber(t *testing.T) {
+	h := newPTY(t)
+	log := filepath.Join(t.TempDir(), "tokens")
+	record := `for a; do last="$a"; done; echo "${last##* }" >> ` + log + `; `
+	ssh := fakeSSH(t,
+		record+`echo "client_loop: send disconnect: Broken pipe" >&2; exit 255`,
+		// A stale attempt's refusal is a lost link, not the agent's exit.
+		record+`exit `+strconv.Itoa(spec.ExitStaleAttempt),
+		record+`echo done; exit 0`)
+	if r := wait(t, start(testOptions(ssh, h))); r.err != nil || r.code != 0 {
+		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := strings.Fields(string(data))
+	if len(tokens) != 3 {
+		t.Fatalf("tokens %q", tokens)
+	}
+	for i, token := range tokens {
+		s, err := spec.Decode(token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.Attempt != i+1 || s.RunID != testOptions(ssh, h).Spec.RunID {
+			t.Fatalf("attempt %d sent run %s attempt %d", i+1, s.RunID, s.Attempt)
+		}
 	}
 }

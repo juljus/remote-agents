@@ -34,13 +34,18 @@ func LinkHold(ctx context.Context, l boxlayout.Layout, stdin io.Reader, stdout i
 func lockPath(socket string) string { return socket + ".lock" }
 
 func withLock(socket string, fn func() error) error {
-	f, err := os.OpenFile(lockPath(socket), os.O_CREATE|os.O_RDWR, 0o600)
+	return withFlock(lockPath(socket), fn)
+}
+
+// withFlock runs fn holding an exclusive flock on the file at path.
+func withFlock(path string, fn func() error) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return fmt.Errorf("opening socket lock: %w", err)
+		return fmt.Errorf("opening %s: %w", filepath.Base(path), err)
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("locking socket: %w", err)
+		return fmt.Errorf("locking %s: %w", filepath.Base(path), err)
 	}
 	return fn()
 }

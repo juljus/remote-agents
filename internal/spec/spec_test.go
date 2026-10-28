@@ -12,6 +12,7 @@ func validSession() Spec {
 		Mode:      ModeSession,
 		Session:   "claude-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
 		RunID:     "11111111-2222-4333-8444-555555555555",
+		Attempt:   2,
 		Workdir:   "/home/agent/work",
 		Argv:      []string{"claude", "--session-id", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "it's \"quoted\" $HOME"},
 		Env:       map[string]string{"TERM": "xterm-256color"},
@@ -54,6 +55,12 @@ func TestValidate(t *testing.T) {
 		"blank resume":      func(s *Spec) { s.Claude.Resume = []string{""} },
 		"bad resumes":       func(s *Spec) { s.Claude.Resumes = "x" },
 		"reattach claude":   func(s *Spec) { s.Mode, s.Argv, s.RunID = ModeReattach, nil, "" },
+		"negative attempt":  func(s *Spec) { s.Attempt = -1 },
+		"exec attempt": func(s *Spec) {
+			s.Mode, s.Session, s.RunID, s.Claude, s.Attempt = ModeExec, "", "", nil, 1
+		},
+		"reattach bad run id": func(s *Spec) { s.Mode, s.Argv, s.Claude, s.RunID = ModeReattach, nil, nil, "nope" },
+		"attempt without run": func(s *Spec) { s.Mode, s.Argv, s.Claude, s.RunID, s.Attempt = ModeReattach, nil, nil, "", 2 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -66,6 +73,17 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("Encode accepted an invalid spec")
 			}
 		})
+	}
+}
+
+func TestValidReattach(t *testing.T) {
+	for _, s := range []Spec{
+		{Mode: ModeReattach, Session: "claude-x"},
+		{Mode: ModeReattach, Session: "claude-x", RunID: "11111111-2222-4333-8444-555555555555", Attempt: 3},
+	} {
+		if err := s.Validate(); err != nil {
+			t.Fatalf("Validate(%+v): %v", s, err)
+		}
 	}
 }
 

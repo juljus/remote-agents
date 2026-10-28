@@ -75,8 +75,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("reading terminal state: %w", err)
 	}
-	token, err := opts.Spec.Encode()
-	if err != nil {
+	if err := opts.Spec.Validate(); err != nil {
 		return 0, err
 	}
 
@@ -116,12 +115,24 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		logf:     opts.Logf,
 	}
 	obs := &observer{opts: opts, fd: fd, keys: keys, status: status}
-	argv := sshrun.SessionArgv(opts.SSH, opts.Box, token)
 	// ssh's stderr is only captured, so the session's output is the one other writer to the terminal.
 	stdout := outputGate{w: opts.Stdout, outage: status}
+	attempts := 0
 	loop := reconnect.Loop{
+		// The loop runs one attempt at a time; each is numbered so the box can tell a late one from its successor.
 		Attempt: func(ctx context.Context) reconnect.Result {
-			return sshrun.Run(ctx, argv, sshrun.Stdio{Stdin: opts.Stdin, Stdout: stdout}, 2*time.Second)
+			attempts++
+			s := opts.Spec
+			s.Attempt = attempts
+			token, err := s.Encode()
+			if err != nil {
+				return reconnect.Result{Err: err}
+			}
+			res := sshrun.Run(ctx, sshrun.SessionArgv(opts.SSH, opts.Box, token), sshrun.Stdio{Stdin: opts.Stdin, Stdout: stdout}, 2*time.Second)
+			if !res.Transport && res.ExitCode == spec.ExitStaleAttempt {
+				res.Transport, res.Detail = true, "a newer connection attempt holds the session"
+			}
+			return res
 		},
 		Triggers:    opts.Triggers,
 		Interval:    time.Second,

@@ -327,7 +327,7 @@ func attach(name string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	s := spec.Spec{Mode: spec.ModeReattach, Session: name}
+	s := spec.Spec{Mode: spec.ModeReattach, Session: name, RunID: uuid.NewString()}
 	return runSession(e, s, "remote-agents attach "+name, hooks, entrypoint.Name(agentName), resume.NewTracker("", false))
 }
 

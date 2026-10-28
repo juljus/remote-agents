@@ -131,7 +131,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		return fail(fmt.Errorf("launch needs a session spec, got mode %q", s.Mode))
 	}
 	now := time.Now()
-	for _, dir := range []string{l.EndedDir(), l.ReapedDir(), l.ReapedSessionsDir()} {
+	for _, dir := range []string{l.EndedDir(), l.ReapedDir(), l.ReapedSessionsDir(), l.AttachmentsDir()} {
 		if err := pruneOld(dir, now); err != nil {
 			return fail(err)
 		}

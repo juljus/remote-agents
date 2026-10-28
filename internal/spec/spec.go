@@ -29,7 +29,12 @@ type Spec struct {
 	Session string `json:"session,omitempty"`
 	// RunID identifies one laptop-side run, so a reconnect can tell that the
 	// session it created has already ended.
-	RunID   string            `json:"run_id,omitempty"`
+	RunID string `json:"run_id,omitempty"`
+	// Attempt numbers the run's connection attempts from 1. The box refuses an
+	// attempt older than one it already attached, which a delayed connection
+	// would otherwise use to take the session from its successor. 0 leaves the
+	// attempt unnumbered: it attaches unchecked.
+	Attempt int               `json:"attempt,omitempty"`
 	Workdir string            `json:"workdir,omitempty"`
 	Argv    []string          `json:"argv,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
@@ -64,6 +69,8 @@ func (c *Claude) validate() error {
 const (
 	// ExitTakenOver: another terminal attached to the session, which keeps running.
 	ExitTakenOver = 75
+	// ExitStaleAttempt: a newer connection attempt of the same run holds the session.
+	ExitStaleAttempt = 76
 	// ExitAgent255 stands in for an agent exit status of 255, which ssh reserves for its own failures.
 	ExitAgent255 = 254
 	// ExitNotListening: nothing listens on the port that remote-agents-box listening checked.
@@ -104,6 +111,9 @@ func (s Spec) Validate() error {
 		if _, err := uuid.Parse(s.RunID); err != nil {
 			return fmt.Errorf("invalid run id %q: %w", s.RunID, err)
 		}
+		if err := s.validateAttempt(); err != nil {
+			return err
+		}
 		if s.Claude != nil {
 			if err := s.Claude.validate(); err != nil {
 				return err
@@ -114,17 +124,35 @@ func (s Spec) Validate() error {
 		if err := ValidSessionName(s.Session); err != nil {
 			return err
 		}
+		if err := s.validateAttempt(); err != nil {
+			return err
+		}
+		if s.RunID != "" {
+			if _, err := uuid.Parse(s.RunID); err != nil {
+				return fmt.Errorf("invalid run id %q: %w", s.RunID, err)
+			}
+		}
 		if len(s.Argv) != 0 || s.Claude != nil {
 			return errors.New("reattach spec must not carry a command")
 		}
 		return nil
 	case ModeExec:
-		if s.Session != "" || s.RunID != "" || s.Claude != nil {
+		if s.Session != "" || s.RunID != "" || s.Attempt != 0 || s.Claude != nil {
 			return errors.New("exec spec must not name a session")
 		}
 		return s.validateRun()
 	}
 	return fmt.Errorf("unknown mode %q", s.Mode)
+}
+
+func (s Spec) validateAttempt() error {
+	if s.Attempt < 0 {
+		return fmt.Errorf("invalid attempt %d", s.Attempt)
+	}
+	if s.Attempt > 0 && s.RunID == "" {
+		return errors.New("a numbered attempt needs a run id")
+	}
+	return nil
 }
 
 func (s Spec) validateRun() error {
