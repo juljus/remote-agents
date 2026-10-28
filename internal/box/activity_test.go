@@ -84,7 +84,13 @@ func TestActivityHooksJoinTheSettingsClaudeApplies(t *testing.T) {
 		"separate value": {[]string{"claude", "--settings", "{}", "--settings", cmuxSettings, "fix it"},
 			func(a []string) string { return a[4] }},
 		"joined": {[]string{"claude", "--settings=" + cmuxSettings, "fix it"},
-			func(a []string) string { return strings.TrimPrefix(a[1], "--settings=") }},
+			func(a []string) string {
+				value, ok := strings.CutPrefix(a[1], "--settings=")
+				if !ok {
+					t.Fatalf("joined --settings lost its option: %q", a[1])
+				}
+				return value
+			}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			argv, err := withActivityHooks(l, tc.argv, "/home/agent/work")

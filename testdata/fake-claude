@@ -12,11 +12,14 @@ act=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --session-id|--resume|-r) id="$2"; shift 2 ;;
-    --settings)
+    --settings|--settings=*)
       # Like Claude, apply only the last --settings. The box's activity hooks run '<box binary>' activity.
+      settings="${1#--settings=}"
+      if [ "$1" = --settings ]; then settings="$2"; shift; fi
+      shift
       act=""
-      case "$2" in *"remote-agents-box' activity"*) act="${2%%remote-agents-box\' activity*}"; act="${act##*\"command\":\"}remote-agents-box'" ;; esac
-      shift 2 ;;
+      case "$settings" in *"remote-agents-box' activity"*) act="${settings%%remote-agents-box\' activity*}"; act="${act##*\"command\":\"}remote-agents-box'" ;; esac
+      ;;
     *) shift ;;
   esac
 done
