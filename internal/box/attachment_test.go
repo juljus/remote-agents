@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -84,7 +85,7 @@ for a in "$@"; do
     attach) echo attach >> '` + log + `'; ` + onAttach + `; exit 0 ;;
     list)
       n=$(wc -l < '` + log + `' 2>/dev/null || echo 0)
-      if [ "$n" -lt ` + string(rune('0'+listedUntil)) + ` ]; then
+      if [ "$n" -lt ` + strconv.Itoa(listedUntil) + ` ]; then
         echo '{"sessions":[{"name":"` + name + `","started_at_unix_ms":1,"status":"Attached"}]}'
       else
         echo '{"sessions":[]}'
@@ -160,5 +161,17 @@ func TestAttachReportsATakeoverByAnotherRun(t *testing.T) {
 	}
 	if n := attaches(t, log); n != 1 || !strings.Contains(stderr.String(), "another terminal took over") {
 		t.Fatalf("attaches %d, stderr %q", n, stderr.String())
+	}
+}
+
+func TestAttachReportsAgentExitsTheBoxReservesAs254(t *testing.T) {
+	for _, code := range []int{spec.ExitTakenOver, spec.ExitStaleAttempt, 255} {
+		l := testLayout(t)
+		fakeShpool(t, l, 0, "exit "+strconv.Itoa(code))
+		var stderr bytes.Buffer
+		got, err := Attach(l, attempt(runID, 1), IO{Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &stderr})
+		if err != nil || got != spec.ExitAgentReserved || !strings.Contains(stderr.String(), "status "+strconv.Itoa(code)+",") {
+			t.Fatalf("agent exit %d: Attach = %d, %v; stderr %q", code, got, err, stderr.String())
+		}
 	}
 }

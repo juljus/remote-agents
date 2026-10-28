@@ -71,8 +71,10 @@ const (
 	ExitTakenOver = 75
 	// ExitStaleAttempt: a newer connection attempt of the same run holds the session.
 	ExitStaleAttempt = 76
-	// ExitAgent255 stands in for an agent exit status of 255, which ssh reserves for its own failures.
-	ExitAgent255 = 254
+	// ExitAgentReserved stands in for an agent exit status that means something
+	// else on the link: 255, which ssh reserves for its own failures, and the
+	// box's own codes above.
+	ExitAgentReserved = 254
 	// ExitNotListening: nothing listens on the port that remote-agents-box listening checked.
 	ExitNotListening = 3
 )

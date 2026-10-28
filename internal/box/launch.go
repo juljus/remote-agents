@@ -131,10 +131,13 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		return fail(fmt.Errorf("launch needs a session spec, got mode %q", s.Mode))
 	}
 	now := time.Now()
-	for _, dir := range []string{l.EndedDir(), l.ReapedDir(), l.ReapedSessionsDir(), l.AttachmentsDir()} {
+	for _, dir := range []string{l.EndedDir(), l.ReapedDir(), l.ReapedSessionsDir()} {
 		if err := pruneOld(dir, now); err != nil {
 			return fail(err)
 		}
+	}
+	if err := withAttachments(l, func() error { return pruneOld(l.AttachmentsDir(), now) }); err != nil {
+		return fail(err)
 	}
 	m, ended, err := readMarker(l, s.RunID)
 	if err != nil {

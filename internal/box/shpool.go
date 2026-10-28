@@ -61,9 +61,9 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 			return 1, fmt.Errorf("running shpool: %w", err)
 		}
 		code := cmd.ProcessState.ExitCode()
-		if code == 255 {
-			fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: the agent exited with status 255, reported as %d\r\n", spec.ExitAgent255)
-			return spec.ExitAgent255, nil
+		if code == 255 || code == spec.ExitTakenOver || code == spec.ExitStaleAttempt {
+			fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: the agent exited with status %d, reported as %d\r\n", code, spec.ExitAgentReserved)
+			return spec.ExitAgentReserved, nil
 		}
 		if code != 0 {
 			return code, nil
@@ -75,7 +75,9 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 		if !running {
 			return 0, nil
 		}
-		// Every other attachment claims the session first, except a stale attempt of this run.
+		// Every Attach claims the session first, except a stale attempt of this run.
+		// Anything that attaches without Attach, such as shpool attach by hand,
+		// loses the session to this attachment again.
 		owns, err := ownsAttachment(l, s)
 		if err != nil {
 			return 1, err

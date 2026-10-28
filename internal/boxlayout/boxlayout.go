@@ -70,8 +70,8 @@ func (l Layout) EndedDir() string                { return l.state("ended") }
 func (l Layout) ClaudeBin() string               { return filepath.Join(l.Home, ClaudeBinDir) }
 func (l Layout) EndedMarker(runID string) string { return filepath.Join(l.EndedDir(), runID+".json") }
 
-// The latest numbered connection attempt that attached to each session, and
-// the lock that orders their claims.
+// The latest connection attempt that claimed each session, and the lock that
+// orders the claims.
 func (l Layout) AttachmentsDir() string  { return l.state("attachments") }
 func (l Layout) AttachmentsLock() string { return l.state("attachments.lock") }
 func (l Layout) Attachment(session string) string {
