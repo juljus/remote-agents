@@ -259,15 +259,21 @@ func runSession(e env, s spec.Spec, hint string, hooks *hookexec.Executor, entry
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	trig := make(chan string, 1)
-	watchErr := make(chan error, 1)
-	go func() { watchErr <- triggers.WatchSystem(ctx, trig) }()
-
 	logger, closeLog, err := sessionLogger(e.paths)
 	if err != nil {
 		return 1, err
 	}
 	defer closeLog()
+	trig := make(chan string, 1)
+	watchErr := make(chan error, 1)
+	go func() {
+		err := triggers.WatchSystem(ctx, trig)
+		// The session goes on without reconnect triggers; the error reaches the screen only at exit.
+		if err != nil && !errors.Is(err, context.Canceled) {
+			logger.Printf("%s: network watcher stopped, wake and network changes no longer reconnect: %v", s.Session, err)
+		}
+		watchErr <- err
+	}()
 	opts := session.Options{
 		SSH: e.ssh, Box: e.box(), Spec: s, ReattachHint: hint, Triggers: trig,
 		ExitHint: func() string { return tracker.Hint(entry) },
