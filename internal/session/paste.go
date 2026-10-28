@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,10 @@ func pasteRewriter(ctx context.Context, opts Options, out *screenOut) func([]byt
 		var boxPaths []string
 		if err == nil {
 			boxPaths, err = upload(ctx, opts, images)
+		}
+		if ctx.Err() != nil {
+			opts.Logf("%s: the link went down while a pasted image was uploading; the paste is lost with it", opts.Spec.Session)
+			return content
 		}
 		if err != nil {
 			opts.Logf("%s: pasted image not uploaded, its laptop path went in as text: %v", opts.Spec.Session, err)
@@ -68,8 +73,8 @@ func upload(ctx context.Context, opts Options, images []paste.Image) ([]string, 
 		return nil, fmt.Errorf("box: %s", strings.TrimPrefix(strings.TrimSpace(stderr.String()), "remote-agents-box: "))
 	}
 	paths := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
-	if len(paths) != len(images) {
-		return nil, fmt.Errorf("the box stored %d of %d images: %q", len(paths), len(images), stdout.String())
+	if len(paths) != len(images) || slices.ContainsFunc(paths, func(p string) bool { return !strings.HasPrefix(p, "/") }) {
+		return nil, fmt.Errorf("the box answered %q for %d images", stdout.String(), len(images))
 	}
 	return paths, nil
 }
@@ -77,7 +82,7 @@ func upload(ctx context.Context, opts Options, images []paste.Image) ([]string, 
 // noticeQuiet is how long the agent's output must pause before a notice is drawn.
 const noticeQuiet = 150 * time.Millisecond
 
-// noticeWait bounds the wait for that pause.
+// noticeWait bounds the wait for that pause; a notice that finds none is dropped.
 const noticeWait = 2 * time.Second
 
 // screenOut is the one writer of the session's output to the terminal. It
@@ -92,6 +97,7 @@ type screenOut struct {
 	mu        sync.Mutex
 	lastWrite time.Time
 	stop      chan struct{}
+	stopOnce  sync.Once
 	notices   sync.WaitGroup
 }
 
@@ -121,12 +127,19 @@ func (s *screenOut) notify(text string) {
 			case <-time.After(noticeQuiet / 3):
 			}
 			s.mu.Lock()
-			if time.Since(s.lastWrite) >= noticeQuiet || time.Now().After(deadline) {
+			quiet := time.Since(s.lastWrite) >= noticeQuiet
+			if quiet {
 				s.draw(text)
-				s.mu.Unlock()
-				return
 			}
 			s.mu.Unlock()
+			if quiet {
+				return
+			}
+			// Drawing into a flow of output could split an escape sequence.
+			if time.Now().After(deadline) {
+				s.logf("notice not shown, the output never paused: %s", text)
+				return
+			}
 		}
 	}()
 }
@@ -147,8 +160,8 @@ func (s *screenOut) draw(text string) {
 	}
 }
 
-// close drops the notices not drawn yet.
+// close drops the notices not drawn yet; later calls do nothing.
 func (s *screenOut) close() {
-	close(s.stop)
+	s.stopOnce.Do(func() { close(s.stop) })
 	s.notices.Wait()
 }

@@ -162,6 +162,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	code, loopErr := loop.Run(ctx)
 	keys.stop()
+	stdout.close()
 	statusShown := status.End()
 	var d detached
 	isDetach := loopErr != nil && errors.As(context.Cause(ctx), &d)
@@ -254,18 +255,24 @@ func (o *observer) AttemptEnded(_ int, r reconnect.Result) {
 
 func (o *observer) Triggered(string) {}
 
-// runAttempt runs one ssh connection on a terminal of its own, which the
-// user's keystrokes reach through the paste filter.
+// runAttempt runs one ssh connection on a terminal of its own. Until the
+// session draws, keystrokes are dropped and Ctrl+C detaches, as between
+// attempts; then they reach it through the paste filter.
 func runAttempt(ctx context.Context, opts Options, keys *input, attached *current, out *screenOut, token string) reconnect.Result {
 	t, err := openInner(opts.Stdin, out, opts.Logf)
 	if err != nil {
 		return reconnect.Result{Err: err}
 	}
 	attached.set(t)
+	// A resize between sizing the terminal and setting it would be lost.
+	attached.resize()
 	pasteCtx, cancelPaste := context.WithCancel(ctx)
 	defer cancelPaste()
-	keys.forward(&paste.Filter{W: t, Rewrite: pasteRewriter(pasteCtx, opts, out)})
-	res := sshrun.Run(ctx, sshrun.SessionArgv(opts.SSH, opts.Box, token), sshrun.Stdio{Stdin: t.slave, Stdout: out, Terminal: true}, 2*time.Second)
+	keys.watch()
+	drawn := &firstWrite{w: out, first: func() {
+		keys.forward(&paste.Filter{W: t, Rewrite: pasteRewriter(pasteCtx, opts, out)})
+	}}
+	res := sshrun.Run(ctx, sshrun.SessionArgv(opts.SSH, opts.Box, token), sshrun.Stdio{Stdin: t.slave, Stdout: drawn, Terminal: true}, 2*time.Second)
 	attached.set(nil)
 	// An upload or a keystroke write in flight holds the input; both end here.
 	cancelPaste()
@@ -274,6 +281,18 @@ func runAttempt(ctx context.Context, opts Options, keys *input, attached *curren
 	}
 	keys.stop()
 	return res
+}
+
+// firstWrite calls first before the first write passes through to w.
+type firstWrite struct {
+	w     io.Writer
+	first func()
+	once  sync.Once
+}
+
+func (f *firstWrite) Write(p []byte) (int, error) {
+	f.once.Do(f.first)
+	return f.w.Write(p)
 }
 
 // input reads the user's terminal while the session runs. During an attempt

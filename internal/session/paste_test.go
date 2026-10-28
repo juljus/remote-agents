@@ -134,3 +134,38 @@ func TestKeystrokesAfterAPasteWaitForItsUpload(t *testing.T) {
 		t.Fatalf("output %q lacks %q", h.output(), want)
 	}
 }
+
+func TestCtrlCBeforeTheSessionDrawsDetachesWithoutReachingIt(t *testing.T) {
+	h := newPTY(t)
+	got := filepath.Join(t.TempDir(), "got")
+	ssh := fakeBox(t, `sleep 1; echo ready; dd bs=1 count=1 of='`+got+`' 2>/dev/null; sleep 5`, `exit 9`)
+	done := start(testOptions(ssh, h))
+	time.Sleep(200 * time.Millisecond)
+	if _, err := h.master.Write([]byte("\x03")); err != nil {
+		t.Fatal(err)
+	}
+	if r := wait(t, done); r.err != nil || r.code != 130 {
+		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
+	}
+	if data, err := os.ReadFile(got); err == nil && len(data) > 0 {
+		t.Fatalf("the session got %q", data)
+	}
+}
+
+func TestALoneEscReachesTheSessionPromptly(t *testing.T) {
+	h := newPTY(t)
+	ssh := fakeBox(t, `echo ready; c=$(dd bs=1 count=1 2>/dev/null | od -An -c); echo "key[$c]"; exit 0`, `exit 9`)
+	done := start(testOptions(ssh, h))
+	h.waitFor(t, "ready")
+	sent := time.Now()
+	if _, err := h.master.Write([]byte("\x1b")); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor(t, "033")
+	if elapsed := time.Since(sent); elapsed > 300*time.Millisecond {
+		t.Fatalf("Esc took %s", elapsed)
+	}
+	if r := wait(t, done); r.err != nil || r.code != 0 {
+		t.Fatalf("Run = %d, %v", r.code, r.err)
+	}
+}
