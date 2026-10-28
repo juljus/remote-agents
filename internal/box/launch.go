@@ -295,9 +295,12 @@ func readMarker(l boxlayout.Layout, runID string) (marker, bool, error) {
 	return m, found, err
 }
 
-// pruneOld removes the files in dir older than markerTTL. A file another
+// pruneOld removes the files in dir older than markerTTL.
+func pruneOld(dir string, now time.Time) error { return pruneOlderThan(dir, markerTTL, now) }
+
+// pruneOlderThan removes the files in dir older than ttl. A file another
 // process removes or renames meanwhile is no longer this one's to prune.
-func pruneOld(dir string, now time.Time) error {
+func pruneOlderThan(dir string, ttl time.Duration, now time.Time) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -313,7 +316,7 @@ func pruneOld(dir string, now time.Time) error {
 		if err != nil {
 			return fmt.Errorf("stat marker %s: %w", e.Name(), err)
 		}
-		if now.Sub(info.ModTime()) > markerTTL {
+		if now.Sub(info.ModTime()) > ttl {
 			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("pruning marker: %w", err)
 			}

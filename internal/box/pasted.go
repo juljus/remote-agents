@@ -15,17 +15,27 @@ import (
 	"remote-agents/internal/pastefile"
 )
 
+// pastedTTL is how long a pasted file stays after its last paste.
+const pastedTTL = 7 * 24 * time.Hour
+
 // StorePasted keeps each image file the laptop sends on r in the pasted dir,
 // named by its content hash, and writes its path to w, one per line. Files
-// pasted more than markerTTL ago go first; pasting one again keeps it.
+// pasted more than pastedTTL ago go first; pasting one again keeps it. One
+// store runs at a time, so a prune never removes a file another just kept.
 func StorePasted(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) error {
 	dir := l.PastedDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating pasted dir: %w", err)
 	}
-	if err := pruneOld(dir, now); err != nil {
-		return err
-	}
+	return withFlock(l.PastedLock(), func() error {
+		if err := pruneOlderThan(dir, pastedTTL, now); err != nil {
+			return err
+		}
+		return storeFrames(dir, r, w, now)
+	})
+}
+
+func storeFrames(dir string, r io.Reader, w io.Writer, now time.Time) error {
 	frames := pastefile.NewReader(r)
 	for {
 		data, err := frames.Next()
