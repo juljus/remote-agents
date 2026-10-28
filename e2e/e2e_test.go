@@ -352,6 +352,13 @@ func (tm *term) expectAfter(mark int, pattern string, timeout time.Duration) []s
 	}
 }
 
+// drawnAfter waits for a fake-claude session to draw its screen after mark.
+// Keys typed before a session draws, while it is still connecting, are dropped.
+func (tm *term) drawnAfter(mark int) {
+	tm.t.Helper()
+	tm.expectAfter(mark, `fake-claude session=`, 20*time.Second)
+}
+
 func (tm *term) send(s string) {
 	tm.t.Helper()
 	if _, err := tm.master.Write([]byte(s)); err != nil {
@@ -450,7 +457,7 @@ func TestSessionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	tm.expectAfter(mark, `reconnecting`, 5*time.Second)
-	time.Sleep(3 * time.Second)
+	tm.drawnAfter(mark)
 	mark = len(tm.text())
 	tm.send("whoami\r")
 	if got := tm.expectAfter(mark, `fake-claude pid=(\d+)`, 15*time.Second)[1]; got != pid {
@@ -499,7 +506,7 @@ func TestDetachWhileDownThenResumeReattaches(t *testing.T) {
 	block(t, false)
 
 	again := start(t, "rfakeclaude", "--resume", id)
-	time.Sleep(2 * time.Second)
+	again.drawnAfter(0)
 	again.send("whoami\r")
 	if got := again.expect(`fake-claude pid=(\d+)`, 20*time.Second)[1]; got != pid {
 		t.Fatalf("resume started a second agent: pid %s -> %s", pid, got)
@@ -549,7 +556,7 @@ func TestClosingTheTerminalDetaches(t *testing.T) {
 	ls.wait(10 * time.Second)
 
 	back := start(t, "remote-agents", "attach", "fakeclaude-"+id)
-	time.Sleep(2 * time.Second)
+	back.drawnAfter(0)
 	back.send("exit 0\r")
 	back.expect(`claude --resume `+id, 15*time.Second)
 	if code := back.wait(10 * time.Second); code != 0 {
@@ -910,7 +917,7 @@ func TestResumeFromAnotherTerminalTakesOver(t *testing.T) {
 	if code := first.wait(10 * time.Second); code != 75 {
 		t.Fatalf("first terminal exit %d, want 75", code)
 	}
-	time.Sleep(time.Second)
+	second.drawnAfter(0)
 	second.send("whoami\r")
 	if got := second.expect(`fake-claude pid=(\d+)`, 15*time.Second)[1]; got != pid {
 		t.Fatalf("takeover started a second agent: %s -> %s", pid, got)
@@ -1103,7 +1110,7 @@ func TestToolProcessesKeepADetachedSessionRunning(t *testing.T) {
 			}
 			mark := len(tm.text())
 			block(t, false)
-			time.Sleep(2 * time.Second)
+			tm.drawnAfter(mark)
 			tm.send("whoami\r")
 			if got := tm.expectAfter(mark, `fake-claude pid=(\d+)`, 15*time.Second)[1]; got != pid {
 				t.Fatalf("reattached to pid %s, want %s", got, pid)
