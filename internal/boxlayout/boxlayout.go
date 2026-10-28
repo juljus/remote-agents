@@ -78,6 +78,9 @@ func (l Layout) Attachment(session string) string {
 	return filepath.Join(l.AttachmentsDir(), session+".json")
 }
 
+// PastedDir holds the laptop image files pasted into sessions, by content hash.
+func (l Layout) PastedDir() string { return l.state("pasted") }
+
 // The reaper's files: hook reports and the launcher's status per shpool
 // session, records of reaped Claude sessions, its log and its config.
 func (l Layout) ActivityDir() string { return l.state("activity") }

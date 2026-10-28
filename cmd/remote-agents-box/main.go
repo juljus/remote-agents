@@ -77,7 +77,7 @@ func runShim(name string, layout boxlayout.Layout, stdio box.IO) int {
 // runCommand returns the process exit code; launch passes the agent's code through.
 func runCommand(layout boxlayout.Layout, stdio box.IO, args []string) (int, error) {
 	if len(args) == 0 {
-		return 1, errors.New("usage: remote-agents-box attach|launch|exec <spec> | ls | link-hold | activity | listening <port>")
+		return 1, errors.New("usage: remote-agents-box attach|launch|exec <spec> | ls | link-hold | activity | listening <port> | paste-store")
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
@@ -124,6 +124,11 @@ func runCommand(layout boxlayout.Layout, stdio box.IO, args []string) (int, erro
 			return 1, fmt.Errorf("invalid shell pid %q", rest[1])
 		}
 		return 0, box.Forget(layout, rest[0], shell, forgetTimeout)
+	case "paste-store":
+		if len(rest) != 0 {
+			return 1, errors.New("usage: remote-agents-box paste-store")
+		}
+		return 0, box.StorePasted(layout, os.Stdin, os.Stdout, time.Now())
 	case "listening":
 		if len(rest) != 1 {
 			return 1, errors.New("usage: remote-agents-box listening <port>")
