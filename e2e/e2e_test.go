@@ -9,6 +9,8 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -857,6 +859,32 @@ func TestRealClaudePastesLaptopClipboardImage(t *testing.T) {
 	mark := len(tm.text())
 	tm.send("\x16")
 	tm.expectCompact(mark, "[Image #1]", 15*time.Second)
+	tm.send("\x03")
+	time.Sleep(300 * time.Millisecond)
+	tm.send("\x03")
+	time.Sleep(300 * time.Millisecond)
+	tm.send("\x03")
+	tm.wait(15 * time.Second)
+}
+
+// A pasted laptop image path, as cmux pastes a clipboard image or a terminal a
+// dropped file, reaches Claude on the box as the path of an uploaded copy.
+func TestRealClaudeAttachesAPastedLaptopImagePath(t *testing.T) {
+	shot := filepath.Join(t.TempDir(), "pasted shot.png")
+	if err := os.WriteFile(shot, onePixelPNG, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tm := start(t, "risolatedclaude")
+	tm.expectCompact(0, "Not logged in", 30*time.Second)
+	mark := len(tm.text())
+	tm.send("\x1b[200~" + strings.ReplaceAll(shot, " ", `\ `) + "\x1b[201~")
+	tm.expectCompact(mark, "[Image #1]", 15*time.Second)
+	digest := sha256.Sum256(onePixelPNG)
+	sum := hex.EncodeToString(digest[:])
+	out, err := onBox(fmt.Sprintf("sha256sum %s/.local/state/%s/pasted/%s.png", boxHome, boxInstall, sum))
+	if err != nil || !strings.HasPrefix(out, sum+" ") {
+		t.Fatalf("the upload is not on the box: %v %s", err, out)
+	}
 	tm.send("\x03")
 	time.Sleep(300 * time.Millisecond)
 	tm.send("\x03")
