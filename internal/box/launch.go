@@ -265,9 +265,7 @@ func runChild(path string, s spec.Spec, env []string, stdio IO, w *watcher) (int
 	for {
 		select {
 		case sig := <-sigs:
-			if sig == syscall.SIGTERM || sig == syscall.SIGHUP {
-				stoppedBy = sig.(syscall.Signal)
-			}
+			stoppedBy = stopSignal(sig, stoppedBy)
 			if err := cmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
 				return 0, reapRequest{}, 0, fmt.Errorf("forwarding %v: %w", sig, err)
 			}
@@ -288,6 +286,10 @@ func runChild(path string, s spec.Spec, env []string, stdio IO, w *watcher) (int
 				escalate = time.After(terminateGrace)
 			}
 		case err := <-waited:
+			// A stop that arrived with the agent's exit still makes this a stop.
+			for len(sigs) > 0 {
+				stoppedBy = stopSignal(<-sigs, stoppedBy)
+			}
 			if w != nil {
 				w.finish()
 				if reaped.reason != "" {
@@ -298,6 +300,14 @@ func runChild(path string, s spec.Spec, env []string, stdio IO, w *watcher) (int
 			return code, reaped, stoppedBy, err
 		}
 	}
+}
+
+// stopSignal is sig when it stops the launcher, else stoppedBy.
+func stopSignal(sig os.Signal, stoppedBy syscall.Signal) syscall.Signal {
+	if sig == syscall.SIGTERM || sig == syscall.SIGHUP {
+		return sig.(syscall.Signal)
+	}
+	return stoppedBy
 }
 
 func exitCode(cmd *exec.Cmd, waitErr error) (int, error) {

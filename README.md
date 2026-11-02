@@ -59,8 +59,9 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   cmux only `rclaude --resume <id>` gets the line, since a new session may never have started.
 - `remote-agents ls` lists sessions on the box; `remote-agents attach <session>` reattaches.
 - While the link is down, Ctrl+C detaches; the session keeps running.
-- A session ends only when Claude exits. If the box loses it instead, say the shpool daemon
-  stops, `rclaude` reconnects and resumes the same Claude session.
+- A session ends when Claude exits. If the box loses it instead, say the shpool daemon stops,
+  `rclaude` reconnects and resumes the same Claude session; a Claude that takes over 10 seconds
+  to exit on that stop is killed, which ends the session for an attached `rclaude`.
 
 ## Security model
 
