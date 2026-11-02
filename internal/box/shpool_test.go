@@ -2,6 +2,8 @@ package box
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -113,5 +115,23 @@ func TestShortDuration(t *testing.T) {
 func TestParseSessionsRejectsUnknownStatus(t *testing.T) {
 	if _, err := parseSessions([]byte(`{"sessions":[{"name":"x","status":"Weird"}]}`)); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestListingAWedgedDaemonFailsNamingTheTimeout(t *testing.T) {
+	l := testLayout(t)
+	if err := os.MkdirAll(filepath.Dir(l.Shpool()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l.Shpool(), []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err := listSessionsWithin(l, 200*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "200ms") {
+		t.Fatalf("list = %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("list returned after %s", time.Since(start))
 	}
 }

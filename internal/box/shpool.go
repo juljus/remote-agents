@@ -1,6 +1,7 @@
 package box
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -246,10 +247,25 @@ func shortDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
+// listTimeout bounds a shpool list. A daemon that died has a successor only
+// once its sessions' scopes are stopped, which takes up to their
+// TimeoutStopSec of 10 s.
+const listTimeout = 20 * time.Second
+
 func listSessions(l boxlayout.Layout) ([]shpoolSession, error) {
-	cmd := exec.Command(l.Shpool(), append(shpoolBase(l)[1:], "list", "--json")...)
+	return listSessionsWithin(l, listTimeout)
+}
+
+func listSessionsWithin(l boxlayout.Layout, timeout time.Duration) ([]shpoolSession, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, l.Shpool(), append(shpoolBase(l)[1:], "list", "--json")...)
 	cmd.Stderr = os.Stderr
+	cmd.WaitDelay = time.Second
 	raw, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("shpool list: no answer within %s", timeout)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("shpool list: %w", err)
 	}
