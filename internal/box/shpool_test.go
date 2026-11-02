@@ -123,12 +123,12 @@ func TestListingAWedgedDaemonFailsNamingTheTimeout(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(l.Shpool()), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(l.Shpool(), []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
+	if err := os.WriteFile(l.Shpool(), []byte("#!/bin/sh\nsleep 5 2>/dev/null\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	start := time.Now()
 	_, err := listSessionsWithin(l, 200*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "200ms") {
+	if err == nil || err.Error() != "shpool list: no answer within 200ms" {
 		t.Fatalf("list = %v", err)
 	}
 	if time.Since(start) > 2*time.Second {

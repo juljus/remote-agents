@@ -36,6 +36,9 @@ func shpoolAttachArgv(l boxlayout.Layout, session, token, unit string, memoryMax
 
 const systemdRun = "/usr/bin/systemd-run"
 
+// scopeStopTimeout is how long a session's agent gets to exit once its scope stops.
+const scopeStopTimeout = 10 * time.Second
+
 // scopeArgv starts a command in a transient scope of its own; systemd-run
 // execs it there, so the launcher keeps its pid. The OOM killer then ends only
 // the process that took the session past memoryMax, swap included, and
@@ -50,7 +53,7 @@ func scopeArgv(l boxlayout.Layout, session, unit string, memoryMax uint64) []str
 		systemdRun, "--user", "--scope", "--quiet", "--collect", "--unit=" + unit, "--description=" + session,
 		"--property=MemoryMax=" + strconv.FormatUint(memoryMax, 10), "--property=MemorySwapMax=0", "--property=OOMPolicy=continue",
 		"--property=BindsTo=" + shpool, "--property=StopPropagatedFrom=" + shpool, "--property=After=" + shpool,
-		"--property=TimeoutStopSec=10s",
+		"--property=TimeoutStopSec=" + scopeStopTimeout.String(),
 	}
 }
 
@@ -248,9 +251,8 @@ func shortDuration(d time.Duration) string {
 }
 
 // listTimeout bounds a shpool list. A daemon that died has a successor only
-// once its sessions' scopes are stopped, which takes up to their
-// TimeoutStopSec of 10 s.
-const listTimeout = 20 * time.Second
+// once its sessions' scopes are stopped.
+const listTimeout = 2 * scopeStopTimeout
 
 func listSessions(l boxlayout.Layout) ([]shpoolSession, error) {
 	return listSessionsWithin(l, listTimeout)
@@ -261,12 +263,13 @@ func listSessionsWithin(l boxlayout.Layout, timeout time.Duration) ([]shpoolSess
 	defer cancel()
 	cmd := exec.CommandContext(ctx, l.Shpool(), append(shpoolBase(l)[1:], "list", "--json")...)
 	cmd.Stderr = os.Stderr
+	// A child that outlives a killed shpool would hold its output open.
 	cmd.WaitDelay = time.Second
 	raw, err := cmd.Output()
-	if ctx.Err() != nil {
-		return nil, fmt.Errorf("shpool list: no answer within %s", timeout)
-	}
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("shpool list: no answer within %s", timeout)
+		}
 		return nil, fmt.Errorf("shpool list: %w", err)
 	}
 	return parseSessions(raw)
