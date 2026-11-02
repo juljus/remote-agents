@@ -132,7 +132,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		return fail(fmt.Errorf("launch needs a session spec, got mode %q", s.Mode))
 	}
 	now := time.Now()
-	for _, dir := range []string{l.EndedDir(), l.RunsDir(), l.ReapedDir(), l.ReapedSessionsDir()} {
+	for _, dir := range []string{l.EndedDir(), l.RunsDir(), l.LostDir(), l.ReapedDir(), l.ReapedSessionsDir()} {
 		if err := pruneOld(dir, now); err != nil {
 			return fail(err)
 		}
@@ -185,9 +185,18 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 	if resumed != "" {
 		announceResume(stdio.Stderr, resumed)
 	}
-	code, reaped, err := runChild(path, s, env, stdio, w)
+	code, reaped, stoppedBy, err := runChild(path, s, env, stdio, w)
 	if err != nil {
 		return fail(err)
+	}
+	// Stopped from outside, as by its scope when the shpool daemon stops, the
+	// session was lost rather than ended: the next connection resumes it.
+	if stoppedBy != 0 {
+		logf("launcher stopped by %v; run %s resumes on the next connection", stoppedBy, s.RunID)
+		if err := recordLost(l, s.Session, time.Now()); err != nil {
+			return fail(err)
+		}
+		return code
 	}
 	if err := writeMarker(l, s.RunID, marker{ExitCode: code, Reason: reaped.reason, ClaudeSession: reaped.claudeSession}); err != nil {
 		return fail(err)
@@ -223,8 +232,9 @@ func resumeAfterReap(l boxlayout.Layout, s *spec.Spec, m marker, ended bool) (re
 }
 
 // runChild runs the agent until it exits. With a watcher, the agent is ended
-// when the watcher asks; the request is returned with the exit code.
-func runChild(path string, s spec.Spec, env []string, stdio IO, w *watcher) (int, reapRequest, error) {
+// when the watcher asks; the request is returned with the exit code, and so
+// is the SIGTERM or SIGHUP that stopped the launcher, if one did.
+func runChild(path string, s spec.Spec, env []string, stdio IO, w *watcher) (int, reapRequest, syscall.Signal, error) {
 	cmd := exec.Command(path, s.Argv[1:]...)
 	cmd.Args[0] = s.Argv[0]
 	cmd.Dir = s.Workdir
@@ -234,7 +244,7 @@ func runChild(path string, s spec.Spec, env []string, stdio IO, w *watcher) (int
 	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
 	defer signal.Stop(sigs)
 	if err := cmd.Start(); err != nil {
-		return 0, reapRequest{}, fmt.Errorf("starting %s: %w", path, err)
+		return 0, reapRequest{}, 0, fmt.Errorf("starting %s: %w", path, err)
 	}
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
@@ -243,6 +253,7 @@ func runChild(path string, s spec.Spec, env []string, stdio IO, w *watcher) (int
 		reap = w.start(cmd.Process.Pid)
 	}
 	var reaped reapRequest
+	var stoppedBy syscall.Signal
 	var escalate <-chan time.Time
 	next := []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL}
 	send := func(sig syscall.Signal) error {
@@ -254,20 +265,23 @@ func runChild(path string, s spec.Spec, env []string, stdio IO, w *watcher) (int
 	for {
 		select {
 		case sig := <-sigs:
+			if sig == syscall.SIGTERM || sig == syscall.SIGHUP {
+				stoppedBy = sig.(syscall.Signal)
+			}
 			if err := cmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
-				return 0, reapRequest{}, fmt.Errorf("forwarding %v: %w", sig, err)
+				return 0, reapRequest{}, 0, fmt.Errorf("forwarding %v: %w", sig, err)
 			}
 		case reaped = <-reap:
 			reap = nil
 			if err := send(syscall.SIGINT); err != nil {
-				return 0, reapRequest{}, err
+				return 0, reapRequest{}, 0, err
 			}
 			escalate = time.After(interruptGrace)
 		case <-escalate:
 			sig := next[0]
 			w.log("agent still running after the reap's grace period; sending %v", sig)
 			if err := send(sig); err != nil {
-				return 0, reapRequest{}, err
+				return 0, reapRequest{}, 0, err
 			}
 			escalate = nil
 			if next = next[1:]; len(next) > 0 {
@@ -281,7 +295,7 @@ func runChild(path string, s spec.Spec, env []string, stdio IO, w *watcher) (int
 				}
 			}
 			code, err := exitCode(cmd, err)
-			return code, reaped, err
+			return code, reaped, stoppedBy, err
 		}
 	}
 }

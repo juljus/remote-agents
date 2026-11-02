@@ -112,10 +112,18 @@ func (w *watcher) start(agent int) <-chan reapRequest {
 	return reap
 }
 
-// finish stops the checks and removes the session's reports.
+// finish stops the checks, notes the session the hooks last reported in the
+// run's record and removes the session's reports.
 func (w *watcher) finish() {
 	close(w.stop)
 	<-w.stopped
+	hooks, err := reaper.ReadHookState(w.l.HookState(w.session))
+	if err == nil {
+		err = w.keepRecord(hooks)
+	}
+	if err != nil {
+		w.log("recording the run's Claude session: %v", err)
+	}
 	for _, path := range []string{w.l.HookState(w.session), w.l.HookState(w.session) + ".lock", w.l.Status(w.session)} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			w.log("removing %s: %v", filepath.Base(path), err)

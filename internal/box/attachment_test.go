@@ -2,6 +2,7 @@ package box
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -104,6 +105,11 @@ exit 9
 	return log
 }
 
+// loseSession, in onAttach, records the session's loss as a launcher stopped from outside does.
+func loseSession(l boxlayout.Layout, atUnixMS string) string {
+	return fmt.Sprintf(`mkdir -p '%s' && printf '{"at":%%s}' "%s" > '%s'`, l.LostDir(), atUnixMS, l.Lost(attempt(runID, 1).Session))
+}
+
 func attaches(t *testing.T, log string) int {
 	t.Helper()
 	data, err := os.ReadFile(log)
@@ -165,7 +171,7 @@ func TestAttachReportsATakeoverByAnotherRun(t *testing.T) {
 }
 
 func TestAttachReportsAgentExitsTheBoxReservesAs254(t *testing.T) {
-	for _, code := range []int{spec.ExitTakenOver, spec.ExitStaleAttempt, 255} {
+	for _, code := range []int{spec.ExitTakenOver, spec.ExitStaleAttempt, spec.ExitSessionLost, 255} {
 		l := testLayout(t)
 		fakeShpool(t, l, 0, "exit "+strconv.Itoa(code))
 		var stderr bytes.Buffer
@@ -173,5 +179,33 @@ func TestAttachReportsAgentExitsTheBoxReservesAs254(t *testing.T) {
 		if err != nil || got != spec.ExitAgentReserved || !strings.Contains(stderr.String(), "status "+strconv.Itoa(code)+",") {
 			t.Fatalf("agent exit %d: Attach = %d, %v; stderr %q", code, got, err, stderr.String())
 		}
+	}
+}
+
+func TestAttachReportsASessionLostDuringItAsLost(t *testing.T) {
+	now := `$(($(date +%s) * 1000 + 999))`
+	for name, onAttach := range map[string]string{
+		"stopped from outside":     "exit 143",
+		"agent exited 0 on a stop": ":",
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := testLayout(t)
+			fakeShpool(t, l, 0, loseSession(l, now)+"; "+onAttach)
+			code, err := Attach(l, attempt(runID, 1), IO{Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+			if err != nil || code != spec.ExitSessionLost {
+				t.Fatalf("Attach = %d, %v", code, err)
+			}
+			if _, err := os.Stat(l.Lost(attempt(runID, 1).Session)); !os.IsNotExist(err) {
+				t.Fatalf("loss left recorded: %v", err)
+			}
+		})
+	}
+}
+
+func TestAttachReportsAnExitAfterAnEarlierLossAsTheExit(t *testing.T) {
+	l := testLayout(t)
+	fakeShpool(t, l, 0, loseSession(l, "1")+"; exit 3")
+	if code, err := Attach(l, attempt(runID, 1), IO{Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}); err != nil || code != 3 {
+		t.Fatalf("Attach = %d, %v", code, err)
 	}
 }

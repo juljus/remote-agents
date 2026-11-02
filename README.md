@@ -41,6 +41,11 @@ Laptop:
     cp bin/com.remote-agents.link.plist ~/Library/LaunchAgents/
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-agents.link.plist
 
+Each session on the box runs in a systemd scope of its own, capped at 64G of memory and no swap:
+the OOM killer then ends only the process that overran it. Set the cap in
+`~/.config/remote-agents/session.toml` on the box, as `memory_max = "32G"` (K, M, G or T); it
+applies to sessions started after the change.
+
 No shell setup is needed. Arguments every run should get go in the agent's `args` in the config.
 Stop the link daemon with `launchctl bootout gui/$(id -u)/com.remote-agents.link`.
 Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook relay problems).
@@ -54,6 +59,8 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   cmux only `rclaude --resume <id>` gets the line, since a new session may never have started.
 - `remote-agents ls` lists sessions on the box; `remote-agents attach <session>` reattaches.
 - While the link is down, Ctrl+C detaches; the session keeps running.
+- A session ends only when Claude exits. If the box loses it instead, say the shpool daemon
+  stops, `rclaude` reconnects and resumes the same Claude session.
 
 ## Security model
 

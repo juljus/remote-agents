@@ -127,6 +127,29 @@ func TestARelaunchBeforeAnySessionWasReportedRunsItsCommandAgain(t *testing.T) {
 	}
 }
 
+func TestTheWatcherRecordsTheLastReportedSessionWhenItFinishes(t *testing.T) {
+	l := testLayout(t)
+	stopped := make(chan struct{})
+	close(stopped)
+	w := &watcher{l: l, session: "claude-abc", runID: runID, stop: make(chan struct{}), stopped: stopped}
+	if err := os.MkdirAll(l.ActivityDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Reported after the last check: a stopped launch's relaunch must still resume it.
+	hooks := reaper.HookState{ClaudeSession: cleared, Transcript: "/t/" + cleared + ".jsonl"}
+	if err := jsonfile.Write(l.HookState(w.session), hooks); err != nil {
+		t.Fatal(err)
+	}
+	w.finish()
+	rec, found, err := readRunRecord(l, runID)
+	if err != nil || !found || rec != (runRecord{ClaudeSession: cleared, Transcript: hooks.Transcript}) {
+		t.Fatalf("record %+v, %v, %v", rec, found, err)
+	}
+	if _, err := os.Stat(l.HookState(w.session)); !os.IsNotExist(err) {
+		t.Fatalf("hook state left: %v", err)
+	}
+}
+
 func TestTheWatcherKeepsTheRunRecordCurrent(t *testing.T) {
 	l := testLayout(t)
 	w := &watcher{l: l, session: "claude-abc", runID: runID}

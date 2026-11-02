@@ -297,6 +297,8 @@ func TestEachAttemptCarriesTheNextAttemptNumber(t *testing.T) {
 		record+`echo "client_loop: send disconnect: Broken pipe" >&2; exit 255`,
 		// A stale attempt's refusal is a lost link, not the agent's exit.
 		record+`exit `+strconv.Itoa(spec.ExitStaleAttempt),
+		// So is a session the box lost.
+		record+`exit `+strconv.Itoa(spec.ExitSessionLost),
 		record+`echo done; exit 0`)
 	if r := wait(t, start(testOptions(ssh, h))); r.err != nil || r.code != 0 {
 		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
@@ -306,7 +308,7 @@ func TestEachAttemptCarriesTheNextAttemptNumber(t *testing.T) {
 		t.Fatal(err)
 	}
 	tokens := strings.Fields(string(data))
-	if len(tokens) != 3 {
+	if len(tokens) != 4 {
 		t.Fatalf("tokens %q", tokens)
 	}
 	for i, token := range tokens {

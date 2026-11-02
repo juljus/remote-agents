@@ -41,7 +41,8 @@ const systemdRun = "/usr/bin/systemd-run"
 // OOMPolicy=continue keeps the rest of the session running. The session ends
 // with the shpool daemon that holds its terminal, before a new one starts:
 // BindsTo covers a crash, StopPropagatedFrom a stop or restart. Its agent gets
-// SIGTERM and TimeoutStopSec to exit on its own, so its end is recorded.
+// SIGTERM and TimeoutStopSec to exit; the launcher, stopped with it, records
+// no end, so the next connection resumes the session.
 func scopeArgv(l boxlayout.Layout, session, unit string, memoryMax uint64) []string {
 	shpool := l.ShpoolService()
 	return []string{
@@ -82,6 +83,7 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 		// Every start of the session gets a scope of its own: the scope of an
 		// earlier one stays while a daemon it left behind runs.
 		argv := shpoolAttachArgv(l, s.Session, token, l.SessionScope(s.Session, scopeInstance()), cfg.MemoryMax)
+		began := time.Now()
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio.Stdin, stdio.Stdout, stdio.Stderr
 		err = cmd.Run()
@@ -90,7 +92,19 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 			return 1, fmt.Errorf("running shpool: %w", err)
 		}
 		code := cmd.ProcessState.ExitCode()
-		if code == 255 || code == spec.ExitTakenOver || code == spec.ExitStaleAttempt {
+		if code != 0 {
+			// The successor of a daemon that died starts once its sessions
+			// are stopped, so the listing waits for their launchers.
+			if _, err := listSessions(l); err != nil {
+				return 1, err
+			}
+			if lost, err := sessionLostSince(l, s.Session, began); err != nil {
+				return 1, err
+			} else if lost {
+				return spec.ExitSessionLost, nil
+			}
+		}
+		if code == 255 || code == spec.ExitTakenOver || code == spec.ExitStaleAttempt || code == spec.ExitSessionLost {
 			fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: the agent exited with status %d, reported as %d\r\n", code, spec.ExitAgentReserved)
 			return spec.ExitAgentReserved, nil
 		}
@@ -102,6 +116,11 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 			return 1, err
 		}
 		if !running {
+			if lost, err := sessionLostSince(l, s.Session, began); err != nil {
+				return 1, err
+			} else if lost {
+				return spec.ExitSessionLost, nil
+			}
 			return 0, nil
 		}
 		// Every Attach claims the session first, except a stale attempt of this run.

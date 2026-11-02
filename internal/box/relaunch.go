@@ -49,6 +49,33 @@ func removeRunRecord(l boxlayout.Layout, runID string) error {
 	return nil
 }
 
+// lostRecord is when a launcher stopped from outside lost its session, in
+// Unix milliseconds.
+type lostRecord struct {
+	At int64 `json:"at"`
+}
+
+func recordLost(l boxlayout.Layout, session string, now time.Time) error {
+	if err := os.MkdirAll(l.LostDir(), 0o700); err != nil {
+		return fmt.Errorf("creating lost dir: %w", err)
+	}
+	return jsonfile.Write(l.Lost(session), lostRecord{At: now.UnixMilli()})
+}
+
+// sessionLostSince reports whether session was lost at or after since, and
+// forgets the loss once reported.
+func sessionLostSince(l boxlayout.Layout, session string, since time.Time) (bool, error) {
+	var rec lostRecord
+	found, err := jsonfile.Read(l.Lost(session), &rec)
+	if err != nil || !found || rec.At < since.UnixMilli() {
+		return false, err
+	}
+	if err := os.Remove(l.Lost(session)); err != nil {
+		return false, fmt.Errorf("forgetting the loss of %s: %w", session, err)
+	}
+	return true, nil
+}
+
 // resumeLostLaunch continues the Claude session of the run's earlier launch
 // when that launch left its record but no ended marker: something killed its
 // launcher with it. The run's own command would start its session anew,

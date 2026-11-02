@@ -550,20 +550,36 @@ while [ -e /proc/%s ]; do sleep 0.1; done`, pid, pid)); err != nil {
 	}
 }
 
-func TestARestartOfTheShpoolDaemonEndsItsSessionsFirst(t *testing.T) {
-	tm := start(t, "rfakeclaude")
-	m := tm.expect(`fake-claude session=(`+uuidRe+`) pid=(\d+)`, 20*time.Second)
-	id, pid := m[1], m[2]
-	if _, err := onBox("systemctl --user restart " + box.ShpoolService()); err != nil {
-		t.Fatal(err)
+func TestLosingTheShpoolDaemonResumesItsSessionsOnTheNewOne(t *testing.T) {
+	for name, lose := range map[string]string{
+		"restart": "systemctl --user restart " + box.ShpoolService(),
+		"crash":   "systemctl --user kill -s KILL --kill-whom=main " + box.ShpoolService(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tm := start(t, "rfakeclaude")
+			m := tm.expect(`fake-claude session=(`+uuidRe+`) pid=(\d+)`, 20*time.Second)
+			id, pid := m[1], m[2]
+			mark := len(tm.text())
+			if _, err := onBox(lose); err != nil {
+				t.Fatal(err)
+			}
+			args := tm.expectAfter(mark, `fake-claude args=(.*)\r?\n`, 20*time.Second)[1]
+			if !strings.Contains(args, "--resume "+id) {
+				t.Fatalf("args after losing the daemon = %q, want a resume of %s", args, id)
+			}
+			again := tm.expectAfter(mark, `fake-claude session=(`+uuidRe+`) pid=(\d+)`, 5*time.Second)
+			if again[1] != id || again[2] == pid {
+				t.Fatalf("after losing the daemon: session %s pid %s, was %s pid %s", again[1], again[2], id, pid)
+			}
+			if out, err := onBox(fmt.Sprintf("test ! -e /proc/%s && echo gone", pid)); err != nil || out != "gone\n" {
+				t.Fatalf("the old agent %s outlived its daemon: %q, %v", pid, out, err)
+			}
+			tm.send("exit 0\r")
+			if code := tm.wait(10 * time.Second); code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+		})
 	}
-	if out, err := onBox(fmt.Sprintf("test ! -e /proc/%s && echo gone", pid)); err != nil || out != "gone\n" {
-		t.Fatalf("agent %s outlived the restart: %q, %v", pid, out, err)
-	}
-	if code := tm.wait(10 * time.Second); code != 128+int(syscall.SIGTERM) {
-		t.Fatalf("exit %d, want the agent's SIGTERM", code)
-	}
-	tm.expect(`Resume on the box with: rfakeclaude --resume `+id, 5*time.Second)
 }
 
 func TestDetachWhileDownThenResumeReattaches(t *testing.T) {

@@ -155,6 +155,21 @@ func TestLaunchReportsSignalDeath(t *testing.T) {
 	}
 }
 
+func TestLaunchStoppedFromOutsideRecordsNoEnd(t *testing.T) {
+	l := testLayout(t)
+	// The launcher is this test process; its stop reaches the agent too.
+	code, _ := launch(t, l, sessionSpec(t.TempDir(), "/bin/sh", "-c", "kill -TERM $PPID; sleep 5"))
+	if code != 128+15 {
+		t.Fatalf("code = %d, want 143", code)
+	}
+	if _, ended, err := readMarker(l, runID); err != nil || ended {
+		t.Fatalf("ended marker %v, %v: a stop is no end", ended, err)
+	}
+	if lost, err := sessionLostSince(l, sessionSpec("/w").Session, time.Now().Add(-time.Minute)); err != nil || !lost {
+		t.Fatalf("lost = %v, %v", lost, err)
+	}
+}
+
 func TestLaunchMissingWorkdirFailsLoudly(t *testing.T) {
 	l := testLayout(t)
 	code, out := launch(t, l, sessionSpec("/nonexistent/work", "/bin/true"))

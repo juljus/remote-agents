@@ -74,6 +74,10 @@ func (l Layout) EndedMarker(runID string) string { return filepath.Join(l.EndedD
 func (l Layout) RunsDir() string               { return l.state("runs") }
 func (l Layout) RunRecord(runID string) string { return filepath.Join(l.RunsDir(), runID+".json") }
 
+// When each session was last lost by a launcher stopped from outside.
+func (l Layout) LostDir() string            { return l.state("lost") }
+func (l Layout) Lost(session string) string { return filepath.Join(l.LostDir(), session+".json") }
+
 // The latest connection attempt that claimed each session, and the lock that
 // orders the claims.
 func (l Layout) AttachmentsDir() string  { return l.state("attachments") }

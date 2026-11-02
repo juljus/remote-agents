@@ -71,6 +71,9 @@ const (
 	ExitTakenOver = 75
 	// ExitStaleAttempt: a newer connection attempt of the same run holds the session.
 	ExitStaleAttempt = 76
+	// ExitSessionLost: the session ended without its agent exiting on its own,
+	// as when its shpool daemon stops; a reconnect resumes it.
+	ExitSessionLost = 77
 	// ExitAgentReserved stands in for an agent exit status that means something
 	// else on the link: 255, which ssh reserves for its own failures, and the
 	// box's own codes above.

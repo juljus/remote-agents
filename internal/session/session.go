@@ -152,6 +152,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			if !res.Transport && res.ExitCode == spec.ExitStaleAttempt {
 				res.Transport, res.Detail = true, "a newer connection attempt holds the session"
 			}
+			if !res.Transport && res.ExitCode == spec.ExitSessionLost {
+				res.Transport, res.Detail = true, "the box lost the session"
+			}
 			return res
 		},
 		Triggers:    opts.Triggers,
