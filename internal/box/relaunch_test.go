@@ -117,9 +117,10 @@ func TestARelaunchBeforeAnySessionWasReportedRunsItsCommandAgain(t *testing.T) {
 	s := claudeSpec("/w")
 	argv := slices.Clone(s.Argv)
 	lostLaunch(t, l, s, runRecord{}, reaper.HookState{})
+	// Not lost as far as resuming goes: the launch may still follow a reap, whose resume then applies.
 	var logged []string
-	if _, lost, err := resumeLostLaunch(l, &s, recordLog(&logged)); err != nil || !lost {
-		t.Fatal(err)
+	if _, lost, err := resumeLostLaunch(l, &s, recordLog(&logged)); err != nil || lost {
+		t.Fatalf("lost = %v, %v", lost, err)
 	}
 	if !slices.Equal(s.Argv, argv) || len(logged) != 1 {
 		t.Fatalf("argv = %q, logged %q", s.Argv, logged)
@@ -248,6 +249,17 @@ func TestAwaitReleaseRereadsARegistrationCaughtMidWrite(t *testing.T) {
 		os.WriteFile(path, []byte(written), 0o600)
 	}()
 	if err := awaitRelease(dir, liveProcs, heldSession, 5*time.Second, noLog); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAwaitReleaseSkipsAnUnreadableRegistrationOfAnExitedClaude(t *testing.T) {
+	dir := t.TempDir()
+	// Killed while it rewrote its registration: nothing removes the file.
+	if err := os.WriteFile(filepath.Join(dir, "12.json"), []byte(`{"pid":12,"sess`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := awaitRelease(dir, liveProcs, heldSession, time.Second, noLog); err != nil {
 		t.Fatal(err)
 	}
 }

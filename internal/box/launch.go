@@ -156,7 +156,8 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 			return fail(err)
 		}
 	}
-	// A lost launch may itself have resumed a reap, whose records it took.
+	// A lost launch may itself have resumed a reap, whose records it took; it
+	// takes over only once it knows its session.
 	var resumed reaper.Reason
 	if !lost {
 		if resumed, err = resumeAfterReap(l, &s, m, ended); err != nil {

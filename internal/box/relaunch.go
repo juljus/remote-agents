@@ -53,8 +53,9 @@ func removeRunRecord(l boxlayout.Layout, runID string) error {
 // when that launch left its record but no ended marker: something killed its
 // launcher with it. The run's own command would start its session anew,
 // which Claude refuses once that session has a transcript. The session is the
-// one the hooks last reported, else the record's. It reports whether the
-// launch was lost and returns the record the relaunch starts with.
+// one the hooks last reported, else the record's. It reports whether it
+// resumes a lost launch's session and returns the record the relaunch starts
+// with.
 func resumeLostLaunch(l boxlayout.Layout, s *spec.Spec, logf func(string, ...any)) (runRecord, bool, error) {
 	rec, lost, err := readRunRecord(l, s.RunID)
 	if err != nil || !lost {
@@ -68,8 +69,8 @@ func resumeLostLaunch(l boxlayout.Layout, s *spec.Spec, logf func(string, ...any
 		rec = runRecord{ClaudeSession: hooks.ClaudeSession, Transcript: hooks.Transcript}
 	}
 	if rec.ClaudeSession == "" {
-		logf("run %s lost its launcher before its agent reported a Claude session; starting its command again", s.RunID)
-		return rec, true, nil
+		logf("run %s lost its launcher before its agent reported a Claude session", s.RunID)
+		return rec, false, nil
 	}
 	_, err = os.Stat(rec.Transcript)
 	switch {
@@ -102,8 +103,9 @@ type claudeRegistration struct {
 }
 
 // claudeHolder finds a running Claude registered in dir under claudeSession.
-// A registration Claude is rewriting in place may not parse; unreadable is
-// then the error of the last such file, and a later look may read it.
+// A registration Claude is rewriting in place may not parse; unless its pid,
+// the file's name, has exited, unreadable is then the error of the last such
+// file, and a later look may read it.
 func claudeHolder(dir string, proc fs.FS, claudeSession string) (pid int, unreadable, err error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -126,7 +128,17 @@ func claudeHolder(dir string, proc fs.FS, claudeSession string) (pid int, unread
 		}
 		var r claudeRegistration
 		if err := json.Unmarshal(data, &r); err != nil {
-			unreadable = fmt.Errorf("parsing Claude session %s: %w", e.Name(), err)
+			owner, perr := strconv.Atoi(strings.TrimSuffix(e.Name(), ".json"))
+			if perr != nil {
+				return 0, nil, fmt.Errorf("registration %s in the Claude sessions dir is not named by a pid", e.Name())
+			}
+			exited, xerr := reaper.Exited(proc, owner)
+			if xerr != nil {
+				return 0, nil, xerr
+			}
+			if !exited {
+				unreadable = fmt.Errorf("parsing Claude session %s: %w", e.Name(), err)
+			}
 			continue
 		}
 		if r.SessionID != claudeSession {
