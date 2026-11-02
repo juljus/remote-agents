@@ -36,9 +36,12 @@ type watcher struct {
 	l       boxlayout.Layout
 	cfg     reaper.Config
 	session string
-	self    int
-	timer   *reaper.Timer
-	cpu     reaper.CPUMeter
+	runID   string
+	// record is the run's record, which every check rewrites.
+	record runRecord
+	self   int
+	timer  *reaper.Timer
+	cpu    reaper.CPUMeter
 	// lastErr and unknownID keep a failing check from repeating its log line.
 	lastErr   string
 	unknownID bool
@@ -48,7 +51,7 @@ type watcher struct {
 
 // newWatcher makes the launcher the subreaper of the agent's processes, so
 // a tool's background process stays visible once its shell has exited.
-func newWatcher(l boxlayout.Layout, session string, now time.Time) (*watcher, error) {
+func newWatcher(l boxlayout.Layout, session, runID string, record runRecord, now time.Time) (*watcher, error) {
 	cfg, err := reaper.LoadConfig(l.ReaperConfig())
 	if err != nil {
 		return nil, err
@@ -65,8 +68,11 @@ func newWatcher(l boxlayout.Layout, session string, now time.Time) (*watcher, er
 			return nil, fmt.Errorf("clearing %s: %w", filepath.Base(path), err)
 		}
 	}
+	if err := writeRunRecord(l, runID, record); err != nil {
+		return nil, err
+	}
 	return &watcher{
-		l: l, cfg: cfg, session: session, self: os.Getpid(), timer: reaper.NewTimer(cfg, now),
+		l: l, cfg: cfg, session: session, runID: runID, record: record, self: os.Getpid(), timer: reaper.NewTimer(cfg, now),
 		stop: make(chan struct{}), stopped: make(chan struct{}),
 	}, nil
 }
@@ -144,6 +150,9 @@ func (w *watcher) check(now time.Time, agent int) (reapRequest, error) {
 	if err != nil {
 		return reapRequest{}, err
 	}
+	if err := w.keepRecord(obs.Hooks); err != nil {
+		return reapRequest{}, err
+	}
 	working := obs.Working()
 	d := w.timer.Step(now, sess.Status == "Attached", sess.detachedSince(), len(working) > 0, obs.LastWrite)
 	status := reaper.Status{Working: working, Updated: now.UnixMilli()}
@@ -169,6 +178,15 @@ func (w *watcher) check(now time.Time, agent int) (reapRequest, error) {
 	}
 	w.log("ending Claude session %s (%s): %s", obs.Hooks.ClaudeSession, d.Reap, why)
 	return reapRequest{reason: d.Reap, claudeSession: obs.Hooks.ClaudeSession}, nil
+}
+
+// keepRecord notes the Claude session the hooks report in the run's record,
+// whose rewrite also keeps a long-running run's record from being pruned.
+func (w *watcher) keepRecord(hooks reaper.HookState) error {
+	if hooks.ClaudeSession != "" {
+		w.record = runRecord{ClaudeSession: hooks.ClaudeSession, Transcript: hooks.Transcript}
+	}
+	return writeRunRecord(w.l, w.runID, w.record)
 }
 
 func (w *watcher) observe(procs []reaper.Proc, agent int) (reaper.Observation, error) {

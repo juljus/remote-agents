@@ -13,6 +13,7 @@ import (
 	"remote-agents/internal/boxlayout"
 	"remote-agents/internal/jsonfile"
 	"remote-agents/internal/reaper"
+	"remote-agents/internal/spec"
 )
 
 const commandSession = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -21,77 +22,137 @@ func TestAFirstLaunchStartsItsCommand(t *testing.T) {
 	l := testLayout(t)
 	s := claudeSpec("/w")
 	argv := slices.Clone(s.Argv)
-	if err := resumeLostLaunch(l, &s, noLog); err != nil {
+	rec, lost, err := resumeLostLaunch(l, &s, noLog)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(s.Argv, argv) {
-		t.Fatalf("argv = %q, want %q", s.Argv, argv)
+	if lost || !slices.Equal(s.Argv, argv) || rec != (runRecord{}) {
+		t.Fatalf("argv = %q, record %+v; want %q and none", s.Argv, rec, argv)
 	}
 }
 
-func TestARelaunchAfterALostLaunchResumesTheSessionItsHooksReported(t *testing.T) {
-	l := testLayout(t)
-	s := claudeSpec("/w")
-	if err := markStarted(l, s.RunID); err != nil {
+// lostLaunch leaves what a launcher killed with its agent leaves: the run's
+// record and, unless hooks is empty, the hook state.
+func lostLaunch(t *testing.T, l boxlayout.Layout, s spec.Spec, rec runRecord, hooks reaper.HookState) {
+	t.Helper()
+	if err := writeRunRecord(l, s.RunID, rec); err != nil {
 		t.Fatal(err)
 	}
-	// /clear had moved the agent on to another session.
-	const cleared = "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	if hooks == (reaper.HookState{}) {
+		return
+	}
 	if err := os.MkdirAll(l.ActivityDir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := jsonfile.Write(l.HookState(s.Session), reaper.HookState{ClaudeSession: cleared}); err != nil {
+	if err := jsonfile.Write(l.HookState(s.Session), hooks); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func transcriptIn(t *testing.T, dir, id string) string {
+	t.Helper()
+	path := filepath.Join(dir, id+".jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+const cleared = "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+func TestARelaunchResumesTheSessionTheHooksLastReported(t *testing.T) {
+	l := testLayout(t)
+	s := claudeSpec("/w")
+	dir := t.TempDir()
+	// /clear had moved the agent on to another session, which has had a turn since.
+	hooks := reaper.HookState{ClaudeSession: cleared, Transcript: transcriptIn(t, dir, cleared)}
+	lostLaunch(t, l, s, runRecord{ClaudeSession: commandSession, Transcript: transcriptIn(t, dir, commandSession)}, hooks)
 	var logged []string
-	if err := resumeLostLaunch(l, &s, recordLog(&logged)); err != nil {
+	rec, lost, err := resumeLostLaunch(l, &s, recordLog(&logged))
+	if err != nil || !lost {
 		t.Fatal(err)
 	}
 	if !slices.Equal(s.Argv, []string{"claude", "--dangerously-skip-permissions", "--resume", cleared}) {
 		t.Fatalf("argv = %q", s.Argv)
+	}
+	if rec != (runRecord{ClaudeSession: cleared, Transcript: hooks.Transcript}) {
+		t.Fatalf("record = %+v", rec)
 	}
 	if len(logged) != 1 || !strings.Contains(logged[0], cleared) {
 		t.Fatalf("logged %q", logged)
 	}
 }
 
-func TestARelaunchWithoutHookReportsResumesTheSessionItsCommandStarted(t *testing.T) {
+func TestARelaunchStartsAReportedSessionWithoutATranscriptAfresh(t *testing.T) {
 	l := testLayout(t)
 	s := claudeSpec("/w")
-	if err := markStarted(l, s.RunID); err != nil {
+	// Claude writes a transcript only once a turn starts.
+	missing := filepath.Join(t.TempDir(), cleared+".jsonl")
+	lostLaunch(t, l, s, runRecord{}, reaper.HookState{ClaudeSession: cleared, Transcript: missing})
+	if _, lost, err := resumeLostLaunch(l, &s, noLog); err != nil || !lost {
 		t.Fatal(err)
 	}
-	if err := resumeLostLaunch(l, &s, noLog); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(s.Argv, []string{"claude", "--dangerously-skip-permissions", "--resume", commandSession}) {
+	if !slices.Equal(s.Argv, []string{"claude", "--dangerously-skip-permissions", "--session-id", cleared}) {
 		t.Fatalf("argv = %q", s.Argv)
 	}
 }
 
-func TestARelaunchOfAPickerRunWithoutHookReportsStartsItsCommand(t *testing.T) {
+func TestARelaunchWithoutHookStateFollowsTheRunRecord(t *testing.T) {
 	l := testLayout(t)
 	s := claudeSpec("/w")
-	s.Argv = []string{"claude", "--continue"}
-	if err := markStarted(l, s.RunID); err != nil {
+	// The previous relaunch died too, before its agent reported a session.
+	want := runRecord{ClaudeSession: cleared, Transcript: transcriptIn(t, t.TempDir(), cleared)}
+	lostLaunch(t, l, s, want, reaper.HookState{})
+	rec, lost, err := resumeLostLaunch(l, &s, noLog)
+	if err != nil || !lost {
 		t.Fatal(err)
 	}
+	if !slices.Equal(s.Argv, []string{"claude", "--dangerously-skip-permissions", "--resume", cleared}) || rec != want {
+		t.Fatalf("argv = %q, record %+v", s.Argv, rec)
+	}
+}
+
+func TestARelaunchBeforeAnySessionWasReportedRunsItsCommandAgain(t *testing.T) {
+	l := testLayout(t)
+	s := claudeSpec("/w")
+	argv := slices.Clone(s.Argv)
+	lostLaunch(t, l, s, runRecord{}, reaper.HookState{})
 	var logged []string
-	if err := resumeLostLaunch(l, &s, recordLog(&logged)); err != nil {
+	if _, lost, err := resumeLostLaunch(l, &s, recordLog(&logged)); err != nil || !lost {
 		t.Fatal(err)
 	}
-	if !slices.Equal(s.Argv, []string{"claude", "--continue"}) || len(logged) != 1 {
+	if !slices.Equal(s.Argv, argv) || len(logged) != 1 {
 		t.Fatalf("argv = %q, logged %q", s.Argv, logged)
 	}
 }
 
-func TestLaunchRecordsTheRunsStart(t *testing.T) {
+func TestTheWatcherKeepsTheRunRecordCurrent(t *testing.T) {
 	l := testLayout(t)
-	if code, out := launch(t, l, sessionSpec(t.TempDir(), "/bin/sh", "-c", "exit 0")); code != 0 {
-		t.Fatalf("launch = %d %q", code, out)
+	w := &watcher{l: l, session: "claude-abc", runID: runID}
+	read := func() runRecord {
+		t.Helper()
+		rec, found, err := readRunRecord(l, runID)
+		if err != nil || !found {
+			t.Fatalf("record %v, %v", found, err)
+		}
+		return rec
 	}
-	if started, err := launchStarted(l, runID); err != nil || !started {
-		t.Fatalf("started = %v, %v", started, err)
+	if err := w.keepRecord(reaper.HookState{}); err != nil || read() != (runRecord{}) {
+		t.Fatalf("before any report: %+v, %v", read(), err)
+	}
+	reported := runRecord{ClaudeSession: cleared, Transcript: "/t/" + cleared + ".jsonl"}
+	if err := w.keepRecord(reaper.HookState{ClaudeSession: reported.ClaudeSession, Transcript: reported.Transcript}); err != nil || read() != reported {
+		t.Fatalf("after a report: %+v, %v", read(), err)
+	}
+	old := time.Now().Add(-markerTTL - time.Hour)
+	if err := os.Chtimes(l.RunRecord(runID), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.keepRecord(reaper.HookState{}); err != nil || read() != reported {
+		t.Fatalf("hook state cleared: %+v, %v", read(), err)
+	}
+	if info, err := os.Stat(l.RunRecord(runID)); err != nil || time.Since(info.ModTime()) > time.Minute {
+		t.Fatalf("record not kept fresh against pruning: %v, %v", info, err)
 	}
 }
 
@@ -172,6 +233,32 @@ func TestAwaitReleaseFailsNamingAHolderThatStays(t *testing.T) {
 	}
 	if len(logged) != 2 || !strings.Contains(logged[1], "pid 10") {
 		t.Fatalf("logged %q", logged)
+	}
+}
+
+func TestAwaitReleaseRereadsARegistrationCaughtMidWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "11.json")
+	if err := os.WriteFile(path, []byte(`{"pid":11,"sess`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	written := `{"pid":11,"sessionId":"` + commandSession + `","procStart":"100"}`
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		os.WriteFile(path, []byte(written), 0o600)
+	}()
+	if err := awaitRelease(dir, liveProcs, heldSession, 5*time.Second, noLog); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAwaitReleaseFailsOnARegistrationThatStaysUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "11.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := awaitRelease(dir, liveProcs, heldSession, 300*time.Millisecond, noLog); err == nil || !strings.Contains(err.Error(), "11.json") {
+		t.Fatalf("await = %v", err)
 	}
 }
 

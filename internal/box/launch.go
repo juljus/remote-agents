@@ -132,7 +132,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		return fail(fmt.Errorf("launch needs a session spec, got mode %q", s.Mode))
 	}
 	now := time.Now()
-	for _, dir := range []string{l.EndedDir(), l.StartedDir(), l.ReapedDir(), l.ReapedSessionsDir()} {
+	for _, dir := range []string{l.EndedDir(), l.RunsDir(), l.ReapedDir(), l.ReapedSessionsDir()} {
 		if err := pruneOld(dir, now); err != nil {
 			return fail(err)
 		}
@@ -148,13 +148,18 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		fmt.Fprintf(stdio.Stderr, "remote-agents: session %s ended while the link was down (exit code %d)\n", s.Session, m.ExitCode)
 		return m.ExitCode
 	}
-	resumed, err := resumeAfterReap(l, &s, m, ended)
-	if err != nil {
-		return fail(err)
-	}
 	logf := sessionLog(l, s.Session, stdio.Stderr)
-	if !ended {
-		if err := resumeLostLaunch(l, &s, logf); err != nil {
+	var rec runRecord
+	lost := false
+	if s.Claude != nil {
+		if rec, lost, err = resumeLostLaunch(l, &s, logf); err != nil {
+			return fail(err)
+		}
+	}
+	// A lost launch may itself have resumed a reap, whose records it took.
+	var resumed reaper.Reason
+	if !lost {
+		if resumed, err = resumeAfterReap(l, &s, m, ended); err != nil {
 			return fail(err)
 		}
 	}
@@ -164,7 +169,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 	}
 	var w *watcher
 	if s.Claude != nil {
-		if id, resumes := claudeargs.SessionOf(s.Argv[1:]); resumes {
+		if id, _ := claudeargs.SessionOf(s.Argv[1:]); id != "" {
 			if err := awaitRelease(claudeSessionsDir(l, env), os.DirFS("/proc"), id, releaseWait, logf); err != nil {
 				return fail(err)
 			}
@@ -172,21 +177,21 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		if s.Argv, err = withActivityHooks(l, s.Argv, s.Workdir); err != nil {
 			return fail(err)
 		}
-		if w, err = newWatcher(l, s.Session, now); err != nil {
+		if w, err = newWatcher(l, s.Session, s.RunID, rec, now); err != nil {
 			return fail(err)
 		}
 	}
 	if resumed != "" {
 		announceResume(stdio.Stderr, resumed)
 	}
-	if err := markStarted(l, s.RunID); err != nil {
-		return fail(err)
-	}
 	code, reaped, err := runChild(path, s, env, stdio, w)
 	if err != nil {
 		return fail(err)
 	}
 	if err := writeMarker(l, s.RunID, marker{ExitCode: code, Reason: reaped.reason, ClaudeSession: reaped.claudeSession}); err != nil {
+		return fail(err)
+	}
+	if err := removeRunRecord(l, s.RunID); err != nil {
 		return fail(err)
 	}
 	if reaped.reason != "" {

@@ -70,11 +70,9 @@ func (l Layout) EndedDir() string                { return l.state("ended") }
 func (l Layout) ClaudeBin() string               { return filepath.Join(l.Home, ClaudeBinDir) }
 func (l Layout) EndedMarker(runID string) string { return filepath.Join(l.EndedDir(), runID+".json") }
 
-// The runs whose agent has been started.
-func (l Layout) StartedDir() string { return l.state("started") }
-func (l Layout) StartedMarker(runID string) string {
-	return filepath.Join(l.StartedDir(), runID+".json")
-}
+// The Claude session each live run's agent was last seen running.
+func (l Layout) RunsDir() string               { return l.state("runs") }
+func (l Layout) RunRecord(runID string) string { return filepath.Join(l.RunsDir(), runID+".json") }
 
 // The latest connection attempt that claimed each session, and the lock that
 // orders the claims.
