@@ -150,16 +150,16 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 	}
 	logf := sessionLog(l, s.Session, stdio.Stderr)
 	var rec runRecord
-	lost := false
+	resumedLost := false
 	if s.Claude != nil {
-		if rec, lost, err = resumeLostLaunch(l, &s, logf); err != nil {
+		if rec, resumedLost, err = resumeLostLaunch(l, &s, logf); err != nil {
 			return fail(err)
 		}
 	}
 	// A lost launch may itself have resumed a reap, whose records it took; it
 	// takes over only once it knows its session.
 	var resumed reaper.Reason
-	if !lost {
+	if !resumedLost {
 		if resumed, err = resumeAfterReap(l, &s, m, ended); err != nil {
 			return fail(err)
 		}
