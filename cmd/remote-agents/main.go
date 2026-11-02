@@ -190,6 +190,7 @@ func runAgent(agentName string, args []string) (int, error) {
 		Session:   name,
 		RunID:     uuid.NewString(),
 		Workdir:   e.cfg.Workdir,
+		MemoryMax: e.cfg.MemoryMax,
 		Argv:      append([]string{agent.Command}, agentArgs...),
 		Env:       terminalEnv(),
 		HookRelay: hooks != nil,
@@ -327,7 +328,7 @@ func attach(name string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	s := spec.Spec{Mode: spec.ModeReattach, Session: name, RunID: uuid.NewString()}
+	s := spec.Spec{Mode: spec.ModeReattach, Session: name, RunID: uuid.NewString(), MemoryMax: e.cfg.MemoryMax}
 	return runSession(e, s, "remote-agents attach "+name, hooks, entrypoint.Name(agentName), resume.NewTracker("", false))
 }
 

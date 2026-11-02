@@ -95,7 +95,7 @@ func testOptions(ssh string, h *ptyHarness) Options {
 		Box: sshrun.Box{Host: "box", Install: "ra-test"},
 		Spec: spec.Spec{
 			Mode: spec.ModeSession, Session: "claude-abc", RunID: "11111111-2222-4333-8444-555555555555",
-			Workdir: "/w", Argv: []string{"claude"},
+			Workdir: "/w", MemoryMax: 64 << 30, Argv: []string{"claude"},
 		},
 		ReattachHint: "claude --resume abc",
 		Triggers:     make(chan string),

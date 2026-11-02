@@ -1,6 +1,7 @@
 package box
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -24,9 +26,29 @@ func shpoolBase(l boxlayout.Layout) []string {
 }
 
 // shpoolAttachArgv force-attaches so a stale attachment from a dead link is
-// replaced. The launcher command only runs when the session does not exist yet.
-func shpoolAttachArgv(l boxlayout.Layout, session, token string) []string {
-	return append(shpoolBase(l), "attach", "--force", "--cmd", l.Binary()+" launch "+token, session)
+// replaced. The launcher command only runs when the session does not exist
+// yet, then in the systemd scope unit.
+func shpoolAttachArgv(l boxlayout.Layout, session, token, unit string, memoryMax uint64) []string {
+	launch := append(scopeArgv(l, session, unit, memoryMax), l.Binary(), "launch", token)
+	return append(shpoolBase(l), "attach", "--force", "--cmd", strings.Join(launch, " "), session)
+}
+
+const systemdRun = "/usr/bin/systemd-run"
+
+// scopeArgv starts a command in a transient scope of its own; systemd-run
+// execs it there, so the launcher keeps its pid. The OOM killer then ends only
+// the process that took the session past memoryMax, swap included, and
+// OOMPolicy=continue keeps the rest of the session running. The session ends
+// with the shpool daemon that holds its terminal, before a new one starts:
+// BindsTo covers a crash, StopPropagatedFrom a stop or restart.
+func scopeArgv(l boxlayout.Layout, session, unit string, memoryMax uint64) []string {
+	shpool := l.ShpoolService()
+	return []string{
+		systemdRun, "--user", "--scope", "--quiet", "--collect", "--unit=" + unit, "--description=" + session,
+		"--property=MemoryMax=" + strconv.FormatUint(memoryMax, 10), "--property=MemorySwapMax=0", "--property=OOMPolicy=continue",
+		"--property=BindsTo=" + shpool, "--property=StopPropagatedFrom=" + shpool, "--property=After=" + shpool,
+		"--property=TimeoutStopSec=2s", "--property=SendSIGHUP=yes",
+	}
 }
 
 // Attach runs shpool attached to the spec's session and returns its exit
@@ -51,8 +73,10 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 		fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: a newer connection attempt holds %s\r\n", s.Session)
 		return spec.ExitStaleAttempt, nil
 	}
-	argv := shpoolAttachArgv(l, s.Session, token)
 	for {
+		// Every start of the session gets a scope of its own: the scope of an
+		// earlier one stays while a daemon it left behind runs.
+		argv := shpoolAttachArgv(l, s.Session, token, l.SessionScope(s.Session, scopeInstance()), s.MemoryMax)
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio.Stdin, stdio.Stdout, stdio.Stderr
 		err = cmd.Run()
@@ -88,6 +112,8 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 		}
 	}
 }
+
+func scopeInstance() string { return strings.ToLower(rand.Text()[:8]) }
 
 // takeoverGrace covers shpool still tearing down a session whose agent just exited.
 const takeoverGrace = 2 * time.Second

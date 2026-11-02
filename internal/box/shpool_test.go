@@ -14,14 +14,19 @@ import (
 
 func TestShpoolAttachArgv(t *testing.T) {
 	l := boxlayout.Layout{Home: "/home/agent", Name: boxlayout.DefaultName}
-	argv := shpoolAttachArgv(l, "claude-abc", "TOKEN")
+	argv := shpoolAttachArgv(l, "claude-abc", "TOKEN", "remote-agents-claude-abc-k3.scope", 2<<30)
 	want := []string{
 		"/home/agent/.local/share/remote-agents/bin/shpool",
 		"--socket", "/home/agent/.local/state/remote-agents/shpool.sock",
 		"--config-file", "/home/agent/.config/remote-agents/shpool.toml",
 		"--no-daemonize",
 		"attach", "--force",
-		"--cmd", "/home/agent/.local/share/remote-agents/bin/remote-agents-box launch TOKEN",
+		"--cmd", "/usr/bin/systemd-run --user --scope --quiet --collect --unit=remote-agents-claude-abc-k3.scope" +
+			" --description=claude-abc" +
+			" --property=MemoryMax=2147483648 --property=MemorySwapMax=0 --property=OOMPolicy=continue" +
+			" --property=BindsTo=remote-agents-shpool.service --property=StopPropagatedFrom=remote-agents-shpool.service" +
+			" --property=After=remote-agents-shpool.service --property=TimeoutStopSec=2s --property=SendSIGHUP=yes" +
+			" /home/agent/.local/share/remote-agents/bin/remote-agents-box launch TOKEN",
 		"claude-abc",
 	}
 	if !slices.Equal(argv, want) {

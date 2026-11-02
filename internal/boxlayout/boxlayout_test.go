@@ -10,21 +10,23 @@ import (
 func TestLayoutPathsAreUnderTheInstallName(t *testing.T) {
 	l := Layout{Home: "/home/agent", Name: "remote-agents-e2e"}
 	cases := map[string]string{
-		l.Binary():           "/home/agent/.local/share/remote-agents-e2e/bin/remote-agents-box",
-		l.Shims():            "/home/agent/.local/share/remote-agents-e2e/shims",
-		l.HookBin():          "/home/agent/.local/share/remote-agents-e2e/hookbin",
-		l.Shpool():           "/home/agent/.local/share/remote-agents-e2e/bin/shpool",
-		l.ShpoolConfig():     "/home/agent/.config/remote-agents-e2e/shpool.toml",
-		l.ShpoolSocket():     "/home/agent/.local/state/remote-agents-e2e/shpool.sock",
-		l.LaptopSocket():     "/home/agent/.local/state/remote-agents-e2e/laptop.sock",
-		l.EndedMarker("r"):   "/home/agent/.local/state/remote-agents-e2e/ended/r.json",
-		l.ClaudeBin():        "/home/agent/.local/bin",
-		l.HookState("s"):     "/home/agent/.local/state/remote-agents-e2e/activity/s.hooks.json",
-		l.Status("s"):        "/home/agent/.local/state/remote-agents-e2e/activity/s.status.json",
-		l.Reaped("c"):        "/home/agent/.local/state/remote-agents-e2e/reaped/c.json",
-		l.ReapedSession("s"): "/home/agent/.local/state/remote-agents-e2e/reaped-sessions/s.json",
-		l.ReaperLog():        "/home/agent/.local/state/remote-agents-e2e/reaper.log",
-		l.ReaperConfig():     "/home/agent/.config/remote-agents-e2e/reaper.toml",
+		l.Binary():                       "/home/agent/.local/share/remote-agents-e2e/bin/remote-agents-box",
+		l.Shims():                        "/home/agent/.local/share/remote-agents-e2e/shims",
+		l.HookBin():                      "/home/agent/.local/share/remote-agents-e2e/hookbin",
+		l.Shpool():                       "/home/agent/.local/share/remote-agents-e2e/bin/shpool",
+		l.ShpoolConfig():                 "/home/agent/.config/remote-agents-e2e/shpool.toml",
+		l.ShpoolSocket():                 "/home/agent/.local/state/remote-agents-e2e/shpool.sock",
+		l.LaptopSocket():                 "/home/agent/.local/state/remote-agents-e2e/laptop.sock",
+		l.EndedMarker("r"):               "/home/agent/.local/state/remote-agents-e2e/ended/r.json",
+		l.ClaudeBin():                    "/home/agent/.local/bin",
+		l.HookState("s"):                 "/home/agent/.local/state/remote-agents-e2e/activity/s.hooks.json",
+		l.Status("s"):                    "/home/agent/.local/state/remote-agents-e2e/activity/s.status.json",
+		l.Reaped("c"):                    "/home/agent/.local/state/remote-agents-e2e/reaped/c.json",
+		l.ReapedSession("s"):             "/home/agent/.local/state/remote-agents-e2e/reaped-sessions/s.json",
+		l.ReaperLog():                    "/home/agent/.local/state/remote-agents-e2e/reaper.log",
+		l.ReaperConfig():                 "/home/agent/.config/remote-agents-e2e/reaper.toml",
+		l.ShpoolService():                "remote-agents-e2e-shpool.service",
+		l.SessionScope("claude-x", "k3"): "remote-agents-e2e-claude-x-k3.scope",
 	}
 	for got, want := range cases {
 		if got != want {

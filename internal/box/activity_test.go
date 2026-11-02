@@ -317,11 +317,12 @@ func TestReattachTargetResumesTheReapedRun(t *testing.T) {
 	if err != nil || !found || rec.ClaudeSession != id || rec.At != 7 {
 		t.Fatalf("record %+v, %v, %v", rec, found, err)
 	}
-	target, err := reattachTarget(rec)
+	// The resumed run is capped like the attach that resumes it.
+	target, err := reattachTarget(rec, 2<<30)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target.Mode != spec.ModeSession || target.RunID != s.RunID || target.Claude.Resumes != id ||
+	if target.Mode != spec.ModeSession || target.RunID != s.RunID || target.Claude.Resumes != id || target.MemoryMax != 2<<30 ||
 		!slices.Equal(target.Argv, []string{"claude", "--dangerously-skip-permissions", "--resume", id}) {
 		t.Fatalf("target = %+v", target)
 	}
@@ -331,7 +332,7 @@ func TestReattachTargetResumesTheReapedRun(t *testing.T) {
 }
 
 func TestReattachingAMissingSessionStillFails(t *testing.T) {
-	code, out := launch(t, testLayout(t), spec.Spec{Mode: spec.ModeReattach, Session: claudeSpec("/w").Session})
+	code, out := launch(t, testLayout(t), spec.Spec{Mode: spec.ModeReattach, Session: claudeSpec("/w").Session, MemoryMax: testMemoryMax})
 	if code != 1 || !strings.Contains(out, "is not running") {
 		t.Fatalf("launch = %d %q", code, out)
 	}

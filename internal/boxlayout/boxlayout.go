@@ -100,5 +100,14 @@ func (l Layout) ReapedSessionsDir() string { return l.state("reaped-sessions") }
 func (l Layout) ReapedSession(session string) string {
 	return filepath.Join(l.ReapedSessionsDir(), session+".json")
 }
-func (l Layout) ReaperLog() string    { return l.state("reaper.log") }
+func (l Layout) ReaperLog() string { return l.state("reaper.log") }
+
+// ShpoolService is the systemd user unit box/install.sh installs for the shpool daemon.
+func (l Layout) ShpoolService() string { return l.Name + "-shpool.service" }
+
+// SessionScope is the systemd scope that one start of session runs in;
+// instance tells it from the scopes of the session's earlier starts.
+func (l Layout) SessionScope(session, instance string) string {
+	return l.Name + "-" + session + "-" + instance + ".scope"
+}
 func (l Layout) ReaperConfig() string { return filepath.Join(l.Home, ".config", l.Name, "reaper.toml") }

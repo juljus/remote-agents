@@ -5,7 +5,8 @@
 # hook <name> [event] sends a hook for it. prompt and stop report a turn to
 # the box's activity hook; bg <s> runs a sleep the way the Bash tool does,
 # and busy <s> and leave <s> leave a CPU-busy loop or a sleep behind its
-# shell; daemon <s> starts a sleep that detaches into its own session.
+# shell; daemon <s> starts a sleep that detaches into its own session; hog
+# allocates memory until it is killed.
 echo "fake-claude args=$*"
 id=""
 act=""
@@ -59,6 +60,8 @@ while true; do
     bg) bash -c "$snapshot; sleep $arg1; pwd -P >/dev/null" & echo "bg started" ;;
     daemon) bash -c "$snapshot; setsid sleep $arg1 >/dev/null 2>&1 &"; echo "daemon started" ;;
     leave) bash -c "$snapshot; sleep $arg1 >/dev/null 2>&1 &"; echo "leave started" ;;
+    hog) python3 -c 'b = []
+while True: b.append(bytearray(64 << 20))'; echo "hog exit=$?" ;;
     busy) bash -c "$snapshot; timeout $arg1 sh -c 'while :; do :; done' >/dev/null 2>&1 &"; echo "busy started" ;;
     *) echo "got: $cmd $arg1 $arg2" ;;
   esac

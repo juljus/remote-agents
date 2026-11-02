@@ -160,6 +160,7 @@ case "$1" in http://localhost:*) curl -s -m 5 -o %q "$1" ;; esac`, openedLog, fi
 	config := fmt.Sprintf(`host = %q
 box_install = %q
 workdir = "%s/%s/work"
+memory_max = "2G"
 
 [link]
 opener = %q
@@ -481,6 +482,40 @@ func TestSessionLifecycle(t *testing.T) {
 	again.send("exit 0\r")
 	if code := again.wait(10 * time.Second); code != 0 {
 		t.Fatalf("resume exit %d", code)
+	}
+}
+
+func TestASessionOverItsMemoryCapLosesOnlyTheProcessThatOverran(t *testing.T) {
+	tm := start(t, "rfakeclaude")
+	m := tm.expect(`fake-claude session=(`+uuidRe+`) pid=(\d+)`, 20*time.Second)
+	id, pid := m[1], m[2]
+	out, err := onBox(fmt.Sprintf(`set -e
+unit=$(sed -n 's|^0::.*/||p' /proc/%s/cgroup)
+echo "$unit"
+systemctl --user show "$unit" -p MemoryMax -p MemorySwapMax -p OOMPolicy -p BindsTo -p StopPropagatedFrom`, pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit, props, _ := strings.Cut(out, "\n")
+	if !strings.HasPrefix(unit, box.Name+"-fakeclaude-"+id+"-") || !strings.HasSuffix(unit, ".scope") {
+		t.Fatalf("agent runs in unit %q", unit)
+	}
+	for _, want := range []string{"MemoryMax=2147483648", "MemorySwapMax=0", "OOMPolicy=continue", "BindsTo=" + box.ShpoolService(), "StopPropagatedFrom=" + box.ShpoolService()} {
+		if !strings.Contains(props, want+"\n") {
+			t.Fatalf("scope %s lacks %s:\n%s", unit, want, props)
+		}
+	}
+
+	tm.send("hog\r")
+	tm.expect(`hog exit=137`, 30*time.Second)
+	mark := len(tm.text())
+	tm.send("whoami\r")
+	if got := tm.expectAfter(mark, `fake-claude pid=(\d+)`, 5*time.Second)[1]; got != pid {
+		t.Fatalf("agent restarted: pid %s -> %s", pid, got)
+	}
+	tm.send("exit 0\r")
+	if code := tm.wait(10 * time.Second); code != 0 {
+		t.Fatalf("exit %d", code)
 	}
 }
 

@@ -65,7 +65,7 @@ func TestAnotherRunTakesTheSessionOver(t *testing.T) {
 func TestUnnumberedAttemptsTakeOverAndOwnNothing(t *testing.T) {
 	l := testLayout(t)
 	mustClaim(t, l, attempt(runID, 2), true)
-	reattach := spec.Spec{Mode: spec.ModeReattach, Session: attempt(runID, 2).Session}
+	reattach := spec.Spec{Mode: spec.ModeReattach, Session: attempt(runID, 2).Session, MemoryMax: testMemoryMax}
 	mustClaim(t, l, reattach, true)
 	mustOwn(t, l, attempt(runID, 2), false)
 	mustOwn(t, l, reattach, false)

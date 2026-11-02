@@ -123,7 +123,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		if !reaped {
 			return fail(fmt.Errorf("session %s is not running", s.Session))
 		}
-		if s, err = reattachTarget(rec); err != nil {
+		if s, err = reattachTarget(rec, s.MemoryMax); err != nil {
 			return fail(err)
 		}
 	}
