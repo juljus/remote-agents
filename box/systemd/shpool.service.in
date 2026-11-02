@@ -8,3 +8,5 @@ ExecStart=%h/.local/share/@NAME@/bin/shpool --config-file %h/.config/@NAME@/shpo
 KillMode=mixed
 TimeoutStopSec=2s
 SendSIGHUP=yes
+# The OOM killer ends one process; the default, stop, would then end every session with it.
+OOMPolicy=continue
