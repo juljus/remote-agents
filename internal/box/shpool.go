@@ -40,14 +40,15 @@ const systemdRun = "/usr/bin/systemd-run"
 // the process that took the session past memoryMax, swap included, and
 // OOMPolicy=continue keeps the rest of the session running. The session ends
 // with the shpool daemon that holds its terminal, before a new one starts:
-// BindsTo covers a crash, StopPropagatedFrom a stop or restart.
+// BindsTo covers a crash, StopPropagatedFrom a stop or restart. Its agent gets
+// SIGTERM and TimeoutStopSec to exit on its own, so its end is recorded.
 func scopeArgv(l boxlayout.Layout, session, unit string, memoryMax uint64) []string {
 	shpool := l.ShpoolService()
 	return []string{
 		systemdRun, "--user", "--scope", "--quiet", "--collect", "--unit=" + unit, "--description=" + session,
 		"--property=MemoryMax=" + strconv.FormatUint(memoryMax, 10), "--property=MemorySwapMax=0", "--property=OOMPolicy=continue",
 		"--property=BindsTo=" + shpool, "--property=StopPropagatedFrom=" + shpool, "--property=After=" + shpool,
-		"--property=TimeoutStopSec=2s", "--property=SendSIGHUP=yes",
+		"--property=TimeoutStopSec=10s",
 	}
 }
 

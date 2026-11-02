@@ -550,6 +550,22 @@ while [ -e /proc/%s ]; do sleep 0.1; done`, pid, pid)); err != nil {
 	}
 }
 
+func TestARestartOfTheShpoolDaemonEndsItsSessionsFirst(t *testing.T) {
+	tm := start(t, "rfakeclaude")
+	m := tm.expect(`fake-claude session=(`+uuidRe+`) pid=(\d+)`, 20*time.Second)
+	id, pid := m[1], m[2]
+	if _, err := onBox("systemctl --user restart " + box.ShpoolService()); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := onBox(fmt.Sprintf("test ! -e /proc/%s && echo gone", pid)); err != nil || out != "gone\n" {
+		t.Fatalf("agent %s outlived the restart: %q, %v", pid, out, err)
+	}
+	if code := tm.wait(10 * time.Second); code != 128+int(syscall.SIGTERM) {
+		t.Fatalf("exit %d, want the agent's SIGTERM", code)
+	}
+	tm.expect(`Resume on the box with: rfakeclaude --resume `+id, 5*time.Second)
+}
+
 func TestDetachWhileDownThenResumeReattaches(t *testing.T) {
 	tm := start(t, "rfakeclaude")
 	m := tm.expect(`fake-claude session=(`+uuidRe+`) pid=(\d+)`, 20*time.Second)

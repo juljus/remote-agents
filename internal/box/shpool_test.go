@@ -25,7 +25,7 @@ func TestShpoolAttachArgv(t *testing.T) {
 			" --description=claude-abc" +
 			" --property=MemoryMax=2147483648 --property=MemorySwapMax=0 --property=OOMPolicy=continue" +
 			" --property=BindsTo=remote-agents-shpool.service --property=StopPropagatedFrom=remote-agents-shpool.service" +
-			" --property=After=remote-agents-shpool.service --property=TimeoutStopSec=2s --property=SendSIGHUP=yes" +
+			" --property=After=remote-agents-shpool.service --property=TimeoutStopSec=10s" +
 			" /home/agent/.local/share/remote-agents/bin/remote-agents-box launch TOKEN",
 		"claude-abc",
 	}
