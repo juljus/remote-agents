@@ -246,6 +246,16 @@ func announceResume(w io.Writer, r reaper.Reason) {
 	fmt.Fprintf(w, "\x1b[2m[remote-agents] resumed; the session had been ended %s\x1b[0m\n", endedWhy(r))
 }
 
+// sessionLog logs lines about session to the reaper log; a line it cannot
+// write is reported to stderr.
+func sessionLog(l boxlayout.Layout, session string, stderr io.Writer) func(string, ...any) {
+	return func(format string, args ...any) {
+		if err := reaperLog(l, time.Now(), session+": "+format, args...); err != nil {
+			fmt.Fprintf(stderr, "remote-agents: %v\n", err)
+		}
+	}
+}
+
 // reaperLog appends one line to the install's reaper log.
 func reaperLog(l boxlayout.Layout, now time.Time, format string, args ...any) error {
 	if err := os.MkdirAll(filepath.Dir(l.ReaperLog()), 0o700); err != nil {

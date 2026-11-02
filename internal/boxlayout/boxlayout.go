@@ -70,6 +70,12 @@ func (l Layout) EndedDir() string                { return l.state("ended") }
 func (l Layout) ClaudeBin() string               { return filepath.Join(l.Home, ClaudeBinDir) }
 func (l Layout) EndedMarker(runID string) string { return filepath.Join(l.EndedDir(), runID+".json") }
 
+// The runs whose agent has been started.
+func (l Layout) StartedDir() string { return l.state("started") }
+func (l Layout) StartedMarker(runID string) string {
+	return filepath.Join(l.StartedDir(), runID+".json")
+}
+
 // The latest connection attempt that claimed each session, and the lock that
 // orders the claims.
 func (l Layout) AttachmentsDir() string  { return l.state("attachments") }

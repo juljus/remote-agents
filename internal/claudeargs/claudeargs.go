@@ -229,6 +229,21 @@ func Analyze(args []string, newID func() string) (Plan, error) {
 	return inject(args, newID()), nil
 }
 
+// SessionOf is the session id args run under, and whether they resume it
+// rather than start it; "" when Claude picks the session or a new one.
+func SessionOf(args []string) (string, bool) {
+	s := scanArgs(args)
+	switch {
+	case s.sessionID != "":
+		return s.sessionID, false
+	case s.fork:
+		return "", false
+	case s.resume && IsUUID(s.resumeValue):
+		return s.resumeValue, true
+	}
+	return "", false
+}
+
 func inject(args []string, id string) Plan {
 	out := make([]string, 0, len(args)+2)
 	out = append(out, "--session-id", id)

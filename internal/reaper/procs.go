@@ -20,6 +20,8 @@ type Proc struct {
 	// CPU is the user and system time used so far, in clock ticks, including
 	// that of waited children: a build's compilers live too briefly to be seen.
 	CPU uint64
+	// StartTime is when the process started, in clock ticks after boot.
+	StartTime uint64
 }
 
 // ReadProcs lists the processes of a Linux /proc tree.
@@ -57,9 +59,10 @@ func readProc(proc fs.FS, pid int) (Proc, error) {
 	if end < 0 {
 		return Proc{}, fmt.Errorf("process %d: malformed stat %q", pid, stat)
 	}
-	// fields[0] is stat's field 3 (state); utime, stime, cutime and cstime are fields 14 to 17.
+	// fields[0] is stat's field 3 (state); utime, stime, cutime and cstime are
+	// fields 14 to 17, starttime is field 22.
 	fields := strings.Fields(string(stat[end+1:]))
-	if len(fields) < 15 {
+	if len(fields) < 20 {
 		return Proc{}, fmt.Errorf("process %d: malformed stat %q", pid, stat)
 	}
 	ppid, err := strconv.Atoi(fields[1])
@@ -78,6 +81,10 @@ func readProc(proc fs.FS, pid int) (Proc, error) {
 		}
 		cpu += ticks
 	}
+	start, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return Proc{}, fmt.Errorf("process %d: start time %q: %w", pid, fields[19], err)
+	}
 	cmdline, err := fs.ReadFile(proc, strconv.Itoa(pid)+"/cmdline")
 	if err != nil {
 		return Proc{}, err
@@ -88,7 +95,7 @@ func readProc(proc fs.FS, pid int) (Proc, error) {
 			args = append(args, string(a))
 		}
 	}
-	return Proc{PID: pid, PPID: ppid, SID: sid, Zombie: fields[0] == "Z", Args: args, CPU: cpu}, nil
+	return Proc{PID: pid, PPID: ppid, SID: sid, Zombie: fields[0] == "Z", Args: args, CPU: cpu, StartTime: start}, nil
 }
 
 // Exited reports whether pid is gone or only waits to be collected.
@@ -101,6 +108,19 @@ func Exited(proc fs.FS, pid int) (bool, error) {
 		return false, err
 	}
 	return p.Zombie, nil
+}
+
+// Running reports whether pid is a live process that started at startTime,
+// not one that has exited or a later process the kernel gave the same pid.
+func Running(proc fs.FS, pid int, startTime uint64) (bool, error) {
+	p, err := readProc(proc, pid)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !p.Zombie && p.StartTime == startTime, nil
 }
 
 // toolShell reports a shell Claude Code's Bash tool runs a command in.

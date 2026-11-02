@@ -18,6 +18,7 @@ func TestLayoutPathsAreUnderTheInstallName(t *testing.T) {
 		l.ShpoolSocket():                 "/home/agent/.local/state/remote-agents-e2e/shpool.sock",
 		l.LaptopSocket():                 "/home/agent/.local/state/remote-agents-e2e/laptop.sock",
 		l.EndedMarker("r"):               "/home/agent/.local/state/remote-agents-e2e/ended/r.json",
+		l.StartedMarker("r"):             "/home/agent/.local/state/remote-agents-e2e/started/r.json",
 		l.ClaudeBin():                    "/home/agent/.local/bin",
 		l.HookState("s"):                 "/home/agent/.local/state/remote-agents-e2e/activity/s.hooks.json",
 		l.Status("s"):                    "/home/agent/.local/state/remote-agents-e2e/activity/s.status.json",

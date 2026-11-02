@@ -225,6 +225,20 @@ func TestExited(t *testing.T) {
 	}
 }
 
+func TestRunning(t *testing.T) {
+	// The fixture starts every process at tick 100.
+	fsys := procFS(map[int]fakeProc{10: {"claude", "S", 9, 0, []string{"claude"}, 0, 0}, 11: {"claude", "Z", 9, 0, nil, 0, 0}})
+	for _, tc := range []struct {
+		pid   int
+		start uint64
+		want  bool
+	}{{10, 100, true}, {10, 99, false}, {11, 100, false}, {12, 100, false}} {
+		if got, err := Running(fsys, tc.pid, tc.start); err != nil || got != tc.want {
+			t.Errorf("Running(%d, %d) = %v, %v; want %v", tc.pid, tc.start, got, err, tc.want)
+		}
+	}
+}
+
 const launcher, agent = 100, 101
 
 var session = map[int]fakeProc{

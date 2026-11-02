@@ -72,9 +72,7 @@ func newWatcher(l boxlayout.Layout, session string, now time.Time) (*watcher, er
 }
 
 func (w *watcher) log(format string, args ...any) {
-	if err := reaperLog(w.l, time.Now(), w.session+": "+format, args...); err != nil {
-		fmt.Fprintf(os.Stderr, "remote-agents: %v\n", err)
-	}
+	sessionLog(w.l, w.session, os.Stderr)(format, args...)
 }
 
 // start checks the session every poll until it asks for a reap or is stopped.

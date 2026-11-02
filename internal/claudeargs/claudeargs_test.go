@@ -176,3 +176,26 @@ func TestLastSettingsFindsTheSettingsClaudeApplies(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionOf(t *testing.T) {
+	const id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	cases := []struct {
+		args    []string
+		id      string
+		resumes bool
+	}{
+		{[]string{"--session-id", id, "--model=x"}, id, false},
+		{[]string{"--session-id=" + id}, id, false},
+		{[]string{"--dangerously-skip-permissions", "--resume", id}, id, true},
+		{[]string{"-r", id}, id, true},
+		{[]string{"--resume", id, "--fork-session"}, "", false},
+		{[]string{"--resume"}, "", false},
+		{[]string{"--continue"}, "", false},
+		{[]string{"--", "--resume", id}, "", false},
+	}
+	for _, tc := range cases {
+		if id, resumes := SessionOf(tc.args); id != tc.id || resumes != tc.resumes {
+			t.Errorf("SessionOf(%q) = %q, %v; want %q, %v", tc.args, id, resumes, tc.id, tc.resumes)
+		}
+	}
+}

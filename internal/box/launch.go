@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"remote-agents/internal/boxlayout"
+	"remote-agents/internal/claudeargs"
 	"remote-agents/internal/jsonfile"
 	"remote-agents/internal/reaper"
 	"remote-agents/internal/spec"
@@ -131,7 +132,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		return fail(fmt.Errorf("launch needs a session spec, got mode %q", s.Mode))
 	}
 	now := time.Now()
-	for _, dir := range []string{l.EndedDir(), l.ReapedDir(), l.ReapedSessionsDir()} {
+	for _, dir := range []string{l.EndedDir(), l.StartedDir(), l.ReapedDir(), l.ReapedSessionsDir()} {
 		if err := pruneOld(dir, now); err != nil {
 			return fail(err)
 		}
@@ -151,12 +152,23 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 	if err != nil {
 		return fail(err)
 	}
+	logf := sessionLog(l, s.Session, stdio.Stderr)
+	if !ended {
+		if err := resumeLostLaunch(l, &s, logf); err != nil {
+			return fail(err)
+		}
+	}
 	path, env, err := prepareAgent(l, s, base)
 	if err != nil {
 		return fail(err)
 	}
 	var w *watcher
 	if s.Claude != nil {
+		if id, resumes := claudeargs.SessionOf(s.Argv[1:]); resumes {
+			if err := awaitRelease(claudeSessionsDir(l, env), os.DirFS("/proc"), id, releaseWait, logf); err != nil {
+				return fail(err)
+			}
+		}
 		if s.Argv, err = withActivityHooks(l, s.Argv, s.Workdir); err != nil {
 			return fail(err)
 		}
@@ -166,6 +178,9 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 	}
 	if resumed != "" {
 		announceResume(stdio.Stderr, resumed)
+	}
+	if err := markStarted(l, s.RunID); err != nil {
+		return fail(err)
 	}
 	code, reaped, err := runChild(path, s, env, stdio, w)
 	if err != nil {

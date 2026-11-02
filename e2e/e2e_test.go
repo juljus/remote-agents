@@ -519,6 +519,35 @@ systemctl --user show "$unit" -p MemoryMax -p MemorySwapMax -p OOMPolicy -p Bind
 	}
 }
 
+func TestARunWhoseLauncherWasKilledResumesItsSessionOnReconnect(t *testing.T) {
+	tm := start(t, "rfakeclaude")
+	m := tm.expect(`fake-claude session=(`+uuidRe+`) pid=(\d+)`, 20*time.Second)
+	id, pid := m[1], m[2]
+	block(t, true)
+	defer block(t, false)
+	if err := syscall.Kill(tm.sshChild(), syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	tm.expect(`network unreachable`, 10*time.Second)
+	// As a kill of the whole shpool unit did: the launcher dies with its agent and writes no ended marker.
+	if _, err := onBox(fmt.Sprintf(`set -e
+kill -KILL $(cat "/sys/fs/cgroup$(sed -n 's|^0::||p' /proc/%s/cgroup)/cgroup.procs")
+while [ -e /proc/%s ]; do sleep 0.1; done`, pid, pid)); err != nil {
+		t.Fatal(err)
+	}
+	mark := len(tm.text())
+	block(t, false)
+	args := tm.expectAfter(mark, `fake-claude args=(.*)\r?\n`, 20*time.Second)[1]
+	if !strings.Contains(args, "--resume "+id) || strings.Contains(args, "--session-id") {
+		t.Fatalf("relaunch args = %q, want a resume of %s", args, id)
+	}
+	tm.expectAfter(mark, `fake-claude session=`+id+` `, 5*time.Second)
+	tm.send("exit 0\r")
+	if code := tm.wait(10 * time.Second); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+}
+
 func TestDetachWhileDownThenResumeReattaches(t *testing.T) {
 	tm := start(t, "rfakeclaude")
 	m := tm.expect(`fake-claude session=(`+uuidRe+`) pid=(\d+)`, 20*time.Second)
