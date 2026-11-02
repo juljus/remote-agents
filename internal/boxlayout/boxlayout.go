@@ -106,7 +106,13 @@ func (l Layout) ReapedSessionsDir() string { return l.state("reaped-sessions") }
 func (l Layout) ReapedSession(session string) string {
 	return filepath.Join(l.ReapedSessionsDir(), session+".json")
 }
-func (l Layout) ReaperLog() string { return l.state("reaper.log") }
+func (l Layout) ReaperLog() string    { return l.state("reaper.log") }
+func (l Layout) ReaperConfig() string { return filepath.Join(l.Home, ".config", l.Name, "reaper.toml") }
+
+// SessionConfig is how the box runs each session.
+func (l Layout) SessionConfig() string {
+	return filepath.Join(l.Home, ".config", l.Name, "session.toml")
+}
 
 // ShpoolService is the systemd user unit box/install.sh installs for the shpool daemon.
 func (l Layout) ShpoolService() string { return l.Name + "-shpool.service" }
@@ -116,4 +122,3 @@ func (l Layout) ShpoolService() string { return l.Name + "-shpool.service" }
 func (l Layout) SessionScope(session, instance string) string {
 	return l.Name + "-" + session + "-" + instance + ".scope"
 }
-func (l Layout) ReaperConfig() string { return filepath.Join(l.Home, ".config", l.Name, "reaper.toml") }

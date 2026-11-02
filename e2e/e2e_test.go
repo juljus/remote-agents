@@ -121,6 +121,9 @@ func setup(m *testing.M) (int, error) {
 	if _, err := onBox("mkdir -p " + boxTestDir + "/work"); err != nil {
 		return 0, err
 	}
+	if _, err := onBox(fmt.Sprintf(`printf 'memory_max = "2G"\n' > %q`, box.SessionConfig())); err != nil {
+		return 0, err
+	}
 	if _, err := sh("scp", "-q", "-p", filepath.Join(root, "testdata", "fake-claude"), host+":"+boxTestDir+"/fake-claude"); err != nil {
 		return 0, err
 	}
@@ -160,7 +163,6 @@ case "$1" in http://localhost:*) curl -s -m 5 -o %q "$1" ;; esac`, openedLog, fi
 	config := fmt.Sprintf(`host = %q
 box_install = %q
 workdir = "%s/%s/work"
-memory_max = "2G"
 
 [link]
 opener = %q

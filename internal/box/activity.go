@@ -212,16 +212,14 @@ func takeReaped(l boxlayout.Layout, claudeSession string) (reaper.Reason, error)
 	return rec.Reason, nil
 }
 
-// reattachTarget is the run an attach by name of a reaped session resumes. It
-// runs in the scope of that attach, so under its memoryMax.
-func reattachTarget(rec reapedSessionRecord, memoryMax uint64) (spec.Spec, error) {
+// reattachTarget is the run an attach by name of a reaped session resumes.
+func reattachTarget(rec reapedSessionRecord) (spec.Spec, error) {
 	s := rec.Spec
 	if s.Claude == nil {
 		return spec.Spec{}, fmt.Errorf("reaped session %s has no resume command", s.Session)
 	}
 	s.Argv = slices.Concat(s.Claude.Resume, []string{"--resume", rec.ClaudeSession})
 	s.Claude.Resumes = rec.ClaudeSession
-	s.MemoryMax = memoryMax
 	return s, s.Validate()
 }
 

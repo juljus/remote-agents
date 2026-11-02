@@ -15,8 +15,6 @@ import (
 
 const runID = "11111111-2222-4333-8444-555555555555"
 
-const testMemoryMax = 64 << 30
-
 func testLayout(t *testing.T) boxlayout.Layout {
 	t.Helper()
 	return boxlayout.Layout{Home: t.TempDir(), Name: boxlayout.DefaultName}
@@ -24,13 +22,12 @@ func testLayout(t *testing.T) boxlayout.Layout {
 
 func sessionSpec(workdir string, argv ...string) spec.Spec {
 	return spec.Spec{
-		Mode:      spec.ModeSession,
-		Session:   "claude-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-		RunID:     runID,
-		Workdir:   workdir,
-		MemoryMax: testMemoryMax,
-		Argv:      argv,
-		Env:       map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor"},
+		Mode:    spec.ModeSession,
+		Session: "claude-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		RunID:   runID,
+		Workdir: workdir,
+		Argv:    argv,
+		Env:     map[string]string{"TERM": "xterm-256color", "COLORTERM": "truecolor"},
 	}
 }
 
@@ -168,7 +165,7 @@ func TestLaunchMissingWorkdirFailsLoudly(t *testing.T) {
 
 func TestLaunchReattachSpecNeverRuns(t *testing.T) {
 	l := testLayout(t)
-	code, out := launch(t, l, spec.Spec{Mode: spec.ModeReattach, Session: "claude-x", MemoryMax: testMemoryMax})
+	code, out := launch(t, l, spec.Spec{Mode: spec.ModeReattach, Session: "claude-x"})
 	if code == 0 || !strings.Contains(out, "claude-x") {
 		t.Fatalf("launch = %d %q", code, out)
 	}

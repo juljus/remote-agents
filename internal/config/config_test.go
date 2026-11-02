@@ -88,25 +88,6 @@ func TestParseBoxInstall(t *testing.T) {
 	}
 }
 
-func TestParseMemoryMax(t *testing.T) {
-	cfg, err := Parse([]byte(valid))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.MemoryMax != 64<<30 {
-		t.Fatalf("default memory_max = %d, want 64G", cfg.MemoryMax)
-	}
-	for value, want := range map[string]uint64{"512M": 512 << 20, "2G": 2 << 30, "1T": 1 << 40, "4096K": 4 << 20, "1073741824": 1 << 30} {
-		cfg, err := Parse([]byte(strings.Replace(valid, "workdir =", "memory_max = \""+value+"\"\nworkdir =", 1)))
-		if err != nil {
-			t.Fatalf("memory_max %q: %v", value, err)
-		}
-		if cfg.MemoryMax != want {
-			t.Fatalf("memory_max %q = %d, want %d", value, cfg.MemoryMax, want)
-		}
-	}
-}
-
 func TestParseErrors(t *testing.T) {
 	cases := map[string]struct {
 		src  string
@@ -127,11 +108,6 @@ func TestParseErrors(t *testing.T) {
 		"args not strings":       {strings.Replace(valid, `["--dangerously-skip-permissions"]`, `[1]`, 1), "Args"},
 		"args as a string":       {strings.Replace(valid, `["--dangerously-skip-permissions"]`, `"--dangerously-skip-permissions"`, 1), "Args"},
 		"invalid box install":    {strings.Replace(valid, "workdir =", "box_install = \"../x\"\nworkdir =", 1), "install name"},
-		"zero memory_max":        {strings.Replace(valid, "workdir =", "memory_max = \"0G\"\nworkdir =", 1), "memory_max"},
-		"fractional memory_max":  {strings.Replace(valid, "workdir =", "memory_max = \"1.5G\"\nworkdir =", 1), "memory_max"},
-		"memory_max unit":        {strings.Replace(valid, "workdir =", "memory_max = \"64GB\"\nworkdir =", 1), "memory_max"},
-		"memory_max overflow":    {strings.Replace(valid, "workdir =", "memory_max = \"99999999T\"\nworkdir =", 1), "memory_max"},
-		"memory_max a number":    {strings.Replace(valid, "workdir =", "memory_max = 64\nworkdir =", 1), "MemoryMax"},
 		"empty cmux wrapper":     {strings.Replace(valid, `wrapper = "/Applications/cmux.app/Contents/Resources/bin/cmux-claude-wrapper"`, `wrapper = ""`, 1), "wrapper"},
 	}
 	for name, tc := range cases {

@@ -65,6 +65,10 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	cfg, err := LoadSessionConfig(l.SessionConfig())
+	if err != nil {
+		return 1, err
+	}
 	claimed, err := claimAttachment(l, s)
 	if err != nil {
 		return 1, err
@@ -76,7 +80,7 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 	for {
 		// Every start of the session gets a scope of its own: the scope of an
 		// earlier one stays while a daemon it left behind runs.
-		argv := shpoolAttachArgv(l, s.Session, token, l.SessionScope(s.Session, scopeInstance()), s.MemoryMax)
+		argv := shpoolAttachArgv(l, s.Session, token, l.SessionScope(s.Session, scopeInstance()), cfg.MemoryMax)
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio.Stdin, stdio.Stdout, stdio.Stderr
 		err = cmd.Run()

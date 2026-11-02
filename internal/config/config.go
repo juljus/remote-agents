@@ -5,12 +5,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strconv"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -44,17 +41,12 @@ type Cmux struct {
 	Wrapper string
 }
 
-// DefaultMemoryMax is each session's memory cap on the box unless memory_max sets it.
-const DefaultMemoryMax uint64 = 64 << 30
-
 type Config struct {
 	Host string
 	// BoxInstall names the remote-agents install on the box; see boxlayout.DefaultName.
 	BoxInstall string
 	Workdir    string
-	// MemoryMax caps the memory of each session's processes on the box, in bytes.
-	MemoryMax uint64
-	Link      Link
+	Link       Link
 	// Cmux is nil when cmux integration is not configured.
 	Cmux   *Cmux
 	Agents map[string]Agent
@@ -78,7 +70,6 @@ type rawConfig struct {
 	Host       *string             `toml:"host"`
 	BoxInstall *string             `toml:"box_install"`
 	Workdir    *string             `toml:"workdir"`
-	MemoryMax  *string             `toml:"memory_max"`
 	Link       *rawLink            `toml:"link"`
 	Cmux       *rawCmux            `toml:"cmux"`
 	Agents     map[string]rawAgent `toml:"agents"`
@@ -136,13 +127,6 @@ func (r rawConfig) validate() (Config, error) {
 	if err := boxlayout.ValidName(install); err != nil {
 		return Config{}, fmt.Errorf("box_install: %w", err)
 	}
-	memoryMax := DefaultMemoryMax
-	if r.MemoryMax != nil {
-		var err error
-		if memoryMax, err = parseSize(*r.MemoryMax); err != nil {
-			return Config{}, fmt.Errorf("memory_max: %w", err)
-		}
-	}
 	link, err := r.validateLink()
 	if err != nil {
 		return Config{}, err
@@ -159,37 +143,10 @@ func (r rawConfig) validate() (Config, error) {
 		Host:       *r.Host,
 		BoxInstall: install,
 		Workdir:    *r.Workdir,
-		MemoryMax:  memoryMax,
 		Link:       link,
 		Cmux:       cmux,
 		Agents:     agents,
 	}, nil
-}
-
-var (
-	sizePattern = regexp.MustCompile(`^([0-9]+)([KMGT]?)$`)
-	sizeShifts  = map[string]uint{"": 0, "K": 10, "M": 20, "G": 30, "T": 40}
-)
-
-// parseSize reads a positive byte count with an optional K, M, G or T suffix
-// in powers of 1024, as systemd reads MemoryMax.
-func parseSize(s string) (uint64, error) {
-	m := sizePattern.FindStringSubmatch(s)
-	if m == nil {
-		return 0, fmt.Errorf("%q is not a byte count such as 64G", s)
-	}
-	n, err := strconv.ParseUint(m[1], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%q: %w", s, err)
-	}
-	if n == 0 {
-		return 0, fmt.Errorf("%q must be positive", s)
-	}
-	shift := sizeShifts[m[2]]
-	if n > math.MaxUint64>>shift {
-		return 0, fmt.Errorf("%q is too large", s)
-	}
-	return n << shift, nil
 }
 
 func (r rawConfig) validateLink() (Link, error) {

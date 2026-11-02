@@ -14,7 +14,6 @@ func validSession() Spec {
 		RunID:     "11111111-2222-4333-8444-555555555555",
 		Attempt:   2,
 		Workdir:   "/home/agent/work",
-		MemoryMax: 64 << 30,
 		Argv:      []string{"claude", "--session-id", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "it's \"quoted\" $HOME"},
 		Env:       map[string]string{"TERM": "xterm-256color"},
 		HookRelay: true,
@@ -57,13 +56,6 @@ func TestValidate(t *testing.T) {
 		"bad resumes":       func(s *Spec) { s.Claude.Resumes = "x" },
 		"reattach claude":   func(s *Spec) { s.Mode, s.Argv, s.RunID = ModeReattach, nil, "" },
 		"negative attempt":  func(s *Spec) { s.Attempt = -1 },
-		"no memory max":     func(s *Spec) { s.MemoryMax = 0 },
-		"reattach without memory max": func(s *Spec) {
-			s.Mode, s.Argv, s.Claude, s.MemoryMax = ModeReattach, nil, nil, 0
-		},
-		"exec with memory max": func(s *Spec) {
-			s.Mode, s.Session, s.RunID, s.Claude, s.Attempt = ModeExec, "", "", nil, 0
-		},
 		"exec attempt": func(s *Spec) {
 			s.Mode, s.Session, s.RunID, s.Claude, s.Attempt = ModeExec, "", "", nil, 1
 		},
@@ -86,8 +78,8 @@ func TestValidate(t *testing.T) {
 
 func TestValidReattach(t *testing.T) {
 	for _, s := range []Spec{
-		{Mode: ModeReattach, Session: "claude-x", MemoryMax: 1 << 30},
-		{Mode: ModeReattach, Session: "claude-x", MemoryMax: 1 << 30, RunID: "11111111-2222-4333-8444-555555555555", Attempt: 3},
+		{Mode: ModeReattach, Session: "claude-x"},
+		{Mode: ModeReattach, Session: "claude-x", RunID: "11111111-2222-4333-8444-555555555555", Attempt: 3},
 	} {
 		if err := s.Validate(); err != nil {
 			t.Fatalf("Validate(%+v): %v", s, err)

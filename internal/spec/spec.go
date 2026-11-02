@@ -34,12 +34,10 @@ type Spec struct {
 	// attempt older than one it already attached, which a delayed connection
 	// would otherwise use to take the session from its successor. 0 leaves the
 	// attempt unnumbered: it attaches unchecked.
-	Attempt int    `json:"attempt,omitempty"`
-	Workdir string `json:"workdir,omitempty"`
-	// MemoryMax caps, in bytes, the memory of everything a session runs on the box.
-	MemoryMax uint64            `json:"memory_max,omitempty"`
-	Argv      []string          `json:"argv,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
+	Attempt int               `json:"attempt,omitempty"`
+	Workdir string            `json:"workdir,omitempty"`
+	Argv    []string          `json:"argv,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
 	// HookRelay routes the agent's cmux hook commands to the laptop.
 	HookRelay bool `json:"hook_relay,omitempty"`
 	// Claude is set when the agent is Claude Code: the box then watches its
@@ -118,9 +116,6 @@ func (s Spec) Validate() error {
 		if err := s.validateAttempt(); err != nil {
 			return err
 		}
-		if err := s.validateMemoryMax(); err != nil {
-			return err
-		}
 		if s.Claude != nil {
 			if err := s.Claude.validate(); err != nil {
 				return err
@@ -139,15 +134,12 @@ func (s Spec) Validate() error {
 				return fmt.Errorf("invalid run id %q: %w", s.RunID, err)
 			}
 		}
-		if err := s.validateMemoryMax(); err != nil {
-			return err
-		}
 		if len(s.Argv) != 0 || s.Claude != nil {
 			return errors.New("reattach spec must not carry a command")
 		}
 		return nil
 	case ModeExec:
-		if s.Session != "" || s.RunID != "" || s.Attempt != 0 || s.Claude != nil || s.MemoryMax != 0 {
+		if s.Session != "" || s.RunID != "" || s.Attempt != 0 || s.Claude != nil {
 			return errors.New("exec spec must not name a session")
 		}
 		return s.validateRun()
@@ -161,13 +153,6 @@ func (s Spec) validateAttempt() error {
 	}
 	if s.Attempt > 0 && s.RunID == "" {
 		return errors.New("a numbered attempt needs a run id")
-	}
-	return nil
-}
-
-func (s Spec) validateMemoryMax() error {
-	if s.MemoryMax == 0 {
-		return errors.New("a session spec needs a memory_max")
 	}
 	return nil
 }

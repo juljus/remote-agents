@@ -1,7 +1,6 @@
 # ~/.config/remote-agents/config.toml
 host = "box.example"                # ssh destination of the box
 workdir = "/home/agent/work"        # every session runs here; must exist on the box
-# memory_max = "64G"                # memory cap of each session on the box (K, M, G, T); the default
 
 # [link]
 # opener = "/usr/bin/open"          # laptop command that opens box URLs; the default

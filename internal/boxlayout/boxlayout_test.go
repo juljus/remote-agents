@@ -26,6 +26,7 @@ func TestLayoutPathsAreUnderTheInstallName(t *testing.T) {
 		l.ReapedSession("s"):             "/home/agent/.local/state/remote-agents-e2e/reaped-sessions/s.json",
 		l.ReaperLog():                    "/home/agent/.local/state/remote-agents-e2e/reaper.log",
 		l.ReaperConfig():                 "/home/agent/.config/remote-agents-e2e/reaper.toml",
+		l.SessionConfig():                "/home/agent/.config/remote-agents-e2e/session.toml",
 		l.ShpoolService():                "remote-agents-e2e-shpool.service",
 		l.SessionScope("claude-x", "k3"): "remote-agents-e2e-claude-x-k3.scope",
 	}
