@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/term"
 
+	"remote-agents/internal/agentcli"
 	"remote-agents/internal/claudeargs"
 	"remote-agents/internal/cmuxcapture"
 	"remote-agents/internal/config"
@@ -163,7 +164,7 @@ func runAgent(agentName string, args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	if plan.Mode == claudeargs.ModeCommand {
+	if plan.Mode == agentcli.ModeCommand {
 		return runCommand(e, agent, plan.Args)
 	}
 

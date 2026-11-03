@@ -4,6 +4,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"remote-agents/internal/claudeargs"
+	"remote-agents/internal/codexargs"
 )
 
 const valid = `
@@ -102,7 +105,7 @@ func TestParseErrors(t *testing.T) {
 		"relative opener":        {strings.Replace(valid, `"/opt/homebrew/bin/firefox-open"`, `"open"`, 1), "absolute"},
 		"no agents":              {strings.Replace(valid, "[agents.claude]\ncommand = \"claude\"\nkind = \"claude\"\nargs = [\"--dangerously-skip-permissions\"]\n", "", 1), "agents"},
 		"missing command":        {strings.Replace(valid, `command = "claude"`, "", 1), "command"},
-		"unknown kind":           {strings.Replace(valid, `kind = "claude"`, `kind = "codex"`, 1), "codex"},
+		"unknown kind":           {strings.Replace(valid, `kind = "claude"`, `kind = "aider"`, 1), "aider"},
 		"missing kind":           {strings.Replace(valid, `kind = "claude"`, "", 1), "kind"},
 		"args picking a session": {strings.Replace(valid, `["--dangerously-skip-permissions"]`, `["--continue"]`, 1), "agents.claude.args"},
 		"args not strings":       {strings.Replace(valid, `["--dangerously-skip-permissions"]`, `[1]`, 1), "Args"},
@@ -123,6 +126,41 @@ func TestParseErrors(t *testing.T) {
 	}
 }
 
+const codexAgent = `
+[agents.codex]
+command = "codex"
+kind = "codex"
+args = ["--yolo"]
+`
+
+func TestParseCodexAgent(t *testing.T) {
+	cfg, err := Parse([]byte(valid + codexAgent))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	agent, err := cfg.Agent("codex")
+	if err != nil {
+		t.Fatalf("Agent: %v", err)
+	}
+	if agent.Kind != KindCodex || !slices.Equal(agent.Args, []string{"--yolo"}) {
+		t.Fatalf("unexpected agent: %+v", agent)
+	}
+	if _, ok := agent.CLI().(codexargs.CLI); !ok {
+		t.Fatalf("codex agent CLI = %T", agent.CLI())
+	}
+	if claude, _ := cfg.Agent("claude"); claude.CLI() != (claudeargs.CLI{}) {
+		t.Fatalf("claude agent CLI = %T", claude.CLI())
+	}
+}
+
+// Each kind checks the default arguments by its own command line.
+func TestCodexArgsAreCheckedAsCodex(t *testing.T) {
+	_, err := Parse([]byte(valid + strings.Replace(codexAgent, `["--yolo"]`, `["--config=hooks={}"]`, 1)))
+	if err == nil || !strings.Contains(err.Error(), "agents.codex.args") {
+		t.Fatalf("Parse = %v, want an agents.codex.args error", err)
+	}
+}
+
 func TestAgentArgsOptional(t *testing.T) {
 	cfg, err := Parse([]byte(strings.Replace(valid, "args = [\"--dangerously-skip-permissions\"]\n", "", 1)))
 	if err != nil {
@@ -138,7 +176,7 @@ func TestAgentUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if _, err := cfg.Agent("codex"); err == nil || !strings.Contains(err.Error(), "codex") {
+	if _, err := cfg.Agent("gemini"); err == nil || !strings.Contains(err.Error(), "gemini") {
 		t.Fatalf("expected unknown agent error, got %v", err)
 	}
 }

@@ -9,37 +9,9 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"remote-agents/internal/agentcli"
 )
-
-type Mode int
-
-const (
-	// ModeSession is an interactive TUI session, held in shpool on the box.
-	ModeSession Mode = iota
-	// ModeCommand is a one-shot invocation (subcommand, --print, --help, --version).
-	ModeCommand
-)
-
-func (m Mode) String() string {
-	switch m {
-	case ModeSession:
-		return "session"
-	case ModeCommand:
-		return "command"
-	}
-	return fmt.Sprintf("Mode(%d)", int(m))
-}
-
-type Plan struct {
-	Mode Mode
-	// Args is the argument list to run, including an injected --session-id when needed.
-	Args []string
-	// SessionID is the Claude session id the run will use, or "" when Claude picks it
-	// (resume picker, --continue).
-	SessionID string
-	// Resumes is true when SessionID names a session that already exists.
-	Resumes bool
-}
 
 // Options that take a separate value argument, mirroring cmux's claude wrapper.
 var valueOptions = map[string]bool{
@@ -208,23 +180,23 @@ func IsUUID(s string) bool {
 }
 
 // Analyze plans an invocation. newID supplies a fresh session id when one must be injected.
-func Analyze(args []string, newID func() string) (Plan, error) {
+func Analyze(args []string, newID func() string) (agentcli.Plan, error) {
 	s := scanArgs(args)
 	if s.command {
-		return Plan{Mode: ModeCommand, Args: args}, nil
+		return agentcli.Plan{Mode: agentcli.ModeCommand, Args: args}, nil
 	}
 	switch {
 	case s.sessionID != "":
 		if !IsUUID(s.sessionID) {
-			return Plan{}, fmt.Errorf("--session-id must be a UUID, got %q", s.sessionID)
+			return agentcli.Plan{}, fmt.Errorf("--session-id must be a UUID, got %q", s.sessionID)
 		}
-		return Plan{Mode: ModeSession, Args: args, SessionID: s.sessionID}, nil
+		return agentcli.Plan{Mode: agentcli.ModeSession, Args: args, SessionID: s.sessionID}, nil
 	case s.fork && (s.resume || s.cont):
 		return inject(args, newID()), nil
 	case s.resume && IsUUID(s.resumeValue):
-		return Plan{Mode: ModeSession, Args: args, SessionID: s.resumeValue, Resumes: true}, nil
+		return agentcli.Plan{Mode: agentcli.ModeSession, Args: args, SessionID: s.resumeValue, Resumes: true}, nil
 	case s.resume || s.cont:
-		return Plan{Mode: ModeSession, Args: args}, nil
+		return agentcli.Plan{Mode: agentcli.ModeSession, Args: args}, nil
 	}
 	return inject(args, newID()), nil
 }
@@ -244,9 +216,22 @@ func SessionOf(args []string) (string, bool) {
 	return "", false
 }
 
-func inject(args []string, id string) Plan {
+func inject(args []string, id string) agentcli.Plan {
 	out := make([]string, 0, len(args)+2)
 	out = append(out, "--session-id", id)
 	out = append(out, args...)
-	return Plan{Mode: ModeSession, Args: out, SessionID: id}
+	return agentcli.Plan{Mode: agentcli.ModeSession, Args: out, SessionID: id}
 }
+
+// ResumeArgs resume session id.
+func ResumeArgs(id string) []string { return []string{"--resume", id} }
+
+// CLI is the Claude Code command line as agentcli sees it.
+type CLI struct{}
+
+func (CLI) Analyze(args []string, newID func() string) (agentcli.Plan, error) {
+	return Analyze(args, newID)
+}
+func (CLI) CheckDefaults(args []string) error { return CheckDefaults(args) }
+func (CLI) ResumeBase(args []string) []string { return ResumeBase(args) }
+func (CLI) ResumeArgs(id string) []string     { return ResumeArgs(id) }

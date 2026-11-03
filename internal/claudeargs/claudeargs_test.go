@@ -3,6 +3,8 @@ package claudeargs
 import (
 	"slices"
 	"testing"
+
+	"remote-agents/internal/agentcli"
 )
 
 const (
@@ -16,44 +18,44 @@ func TestAnalyze(t *testing.T) {
 	cases := []struct {
 		name      string
 		args      []string
-		mode      Mode
+		mode      agentcli.Mode
 		wantArgs  []string
 		sessionID string
 	}{
-		{"bare", nil, ModeSession, []string{"--session-id", generated}, generated},
-		{"flags only", []string{"--dangerously-skip-permissions"}, ModeSession,
+		{"bare", nil, agentcli.ModeSession, []string{"--session-id", generated}, generated},
+		{"flags only", []string{"--dangerously-skip-permissions"}, agentcli.ModeSession,
 			[]string{"--session-id", generated, "--dangerously-skip-permissions"}, generated},
-		{"initial prompt", []string{"fix the bug"}, ModeSession,
+		{"initial prompt", []string{"fix the bug"}, agentcli.ModeSession,
 			[]string{"--session-id", generated, "fix the bug"}, generated},
-		{"resume id", []string{"--resume", existing}, ModeSession, []string{"--resume", existing}, existing},
-		{"resume short", []string{"-r", existing}, ModeSession, []string{"-r", existing}, existing},
-		{"resume equals", []string{"--resume=" + existing}, ModeSession, []string{"--resume=" + existing}, existing},
-		{"resume after flag with value", []string{"--model", "opus", "--resume", existing}, ModeSession,
+		{"resume id", []string{"--resume", existing}, agentcli.ModeSession, []string{"--resume", existing}, existing},
+		{"resume short", []string{"-r", existing}, agentcli.ModeSession, []string{"-r", existing}, existing},
+		{"resume equals", []string{"--resume=" + existing}, agentcli.ModeSession, []string{"--resume=" + existing}, existing},
+		{"resume after flag with value", []string{"--model", "opus", "--resume", existing}, agentcli.ModeSession,
 			[]string{"--model", "opus", "--resume", existing}, existing},
-		{"resume picker", []string{"--resume"}, ModeSession, []string{"--resume"}, ""},
-		{"resume picker then flag", []string{"--resume", "--dangerously-skip-permissions"}, ModeSession,
+		{"resume picker", []string{"--resume"}, agentcli.ModeSession, []string{"--resume"}, ""},
+		{"resume picker then flag", []string{"--resume", "--dangerously-skip-permissions"}, agentcli.ModeSession,
 			[]string{"--resume", "--dangerously-skip-permissions"}, ""},
-		{"resume search term", []string{"--resume", "auth bug"}, ModeSession, []string{"--resume", "auth bug"}, ""},
-		{"continue", []string{"--continue"}, ModeSession, []string{"--continue"}, ""},
-		{"continue short", []string{"-c"}, ModeSession, []string{"-c"}, ""},
-		{"explicit session id", []string{"--session-id", existing}, ModeSession, []string{"--session-id", existing}, existing},
-		{"explicit session id equals", []string{"--session-id=" + existing}, ModeSession, []string{"--session-id=" + existing}, existing},
-		{"fork from resume", []string{"--resume", existing, "--fork-session"}, ModeSession,
+		{"resume search term", []string{"--resume", "auth bug"}, agentcli.ModeSession, []string{"--resume", "auth bug"}, ""},
+		{"continue", []string{"--continue"}, agentcli.ModeSession, []string{"--continue"}, ""},
+		{"continue short", []string{"-c"}, agentcli.ModeSession, []string{"-c"}, ""},
+		{"explicit session id", []string{"--session-id", existing}, agentcli.ModeSession, []string{"--session-id", existing}, existing},
+		{"explicit session id equals", []string{"--session-id=" + existing}, agentcli.ModeSession, []string{"--session-id=" + existing}, existing},
+		{"fork from resume", []string{"--resume", existing, "--fork-session"}, agentcli.ModeSession,
 			[]string{"--session-id", generated, "--resume", existing, "--fork-session"}, generated},
-		{"fork from continue", []string{"-c", "--fork-session"}, ModeSession,
+		{"fork from continue", []string{"-c", "--fork-session"}, agentcli.ModeSession,
 			[]string{"--session-id", generated, "-c", "--fork-session"}, generated},
-		{"version", []string{"--version"}, ModeCommand, []string{"--version"}, ""},
-		{"help short", []string{"-h"}, ModeCommand, []string{"-h"}, ""},
-		{"print", []string{"-p", "hello"}, ModeCommand, []string{"-p", "hello"}, ""},
-		{"print with resume", []string{"--resume", existing, "--print", "hi"}, ModeCommand,
+		{"version", []string{"--version"}, agentcli.ModeCommand, []string{"--version"}, ""},
+		{"help short", []string{"-h"}, agentcli.ModeCommand, []string{"-h"}, ""},
+		{"print", []string{"-p", "hello"}, agentcli.ModeCommand, []string{"-p", "hello"}, ""},
+		{"print with resume", []string{"--resume", existing, "--print", "hi"}, agentcli.ModeCommand,
 			[]string{"--resume", existing, "--print", "hi"}, ""},
-		{"subcommand", []string{"mcp", "list"}, ModeCommand, []string{"mcp", "list"}, ""},
-		{"subcommand after flag", []string{"--debug", "doctor"}, ModeCommand, []string{"--debug", "doctor"}, ""},
-		{"value option hides subcommand name", []string{"--model", "update"}, ModeSession,
+		{"subcommand", []string{"mcp", "list"}, agentcli.ModeCommand, []string{"mcp", "list"}, ""},
+		{"subcommand after flag", []string{"--debug", "doctor"}, agentcli.ModeCommand, []string{"--debug", "doctor"}, ""},
+		{"value option hides subcommand name", []string{"--model", "update"}, agentcli.ModeSession,
 			[]string{"--session-id", generated, "--model", "update"}, generated},
-		{"prompt then subcommand word", []string{"fix it", "update"}, ModeSession,
+		{"prompt then subcommand word", []string{"fix it", "update"}, agentcli.ModeSession,
 			[]string{"--session-id", generated, "fix it", "update"}, generated},
-		{"double dash stops parsing", []string{"--", "--resume"}, ModeSession,
+		{"double dash stops parsing", []string{"--", "--resume"}, agentcli.ModeSession,
 			[]string{"--session-id", generated, "--", "--resume"}, generated},
 	}
 	for _, tc := range cases {

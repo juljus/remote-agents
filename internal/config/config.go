@@ -11,14 +11,21 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"remote-agents/internal/agentcli"
 	"remote-agents/internal/boxlayout"
 	"remote-agents/internal/claudeargs"
+	"remote-agents/internal/codexargs"
 )
 
 // Kind selects how the wrapper understands an agent's command line.
 type Kind string
 
-const KindClaude Kind = "claude"
+const (
+	KindClaude Kind = "claude"
+	KindCodex  Kind = "codex"
+)
+
+var clis = map[Kind]agentcli.CLI{KindClaude: claudeargs.CLI{}, KindCodex: codexargs.CLI{}}
 
 type Agent struct {
 	// Command is the agent executable on the box, resolved against the session PATH.
@@ -188,12 +195,13 @@ func validateAgents(raw map[string]rawAgent) (map[string]Agent, error) {
 			return nil, fmt.Errorf("missing required key: agents.%s.kind", name)
 		}
 		kind := Kind(*a.Kind)
-		if kind != KindClaude {
-			return nil, fmt.Errorf("agents.%s.kind: unsupported kind %q (supported: %q)", name, kind, KindClaude)
+		cli, ok := clis[kind]
+		if !ok {
+			return nil, fmt.Errorf("agents.%s.kind: unsupported kind %q (supported: %q, %q)", name, kind, KindClaude, KindCodex)
 		}
 		var args []string
 		if a.Args != nil {
-			if err := claudeargs.CheckDefaults(*a.Args); err != nil {
+			if err := cli.CheckDefaults(*a.Args); err != nil {
 				return nil, fmt.Errorf("agents.%s.args: %w", name, err)
 			}
 			args = *a.Args
@@ -202,6 +210,9 @@ func validateAgents(raw map[string]rawAgent) (map[string]Agent, error) {
 	}
 	return agents, nil
 }
+
+// CLI understands the agent's command line; validation admits only kinds that have one.
+func (a Agent) CLI() agentcli.CLI { return clis[a.Kind] }
 
 func (c Config) Agent(name string) (Agent, error) {
 	a, ok := c.Agents[name]
