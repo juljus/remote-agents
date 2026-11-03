@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Stands in for Anthropic's and OpenAI's OAuth token and usage endpoints,
+and Anthropic's profile endpoint, in end-to-end tests. Each refresh token
+fake-refresh-<tag>-<n> works once, as a rotating server's does; an access
+token of tag signs in as acc-<tag> in org-<tag> (Anthropic) or account
+acct-<tag> (OpenAI, whose tokens are JWTs) and has used 10% per letter of
+the tag. Writes its port to argv[1]."""
+import base64
+import json
+import re
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+used = set()
+issued = [100]
+
+
+def jwt(claims):
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return "eyJhbGciOiJub25lIn0." + payload + ".sig"
+
+
+def claims(token):
+    try:
+        payload = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return {}
+
+
+def rotate(token):
+    """The tag of a refresh token the server takes once, or None."""
+    m = re.fullmatch(r"fake-refresh-([a-z]+)-\d+", token)
+    if not m or token in used:
+        return None
+    used.add(token)
+    issued[0] += 1
+    return m[1]
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def reply(self, code, body):
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        if self.path not in ("/token", "/oauth/token"):
+            return self.reply(404, {})
+        req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        tag = rotate(req.get("refresh_token", "")) if req.get("grant_type") == "refresh_token" else None
+        if tag is None:
+            return self.reply(400, {"error": "invalid_grant"})
+        n = issued[0]
+        if self.path == "/oauth/token":
+            return self.reply(200, {
+                "id_token": jwt({"email": f"{tag}@example.com",
+                                 "https://api.openai.com/auth": {"chatgpt_account_id": f"acct-{tag}", "chatgpt_user_id": f"user-{tag}"}}),
+                "access_token": jwt({"exp": int(time.time()) + 864000, "tok": f"fake-access-{tag}-{n}"}),
+                "refresh_token": f"fake-refresh-{tag}-{n}"})
+        self.reply(200, {"access_token": f"fake-access-{tag}-{n}", "refresh_token": f"fake-refresh-{tag}-{n}",
+                         "expires_in": 28800, "refresh_token_expires_in": 2592000, "scope": req.get("scope", "")})
+
+    def do_GET(self):
+        auth = self.headers.get("Authorization", "")
+        if self.path == "/backend-api/wham/usage":
+            m = re.fullmatch(r"fake-access-([a-z]+)-\d+", claims(auth.removeprefix("Bearer ")).get("tok", ""))
+            if not m or self.headers.get("ChatGPT-Account-Id") != f"acct-{m[1]}":
+                return self.reply(401, {})
+            return self.reply(200, {"rate_limit": {"primary_window": {
+                "used_percent": 10 * len(m[1]), "limit_window_seconds": 604800, "reset_after_seconds": 60, "reset_at": 1893456000}}})
+        m = re.fullmatch(r"Bearer fake-access-([a-z]+)-\d+", auth)
+        if not m:
+            return self.reply(401, {})
+        tag = m[1]
+        if self.path == "/api/oauth/profile":
+            return self.reply(200, {"account": {"uuid": f"acc-{tag}", "email": f"{tag}@example.com"},
+                                    "organization": {"uuid": f"org-{tag}"}})
+        if self.path != "/api/oauth/usage":
+            return self.reply(404, {})
+        self.reply(200, {"five_hour": {"utilization": 10 * len(tag), "resets_at": "2030-01-01T00:00:00+00:00"},
+                         "seven_day": None, "limits": []})
+
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+with open(sys.argv[1], "w") as f:
+    f.write(str(server.server_address[1]))
+server.serve_forever()

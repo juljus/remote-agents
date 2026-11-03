@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ import (
 	"github.com/creack/pty"
 
 	"remote-agents/internal/boxlayout"
+	"remote-agents/internal/codexauth/codexfake"
 	"remote-agents/internal/corner"
 )
 
@@ -128,7 +130,7 @@ func setup(m *testing.M) (int, error) {
 	if _, err := onBox(fmt.Sprintf(`printf 'memory_max = "2G"\n' > %q`, box.SessionConfig())); err != nil {
 		return 0, err
 	}
-	for _, fake := range []string{"fake-claude", "fake-codex", "fake-anthropic"} {
+	for _, fake := range []string{"fake-claude", "fake-codex", "fake-oauth"} {
 		if _, err := sh("scp", "-q", "-p", filepath.Join(root, "testdata", fake), host+":"+boxTestDir+"/"+fake); err != nil {
 			return 0, err
 		}
@@ -1468,26 +1470,21 @@ func TestReapedSessionResumesByNameAndByID(t *testing.T) {
 
 // Account commands run against a Claude config dir of their own and a
 // stand-in for Anthropic's token and usage endpoints on the box.
-func TestAccountsAddListAndSwitchTheBoxLogin(t *testing.T) {
-	cfg := boxHome + "/" + boxTestDir + "/accounts-claude"
-	vault := box.AccountsDir("claude")
-	portFile := boxHome + "/" + boxTestDir + "/fake-anthropic.port"
-	pidFile := boxHome + "/" + boxTestDir + "/fake-anthropic.pid"
+// startFakeOAuth starts testdata/fake-oauth on the box and returns its URL.
+func startFakeOAuth(t *testing.T) string {
+	t.Helper()
+	dir := boxHome + "/" + boxTestDir
+	portFile, pidFile := dir+"/fake-oauth.port", dir+"/fake-oauth.pid"
 	if _, err := onBox(fmt.Sprintf(`set -e
-rm -rf %[1]q %[2]q %[3]q && mkdir -p %[1]q
-printf '{"numStartups":1}' > %[1]q/.claude.json
-expires=$(( $(date +%%s) * 1000 + 3600000 ))
-printf '{"claudeAiOauth":{"accessToken":"fake-access-work-1","refreshToken":"fake-refresh-work-1","expiresAt":%%s}}' "$expires" > %[1]q/.credentials.json
-printf '{"numStartups":1,"oauthAccount":{"accountUuid":"acc-work","organizationUuid":"org-work","emailAddress":"work@example.com"}}' > %[1]q/.claude.json
-echo home > %[4]q/next-login
-nohup %[4]q/fake-anthropic %[3]q >/dev/null 2>&1 &
-echo $! > %[5]q
-for i in $(seq 50); do [ -s %[3]q ] && break; sleep 0.1; done
-[ -s %[3]q ]`, cfg, vault, portFile, boxHome+"/"+boxTestDir, pidFile)); err != nil {
+rm -f %[2]q
+nohup %[1]q/fake-oauth %[2]q >/dev/null 2>&1 &
+echo $! > %[3]q
+for i in $(seq 50); do [ -s %[2]q ] && break; sleep 0.1; done
+[ -s %[2]q ]`, dir, portFile, pidFile)); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if out, err := onBox(fmt.Sprintf(`kill "$(cat %[1]q)"; rm -rf %[1]q %[2]q %[3]q %[4]q %[5]q`, pidFile, cfg, vault, portFile, box.AccountsConfig())); err != nil {
+		if out, err := onBox(fmt.Sprintf(`kill "$(cat %[1]q)"; rm -f %[1]q %[2]q`, pidFile, portFile)); err != nil {
 			t.Logf("cleanup: %v %s", err, out)
 		}
 	})
@@ -1495,43 +1492,75 @@ for i in $(seq 50); do [ -s %[3]q ] && break; sleep 0.1; done
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := "http://127.0.0.1:" + strings.TrimSpace(port)
-	// The test install has no accounts config otherwise, so its account commands refuse to run.
-	if _, err := onBox(fmt.Sprintf(`printf '[claude]\nconfig_dir = "%%s"\ntoken_url = "%%s/token"\napi_url = "%%s"\n' %q %q %q > %q`, cfg, api, api, box.AccountsConfig())); err != nil {
+	return "http://127.0.0.1:" + strings.TrimSpace(port)
+}
+
+// writeAccountsConfig gives the test install's account commands their own
+// config dir and the fake's endpoints in section; without it they refuse to run.
+func writeAccountsConfig(t *testing.T, section, dir, tokenURL, apiURL string) {
+	t.Helper()
+	if _, err := onBox(fmt.Sprintf(`printf '[%%s]\nconfig_dir = "%%s"\ntoken_url = "%%s"\napi_url = "%%s"\n' %q %q %q %q > %q`, section, dir, tokenURL, apiURL, box.AccountsConfig())); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if out, err := onBox("rm -f " + box.AccountsConfig()); err != nil {
+			t.Logf("cleanup: %v %s", err, out)
+		}
+	})
+}
+
+// waitOK waits for tm to exit 0.
+func waitOK(t *testing.T, tm *term) {
+	t.Helper()
+	if code := tm.wait(30 * time.Second); code != 0 {
+		t.Fatalf("exit %d:\n%s", code, tm.text())
+	}
+}
+
+func TestAccountsAddListAndSwitchTheBoxLogin(t *testing.T) {
+	cfg := boxHome + "/" + boxTestDir + "/accounts-claude"
+	vault := box.AccountsDir("claude")
+	if _, err := onBox(fmt.Sprintf(`set -e
+rm -rf %[1]q %[2]q && mkdir -p %[1]q
+expires=$(( $(date +%%s) * 1000 + 3600000 ))
+printf '{"claudeAiOauth":{"accessToken":"fake-access-work-1","refreshToken":"fake-refresh-work-1","expiresAt":%%s}}' "$expires" > %[1]q/.credentials.json
+printf '{"numStartups":1,"oauthAccount":{"accountUuid":"acc-work","organizationUuid":"org-work","emailAddress":"work@example.com"}}' > %[1]q/.claude.json
+echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if out, err := onBox(fmt.Sprintf(`rm -rf %q %q`, cfg, vault)); err != nil {
+			t.Logf("cleanup: %v %s", err, out)
+		}
+	})
+	api := startFakeOAuth(t)
+	writeAccountsConfig(t, "claude", cfg, api+"/token", api)
 	run := func(args ...string) *term {
 		t.Helper()
 		return start(t, "rfakeclaude", append([]string{"account"}, args...)...)
 	}
-	waitOK := func(tm *term) {
-		t.Helper()
-		if code := tm.wait(30 * time.Second); code != 0 {
-			t.Fatalf("exit %d:\n%s", code, tm.text())
-		}
-	}
 
 	save := run("save", "work")
 	save.expect(`saved the box's login as work`, 20*time.Second)
-	waitOK(save)
+	waitOK(t, save)
 
 	before := len(openedURLs(t))
 	add := run("add", "home")
 	add.expect(`saved the new login as home`, 30*time.Second)
-	waitOK(add)
+	waitOK(t, add)
 	if !strings.Contains(openedURLs(t)[before:], "https://claude.com/cai/oauth/authorize?account=home") {
 		t.Fatalf("sign-in url not opened on the laptop:\n%s", openedURLs(t)[before:])
 	}
 
 	list := run("list")
 	list.expect(`(?s)1\s+home\s+home@example.com\s+40% until \S+.*2\*\s+work\s+work@example.com\s+40% until`, 20*time.Second)
-	waitOK(list)
+	waitOK(t, list)
 
 	pick := run()
 	pick.expect(`Switch to \(1-2 or a name, Enter keeps work\): `, 20*time.Second)
 	pick.send("1\r")
 	pick.expect(`switched the box to home; running sessions use it from their next request`, 20*time.Second)
-	waitOK(pick)
+	waitOK(t, pick)
 
 	out, err := onBox(fmt.Sprintf(`set -e
 grep -o 'fake-refresh-[a-z]*-[0-9]*' %[1]q/.credentials.json
@@ -1548,5 +1577,62 @@ find ~/.config/systemd/user -name '%[3]s-accounts-refresh*' | wc -l`, cfg, vault
 
 	js := run("list", "--json")
 	js.expect(`"name":"home","email":"home@example.com","active":true`, 20*time.Second)
-	waitOK(js)
+	waitOK(t, js)
+}
+
+func TestCodexAccountsAddListAndSwitchTheBoxLogin(t *testing.T) {
+	cfg := boxHome + "/" + boxTestDir + "/accounts-codex"
+	vault := box.AccountsDir("codex")
+	live := base64.StdEncoding.EncodeToString([]byte(codexfake.Login("work", 1, time.Now().Add(48*time.Hour))))
+	if _, err := onBox(fmt.Sprintf(`set -e
+rm -rf %[1]q %[2]q && mkdir -p %[1]q
+echo %[4]s | base64 -d > %[1]q/auth.json
+echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir, live)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if out, err := onBox(fmt.Sprintf(`rm -rf %q %q`, cfg, vault)); err != nil {
+			t.Logf("cleanup: %v %s", err, out)
+		}
+	})
+	api := startFakeOAuth(t)
+	writeAccountsConfig(t, "codex", cfg, api+"/oauth/token", api+"/backend-api")
+	run := func(args ...string) *term {
+		t.Helper()
+		return start(t, "rfakecodex", append([]string{"account"}, args...)...)
+	}
+
+	save := run("save", "work")
+	save.expect(`saved the box's login as work`, 20*time.Second)
+	waitOK(t, save)
+
+	before := len(openedURLs(t))
+	add := run("add", "home")
+	add.expect(`saved the new login as home; switch to it with: rcodex account use home`, 30*time.Second)
+	waitOK(t, add)
+	if !strings.Contains(openedURLs(t)[before:], "https://auth.openai.com/oauth/authorize?account=home") {
+		t.Fatalf("sign-in url not opened on the laptop:\n%s", openedURLs(t)[before:])
+	}
+
+	list := run("list")
+	list.expect(`(?s)1\s+home\s+home@example.com\s+-\s+40% until \S+.*2\*\s+work\s+work@example.com\s+-\s+40% until`, 20*time.Second)
+	waitOK(t, list)
+
+	pick := run()
+	pick.expect(`Switch to \(1-2 or a name, Enter keeps work\): `, 20*time.Second)
+	pick.send("1\r")
+	pick.expect(`switched the box's Codex to home; Codex sessions started from now on use it`, 20*time.Second)
+	waitOK(t, pick)
+
+	out, err := onBox(fmt.Sprintf(`set -e
+grep -o 'fake-refresh-[a-z]*-[0-9]*' %[1]q/auth.json
+stat -c '%%a %%n' %[1]q/auth.json %[2]q %[2]q/work.json %[2]q/home.json | sed 's|%[1]s|CODEX|; s|%[2]s|VAULT|'
+find ~/.config/systemd/user -name '%[3]s-accounts-refresh*' | wc -l`, cfg, vault, boxInstall))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "fake-refresh-home-1\n600 CODEX/auth.json\n700 VAULT\n600 VAULT/work.json\n600 VAULT/home.json\n0\n"
+	if out != want {
+		t.Fatalf("box state:\n%s\nwant\n%s", out, want)
+	}
 }

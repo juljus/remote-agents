@@ -7,15 +7,19 @@ resumes with `resume <id>` and prints Codex's resume hint on exit. Line
 commands: prompt starts a turn, stop and interrupt end it, permission asks
 for approval; hook <event> runs an event's hooks; bg runs a sleep the way
 Codex's shell tool does and leave leaves one behind its shell; hog allocates
-memory until it is killed.
+memory until it is killed. login signs in as the account named in
+~/remote-agents-test/next-login, opening a URL like Codex does, and writes
+the login to $CODEX_HOME/auth.json with tokens testdata/fake-oauth takes.
 """
 
+import base64
 import hashlib
 import json
 import os
 import signal
 import subprocess
 import sys
+import time
 import tomllib
 import uuid
 
@@ -33,6 +37,27 @@ def say(line):
 
 args = sys.argv[1:]
 say("fake-codex args=" + " ".join(args))
+
+
+def jwt(claims):
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return "eyJhbGciOiJub25lIn0." + payload + ".sig"
+
+
+if args == ["login"]:
+    with open(os.path.join(os.environ["HOME"], "remote-agents-test", "next-login")) as f:
+        tag = f.read().strip()
+    if subprocess.run([os.environ["BROWSER"], "https://auth.openai.com/oauth/authorize?account=" + tag]).returncode != 0:
+        sys.exit(1)
+    login = {"auth_mode": "chatgpt", "OPENAI_API_KEY": None, "tokens": {
+        "id_token": jwt({"email": tag + "@example.com",
+                         "https://api.openai.com/auth": {"chatgpt_account_id": "acct-" + tag, "chatgpt_user_id": "user-" + tag}}),
+        "access_token": jwt({"exp": int(time.time()) + 864000, "tok": "fake-access-%s-1" % tag}),
+        "refresh_token": "fake-refresh-%s-1" % tag, "account_id": "acct-" + tag}}
+    with open(os.path.join(os.environ["CODEX_HOME"], "auth.json"), "w") as f:
+        json.dump(login, f, indent=2)
+    say("Successfully logged in")
+    sys.exit(0)
 hooks = {}
 session = str(uuid.uuid4())
 resumed = False
