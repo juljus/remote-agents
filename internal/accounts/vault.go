@@ -53,7 +53,7 @@ type journal struct {
 const entryMode = 0o600
 
 func (v Vault) entryPath(name string) string { return filepath.Join(v.Dir, name+".json") }
-func (v Vault) journalPath() string          { return filepath.Join(v.Dir, "switching.json") }
+func (v Vault) journalPath() string          { return filepath.Join(v.Dir, ".switching.json") }
 func (v Vault) lockPath() string             { return filepath.Join(v.Dir, ".lock") }
 
 // ensureDir creates the vault dir, or narrows an existing one, to mode 0700.
@@ -129,7 +129,8 @@ func (v Vault) read(tx claudeauth.LiveTx) (*state, error) {
 	}
 	for _, d := range dirents {
 		name, ok := strings.CutSuffix(d.Name(), ".json")
-		if !ok || d.Name() == filepath.Base(v.journalPath()) || ValidName(name) != nil {
+		// The journal, lock and temporary files have names no account can have.
+		if !ok || ValidName(name) != nil {
 			continue
 		}
 		e, err := v.readEntry(name)
