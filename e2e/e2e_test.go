@@ -986,7 +986,7 @@ func TestRealClaudeAttachesAPastedLaptopImagePath(t *testing.T) {
 	tm.expectCompact(mark, "[Image #1]", 15*time.Second)
 	digest := sha256.Sum256(onePixelPNG)
 	sum := hex.EncodeToString(digest[:])
-	out, err := onBox(fmt.Sprintf("sha256sum %s/.local/state/%s/pasted/%s.png", boxHome, boxInstall, sum))
+	out, err := onBox(fmt.Sprintf("sha256sum '%s/.local/state/%s/pasted/%s/pasted shot.png'", boxHome, boxInstall, sum))
 	if err != nil || !strings.HasPrefix(out, sum+" ") {
 		t.Fatalf("the upload is not on the box: %v %s", err, out)
 	}
@@ -996,6 +996,52 @@ func TestRealClaudeAttachesAPastedLaptopImagePath(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	tm.send("\x03")
 	tm.wait(15 * time.Second)
+}
+
+// Any pasted laptop file the box lacks reaches the session as the path of an
+// uploaded copy under its own name. A path the box has stays as typed, as
+// does one that cannot upload, with a notice saying why.
+func TestPastedLaptopPathsReachTheSessionAsTheBoxShouldSeeThem(t *testing.T) {
+	dir := t.TempDir()
+	notes := filepath.Join(dir, "report notes.csv")
+	content := []byte("a,b\n1,2\n")
+	if err := os.WriteFile(notes, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	folder := filepath.Join(dir, "folder")
+	if err := os.Mkdir(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tm := start(t, "rfakeclaude")
+	tm.drawnAfter(0)
+	mark := len(tm.text())
+	// /tmp is on the laptop and the box both.
+	tm.send("\x1b[200~" + strings.ReplaceAll(notes, " ", `\ `) + " /tmp " + folder + "\x1b[201~\r")
+	digest := sha256.Sum256(content)
+	sum := hex.EncodeToString(digest[:])
+	boxCopy := fmt.Sprintf("%s/.local/state/%s/pasted/%s/report notes.csv", boxHome, boxInstall, sum)
+	tm.expectAfter(mark, "got: "+regexp.QuoteMeta(strings.ReplaceAll(boxCopy, " ", `\ `)+" /tmp "+folder), 15*time.Second)
+	tm.expectAfter(mark, "not uploaded: folder is a directory", 5*time.Second)
+	out, err := onBox(fmt.Sprintf("sha256sum '%s'", boxCopy))
+	if err != nil || !strings.HasPrefix(out, sum+" ") {
+		t.Fatalf("the upload is not on the box: %v %s", err, out)
+	}
+	tm.send("exit 0\r")
+	if code := tm.wait(15 * time.Second); code != 0 {
+		t.Fatalf("exit %d; output:\n%s", code, tm.text())
+	}
+}
+
+// Laptops built before paste-files keep uploading pasted images with paste-store.
+func TestTheBoxStillStoresImagesForOlderLaptops(t *testing.T) {
+	cmd := exec.Command("ssh", "-o", "BatchMode=yes", host, `exec "$HOME/`+boxlayout.BinaryRel(boxInstall)+`" paste-store`)
+	cmd.Stdin = strings.NewReader(fmt.Sprintf("%d\n%s", len(onePixelPNG), onePixelPNG))
+	out, err := cmd.CombinedOutput()
+	digest := sha256.Sum256(onePixelPNG)
+	want := fmt.Sprintf("%s/.local/state/%s/pasted/%s.png\n", boxHome, boxInstall, hex.EncodeToString(digest[:]))
+	if err != nil || string(out) != want {
+		t.Fatalf("paste-store = %q, %v; want %q", out, err, want)
+	}
 }
 
 var onePixelPNG = []byte{
