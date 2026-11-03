@@ -99,6 +99,19 @@ func TestValidCodexSession(t *testing.T) {
 	}
 }
 
+func TestFollowNamesTheAgentsKind(t *testing.T) {
+	var s Spec
+	if err := s.Follow(KindCodex, &Agent{Resume: []string{"codex"}}); err != nil {
+		t.Fatal(err)
+	}
+	if k, a := s.Followed(); k != KindCodex || a != s.Codex || s.Claude != nil {
+		t.Fatalf("followed %q %+v", k, a)
+	}
+	if err := s.Follow("aider", &Agent{}); err == nil {
+		t.Fatal("followed an unknown kind")
+	}
+}
+
 func TestValidReattach(t *testing.T) {
 	for _, s := range []Spec{
 		{Mode: ModeReattach, Session: "claude-x"},

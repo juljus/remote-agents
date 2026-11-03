@@ -24,22 +24,22 @@ type agentKind interface {
 	relaunchArgs(rec runRecord) (args []string, how string, err error)
 	// takesSession is the session id an agent's arguments run, or "".
 	takesSession(args []string) string
+	// startsWith is the session the box follows from the agent's start,
+	// before its hooks report one, or "".
+	startsWith(args []string) string
 	// holder probes for a running agent that holds session id.
 	holder(l boxlayout.Layout, env []string, id string) holderProbe
 	// withHooks adds the box's hooks to the agent command line of s.
 	withHooks(l boxlayout.Layout, s spec.Spec) ([]string, error)
 }
 
+var kinds = map[spec.Kind]agentKind{spec.KindClaude: claudeKind{}, spec.KindCodex: codexKind{}}
+
 // followed is the kind and launch description of the agent whose session s
 // follows; nil for none.
 func followed(s spec.Spec) (agentKind, *spec.Agent) {
-	switch {
-	case s.Claude != nil:
-		return claudeKind{}, s.Claude
-	case s.Codex != nil:
-		return codexKind{}, s.Codex
-	}
-	return nil, nil
+	k, agent := s.Followed()
+	return kinds[k], agent
 }
 
 // resumeArgv is the command line that resumes session id of the agent s follows.
@@ -70,6 +70,9 @@ func (claudeKind) takesSession(args []string) string {
 	return id
 }
 
+// Claude reports its session at startup.
+func (claudeKind) startsWith([]string) string { return "" }
+
 func (claudeKind) holder(l boxlayout.Layout, env []string, id string) holderProbe {
 	return claudeProbe(claudeSessionsDir(l, env), os.DirFS("/proc"), id)
 }
@@ -88,6 +91,9 @@ func (codexKind) relaunchArgs(rec runRecord) ([]string, string, error) {
 }
 
 func (codexKind) takesSession(args []string) string { return codexargs.SessionOf(args) }
+
+// Codex reports a resumed session only at its next turn.
+func (codexKind) startsWith(args []string) string { return codexargs.SessionOf(args) }
 
 func (codexKind) holder(l boxlayout.Layout, env []string, id string) holderProbe {
 	return codexProbe(codexHome(l, env), id)

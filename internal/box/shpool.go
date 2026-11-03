@@ -67,7 +67,7 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 	if s.Mode != spec.ModeSession && s.Mode != spec.ModeReattach {
 		return 1, fmt.Errorf("attach needs a session or reattach spec, got mode %q", s.Mode)
 	}
-	if agent := s.Followed(); agent != nil && agent.Resumes != "" {
+	if _, agent := followed(s); agent != nil && agent.Resumes != "" {
 		sessions, err := listSessions(l)
 		if err != nil {
 			return 1, err
@@ -153,6 +153,7 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 // attachTarget is where a run that resumes an agent session attaches: the
 // shpool session of the same agent that already runs it, if one does under
 // another name, as a session the agent named itself once it started does.
+// The run then joins that session, whose end it looks up after a reconnect.
 func attachTarget(l boxlayout.Layout, s spec.Spec, sessions []shpoolSession) (spec.Spec, error) {
 	agent, err := spec.AgentOf(s.Session)
 	if err != nil {
@@ -169,9 +170,9 @@ func attachTarget(l boxlayout.Layout, s spec.Spec, sessions []shpoolSession) (sp
 		if err != nil {
 			return spec.Spec{}, err
 		}
-		if hooks.AgentSession == s.Followed().Resumes {
+		if _, followed := followed(s); hooks.AgentSession == followed.Resumes {
 			s.Session = r.Name
-			return s, nil
+			return s, recordJoined(l, s.RunID, r.Name, time.Now())
 		}
 	}
 	return s, nil

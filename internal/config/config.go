@@ -15,14 +15,16 @@ import (
 	"remote-agents/internal/boxlayout"
 	"remote-agents/internal/claudeargs"
 	"remote-agents/internal/codexargs"
+	"remote-agents/internal/spec"
 )
 
-// Kind selects how the wrapper understands an agent's command line.
-type Kind string
+// Kind selects how the wrapper understands an agent's command line and
+// which kind of session the box follows.
+type Kind = spec.Kind
 
 const (
-	KindClaude Kind = "claude"
-	KindCodex  Kind = "codex"
+	KindClaude = spec.KindClaude
+	KindCodex  = spec.KindCodex
 )
 
 var clis = map[Kind]agentcli.CLI{KindClaude: claudeargs.CLI{}, KindCodex: codexargs.CLI{}}

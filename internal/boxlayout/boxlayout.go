@@ -74,6 +74,15 @@ func (l Layout) EndedMarker(runID string) string { return filepath.Join(l.EndedD
 func (l Layout) RunsDir() string               { return l.state("runs") }
 func (l Layout) RunRecord(runID string) string { return filepath.Join(l.RunsDir(), runID+".json") }
 
+// Where a run that resumed a session joined the one already running it, and
+// how each session last ended, which such a run looks up.
+func (l Layout) JoinedDir() string          { return l.state("joined") }
+func (l Layout) Joined(runID string) string { return filepath.Join(l.JoinedDir(), runID+".json") }
+func (l Layout) SessionEndsDir() string     { return l.state("session-ends") }
+func (l Layout) SessionEnd(session string) string {
+	return filepath.Join(l.SessionEndsDir(), session+".json")
+}
+
 // When each session was last lost by a launcher stopped from outside.
 func (l Layout) LostDir() string            { return l.state("lost") }
 func (l Layout) Lost(session string) string { return filepath.Join(l.LostDir(), session+".json") }

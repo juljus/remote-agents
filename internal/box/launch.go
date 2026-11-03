@@ -130,7 +130,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		return fail(fmt.Errorf("launch needs a session spec, got mode %q", s.Mode))
 	}
 	now := time.Now()
-	for _, dir := range []string{l.EndedDir(), l.RunsDir(), l.LostDir(), l.ReapedDir(), l.ReapedSessionsDir()} {
+	for _, dir := range []string{l.EndedDir(), l.RunsDir(), l.LostDir(), l.ReapedDir(), l.ReapedSessionsDir(), l.JoinedDir(), l.SessionEndsDir()} {
 		if err := pruneOld(dir, now); err != nil {
 			return fail(err)
 		}
@@ -139,6 +139,9 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		return fail(err)
 	}
 	m, ended, err := readMarker(l, s.RunID)
+	if err == nil && !ended {
+		m, ended, err = joinedEnd(l, s.RunID)
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -174,10 +177,11 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 				return fail(err)
 			}
 		}
+		seed := kind.startsWith(s.Argv[1:])
 		if s.Argv, err = kind.withHooks(l, s); err != nil {
 			return fail(err)
 		}
-		if w, err = newWatcher(l, s.Session, s.RunID, rec, now); err != nil {
+		if w, err = newWatcher(l, s.Session, s.RunID, rec, seed, now); err != nil {
 			return fail(err)
 		}
 	}
@@ -197,7 +201,11 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		}
 		return code
 	}
-	if err := writeMarker(l, s.RunID, marker{ExitCode: code, Reason: reaped.reason, AgentSession: reaped.agentSession}); err != nil {
+	end := marker{ExitCode: code, Reason: reaped.reason, AgentSession: reaped.agentSession}
+	if err := writeMarker(l, s.RunID, end); err != nil {
+		return fail(err)
+	}
+	if err := writeSessionEnd(l, s.Session, end, time.Now()); err != nil {
 		return fail(err)
 	}
 	if err := removeRunRecord(l, s.RunID); err != nil {
@@ -224,7 +232,7 @@ func resumeAfterReap(l boxlayout.Layout, s *spec.Spec, m marker, ended bool) (re
 		}
 		return m.Reason, nil
 	}
-	agent := s.Followed()
+	_, agent := followed(*s)
 	if agent == nil || agent.Resumes == "" {
 		return "", nil
 	}

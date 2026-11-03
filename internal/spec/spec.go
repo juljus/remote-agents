@@ -55,12 +55,37 @@ type Agent struct {
 	Resumes string `json:"resumes,omitempty"`
 }
 
-// Followed is the agent whose session the box follows, or nil.
-func (s Spec) Followed() *Agent {
-	if s.Claude != nil {
-		return s.Claude
+// Kind is a kind of agent whose session the box follows.
+type Kind string
+
+const (
+	KindClaude Kind = "claude"
+	KindCodex  Kind = "codex"
+)
+
+// Followed is the kind and launch description of the agent whose session
+// the box follows; nil for none.
+func (s Spec) Followed() (Kind, *Agent) {
+	switch {
+	case s.Claude != nil:
+		return KindClaude, s.Claude
+	case s.Codex != nil:
+		return KindCodex, s.Codex
 	}
-	return s.Codex
+	return "", nil
+}
+
+// Follow makes s follow the session of an agent of kind k.
+func (s *Spec) Follow(k Kind, a *Agent) error {
+	switch k {
+	case KindClaude:
+		s.Claude = a
+	case KindCodex:
+		s.Codex = a
+	default:
+		return fmt.Errorf("no session of a %q agent can be followed", k)
+	}
+	return nil
 }
 
 func (c *Agent) validate() error {
@@ -133,7 +158,7 @@ func (s Spec) Validate() error {
 		if s.Claude != nil && s.Codex != nil {
 			return errors.New("a session spec follows one agent, not Claude and Codex")
 		}
-		if a := s.Followed(); a != nil {
+		if _, a := s.Followed(); a != nil {
 			if err := a.validate(); err != nil {
 				return err
 			}
@@ -151,12 +176,12 @@ func (s Spec) Validate() error {
 				return fmt.Errorf("invalid run id %q: %w", s.RunID, err)
 			}
 		}
-		if len(s.Argv) != 0 || s.Followed() != nil {
+		if _, a := s.Followed(); len(s.Argv) != 0 || a != nil {
 			return errors.New("reattach spec must not carry a command")
 		}
 		return nil
 	case ModeExec:
-		if s.Session != "" || s.RunID != "" || s.Attempt != 0 || s.Followed() != nil {
+		if _, a := s.Followed(); s.Session != "" || s.RunID != "" || s.Attempt != 0 || a != nil {
 			return errors.New("exec spec must not name a session")
 		}
 		return s.validateRun()

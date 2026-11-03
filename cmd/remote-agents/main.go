@@ -196,11 +196,8 @@ func runAgent(agentName string, args []string) (int, error) {
 		Env:       terminalEnv(),
 		HookRelay: hooks != nil,
 	}
-	switch agent.Kind {
-	case config.KindClaude:
-		s.Claude = followed
-	case config.KindCodex:
-		s.Codex = followed
+	if err := s.Follow(agent.Kind, followed); err != nil {
+		return 1, err
 	}
 	return runSession(e, s, hint, hooks, resume.NewTracker(plan.SessionID, plan.Resumes, resumeCommand))
 }

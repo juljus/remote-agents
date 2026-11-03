@@ -95,7 +95,10 @@ func checkTrusted(t *testing.T, hooks map[string]any) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key := codexHookKey(event, g)
+			key, err := codexHookKey(event, g)
+			if err != nil {
+				t.Fatal(err)
+			}
 			entry, ok := state[key].(map[string]any)
 			if !ok || entry["trusted_hash"] != want {
 				t.Fatalf("state[%q] = %v, want trusted_hash %q", key, state[key], want)
@@ -152,14 +155,32 @@ func TestCodexHooksRelayCmuxsHooksToTheLaptop(t *testing.T) {
 	checkTrusted(t, hooks)
 }
 
-// Codex refuses --no-daemon given twice at the same level.
+// Codex refuses --no-daemon given twice at the same level; after -- it is prompt text.
 func TestCodexHooksKeepAGivenNoDaemon(t *testing.T) {
-	argv, err := withCodexHooks(testLayout(t), []string{"codex", "--no-daemon", "hi"}, false)
-	if err != nil {
-		t.Fatal(err)
+	for args, want := range map[string]int{"--no-daemon hi": 1, "-- --no-daemon": 2} {
+		argv, err := withCodexHooks(testLayout(t), append([]string{"codex"}, strings.Fields(args)...), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := strings.Count(strings.Join(argv, "\n"), "--no-daemon"); n != want {
+			t.Fatalf("%s: argv = %q", args, argv)
+		}
 	}
-	if n := strings.Count(strings.Join(argv, "\n"), "--no-daemon"); n != 1 {
-		t.Fatalf("argv = %q", argv)
+}
+
+// Every hook the box gives Codex has an event Codex keys trust under.
+func TestEveryCodexHookEventHasATrustLabel(t *testing.T) {
+	events := slices.Clone(reaper.CodexHookEvents)
+	for _, h := range cmuxcodex.Hooks {
+		events = append(events, h.Event)
+	}
+	for _, event := range events {
+		if _, err := codexEventLabel(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := codexTrustHash(codexHook{event: "Notification", command: "x", timeout: 1}); err == nil {
+		t.Fatal("hashed a hook of an event Codex does not have")
 	}
 }
 
@@ -341,5 +362,72 @@ func TestAResumeAttachesWhereItsSessionAlreadyRuns(t *testing.T) {
 		if got, err := attachTarget(l, s, sessions); err != nil || got.Session != s.Session {
 			t.Fatalf("%s: target = %q, %v; want %s", name, got.Session, err, s.Session)
 		}
+	}
+}
+
+// Codex reports a resumed session only at its next turn, so the box follows
+// the session its command line resumes from the start: a detached resume can
+// be reaped, and found by a later resume of it.
+func TestAWatcherFollowsTheSessionACodexResumes(t *testing.T) {
+	l := testLayout(t)
+	if (claudeKind{}).startsWith([]string{"--resume", commandSession}) != "" {
+		t.Fatal("Claude reports its own session at startup")
+	}
+	seed := (codexKind{}).startsWith([]string{"--no-daemon", "resume", codexSession})
+	if _, err := beginReports(l, "codex-x", runID, runRecord{}, seed); err != nil {
+		t.Fatal(err)
+	}
+	hooks, err := reaper.ReadHookState(l.HookState("codex-x"))
+	if err != nil || hooks.AgentSession != codexSession {
+		t.Fatalf("hooks = %+v, %v", hooks, err)
+	}
+	if rec, _, err := readRunRecord(l, runID); err != nil || rec.AgentSession != codexSession {
+		t.Fatalf("record = %+v, %v", rec, err)
+	}
+}
+
+// A run that joined a session another run started is told how that session
+// ended while its link was down, instead of resuming an agent that exited.
+func TestAJoinedRunReportsTheEndOfTheSessionItJoined(t *testing.T) {
+	l := testLayout(t)
+	work := t.TempDir()
+	const started = "11111111-0000-4333-8444-555555555555"
+	first := sessionSpec(work, "/bin/sh", "-c", "exit 9")
+	first.RunID, first.Session = started, "claude-bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	joined := time.Now()
+	if err := recordJoined(l, runID, first.Session, joined); err != nil {
+		t.Fatal(err)
+	}
+	if _, ended, err := joinedEnd(l, runID); err != nil || ended {
+		t.Fatalf("ended = %v, %v before the session ended", ended, err)
+	}
+	if code, _ := launch(t, l, first); code != 9 {
+		t.Fatalf("first run exit %d", code)
+	}
+	code, out := launch(t, l, sessionSpec(work, "/bin/sh", "-c", "echo SHOULD-NOT-RUN"))
+	if code != 9 || strings.Contains(out, "SHOULD-NOT-RUN") || !strings.Contains(out, "ended") {
+		t.Fatalf("joined run relaunch = %d %q", code, out)
+	}
+	// An end from before the join belongs to an earlier start of the session.
+	if err := recordJoined(l, runID, first.Session, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ended, err := joinedEnd(l, runID); err != nil || ended {
+		t.Fatalf("ended = %v, %v for an end before the join", ended, err)
+	}
+}
+
+func TestAttachingToARunningSessionJoinsIt(t *testing.T) {
+	l := testLayout(t)
+	const running = "codex-bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	writeHooks(t, l, running, codexSession)
+	s := codexSpec("/w")
+	s.Session, s.Codex.Resumes = "codex-"+codexSession, codexSession
+	if _, err := attachTarget(l, s, []shpoolSession{{Name: running}}); err != nil {
+		t.Fatal(err)
+	}
+	var j joinedRecord
+	if found, err := jsonfile.Read(l.Joined(runID), &j); err != nil || !found || j.Session != running {
+		t.Fatalf("joined = %+v %v %v", j, found, err)
 	}
 }

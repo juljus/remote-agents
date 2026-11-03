@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"sync"
 
-	"remote-agents/internal/claudeargs"
+	"remote-agents/internal/agentcli"
 )
 
 type Tracker struct {
@@ -49,7 +49,7 @@ func (t *Tracker) ObserveHook(payload []byte) error {
 	if p.SessionID == nil {
 		return errors.New("SessionStart payload has no session_id")
 	}
-	if !claudeargs.IsUUID(*p.SessionID) {
+	if !agentcli.IsUUID(*p.SessionID) {
 		return fmt.Errorf("SessionStart payload session_id %q is not a session id", *p.SessionID)
 	}
 	t.mu.Lock()

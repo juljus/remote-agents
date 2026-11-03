@@ -24,17 +24,22 @@ type Hook struct {
 	Event string
 	// Argv is what the hook passes to the cmux CLI.
 	Argv []string
+	// Timeout is how long Codex lets the hook run, in seconds.
+	Timeout int
 }
 
+// timeout is what cmux 0.64 gives each of its Codex hooks.
+const timeout = 5
+
 func feed(event string) Hook {
-	return Hook{Event: event, Argv: []string{"hooks", "feed", "--source", "codex", "--event", event}}
+	return Hook{Event: event, Argv: []string{"hooks", "feed", "--source", "codex", "--event", event}, Timeout: timeout}
 }
 
 // Hooks are those cmux 0.64 installs for Codex.
 var Hooks = []Hook{
-	{Event: "SessionStart", Argv: []string{"hooks", "codex", "session-start"}},
-	{Event: "UserPromptSubmit", Argv: []string{"hooks", "codex", "prompt-submit"}},
-	{Event: "Stop", Argv: []string{"hooks", "codex", "stop"}},
+	{Event: "SessionStart", Argv: []string{"hooks", "codex", "session-start"}, Timeout: timeout},
+	{Event: "UserPromptSubmit", Argv: []string{"hooks", "codex", "prompt-submit"}, Timeout: timeout},
+	{Event: "Stop", Argv: []string{"hooks", "codex", "stop"}, Timeout: timeout},
 	feed("PermissionRequest"),
 	feed("PreToolUse"),
 	feed("PostToolUse"),

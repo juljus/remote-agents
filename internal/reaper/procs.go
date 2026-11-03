@@ -124,7 +124,8 @@ func Running(proc fs.FS, pid int, startTime uint64) (bool, error) {
 }
 
 // toolShell reports a shell that Claude Code's Bash tool or Codex's shell
-// tool runs a command in: both source a snapshot of the user's shell first.
+// tool runs a command in: both source a snapshot of the user's shell first,
+// Codex's from shell_snapshots in its home, which CODEX_HOME may move.
 func toolShell(args []string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "-c" && (strings.Contains(args[i+1], "/.claude/shell-snapshots/snapshot-") || strings.Contains(args[i+1], "/shell_snapshots/")) {

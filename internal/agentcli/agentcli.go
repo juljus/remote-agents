@@ -3,7 +3,11 @@
 // which session it runs, and how that session is resumed.
 package agentcli
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/google/uuid"
+)
 
 type Mode int
 
@@ -33,6 +37,12 @@ type Plan struct {
 	SessionID string
 	// Resumes is true when SessionID names a session that already exists.
 	Resumes bool
+}
+
+// IsUUID reports whether s is a session id in the canonical form Claude and Codex use.
+func IsUUID(s string) bool {
+	_, err := uuid.Parse(s)
+	return err == nil && len(s) == 36
 }
 
 // CLI understands one kind of agent's command line.

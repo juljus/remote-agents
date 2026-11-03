@@ -123,6 +123,21 @@ func TestHookStateFollowsCodexTurns(t *testing.T) {
 	}
 }
 
+// SessionStart and Interrupt as Codex 0.166 sent them, with paths and model replaced.
+func TestHookStateReadsRealCodexPayloads(t *testing.T) {
+	const rollout = "/home/agent/.codex/sessions/2026/11/03/rollout-2026-11-03T17-09-33-01a1a1f5-59f0-75f2-8f5b-3300da79a6c5.jsonl"
+	var h HookState
+	h = apply(t, h, t0, `{"session_id":"01a1a1f5-59f0-75f2-8f5b-3300da79a6c5","transcript_path":"`+rollout+`","cwd":"/home/agent/work","hook_event_name":"SessionStart","model":"gpt-5","permission_mode":"bypassPermissions","source":"startup"}`)
+	h = apply(t, h, t0.Add(time.Second), `{"session_id":"01a1a1f5-59f0-75f2-8f5b-3300da79a6c5","turn_id":"01a1a1f5-7023-77f0-9d9a-6e41b0948f3a","transcript_path":"`+rollout+`","cwd":"/home/agent/work","hook_event_name":"UserPromptSubmit","model":"gpt-5","permission_mode":"bypassPermissions","prompt":"hi"}`)
+	if h.AgentSession != "01a1a1f5-59f0-75f2-8f5b-3300da79a6c5" || h.Transcript != rollout || !h.TurnOpen() {
+		t.Fatalf("after prompt: %+v", h)
+	}
+	h = apply(t, h, t0.Add(2*time.Second), `{"session_id":"01a1a1f5-59f0-75f2-8f5b-3300da79a6c5","turn_id":"01a1a1f5-7023-77f0-9d9a-6e41b0948f3a","transcript_path":"`+rollout+`","cwd":"/home/agent/work","hook_event_name":"Interrupt","model":"gpt-5","permission_mode":"bypassPermissions"}`)
+	if h.TurnOpen() {
+		t.Fatalf("after interrupt: %+v", h)
+	}
+}
+
 func TestHookStateRejectsUnknownPayloads(t *testing.T) {
 	for _, p := range []string{`not json`, `{"hook_event_name":"PreToolUse"}`, `{}`} {
 		if _, err := (HookState{}).Apply([]byte(p), t0); err == nil {

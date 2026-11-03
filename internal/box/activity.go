@@ -215,7 +215,7 @@ func takeReaped(l boxlayout.Layout, agentSession string) (reaper.Reason, error) 
 // reattachTarget is the run an attach by name of a reaped session resumes.
 func reattachTarget(rec reapedSessionRecord) (spec.Spec, error) {
 	s := rec.Spec
-	agent := s.Followed()
+	_, agent := followed(s)
 	if agent == nil {
 		return spec.Spec{}, fmt.Errorf("reaped session %s has no resume command", s.Session)
 	}

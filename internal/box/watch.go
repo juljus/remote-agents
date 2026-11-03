@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"remote-agents/internal/boxlayout"
+	"remote-agents/internal/jsonfile"
 	"remote-agents/internal/reaper"
 )
 
@@ -50,8 +51,9 @@ type watcher struct {
 }
 
 // newWatcher makes the launcher the subreaper of the agent's processes, so
-// a tool's background process stays visible once its shell has exited.
-func newWatcher(l boxlayout.Layout, session, runID string, record runRecord, now time.Time) (*watcher, error) {
+// a tool's background process stays visible once its shell has exited. seed
+// is the agent session the run follows before its hooks report one, or "".
+func newWatcher(l boxlayout.Layout, session, runID string, record runRecord, seed string, now time.Time) (*watcher, error) {
 	cfg, err := reaper.LoadConfig(l.ReaperConfig())
 	if err != nil {
 		return nil, err
@@ -59,22 +61,35 @@ func newWatcher(l boxlayout.Layout, session, runID string, record runRecord, now
 	if err := becomeSubreaper(); err != nil {
 		return nil, fmt.Errorf("becoming subreaper: %w", err)
 	}
-	if err := os.MkdirAll(l.ActivityDir(), 0o700); err != nil {
-		return nil, fmt.Errorf("creating activity dir: %w", err)
-	}
-	// A previous run of the same session left its reports behind.
-	for _, path := range []string{l.HookState(session), l.Status(session)} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("clearing %s: %w", filepath.Base(path), err)
-		}
-	}
-	if err := writeRunRecord(l, runID, record); err != nil {
+	if record, err = beginReports(l, session, runID, record, seed); err != nil {
 		return nil, err
 	}
 	return &watcher{
 		l: l, cfg: cfg, session: session, runID: runID, record: record, self: os.Getpid(), timer: reaper.NewTimer(cfg, now),
 		stop: make(chan struct{}), stopped: make(chan struct{}),
 	}, nil
+}
+
+// beginReports clears what a previous run of session reported, starts the
+// hook state from seed, and returns the run's record as written.
+func beginReports(l boxlayout.Layout, session, runID string, record runRecord, seed string) (runRecord, error) {
+	if err := os.MkdirAll(l.ActivityDir(), 0o700); err != nil {
+		return runRecord{}, fmt.Errorf("creating activity dir: %w", err)
+	}
+	for _, path := range []string{l.HookState(session), l.Status(session)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return runRecord{}, fmt.Errorf("clearing %s: %w", filepath.Base(path), err)
+		}
+	}
+	if seed != "" {
+		if seed != record.AgentSession {
+			record = runRecord{AgentSession: seed}
+		}
+		if err := jsonfile.Write(l.HookState(session), reaper.HookState{AgentSession: seed, Transcript: record.Transcript}); err != nil {
+			return runRecord{}, err
+		}
+	}
+	return record, writeRunRecord(l, runID, record)
 }
 
 func (w *watcher) log(format string, args ...any) {

@@ -41,10 +41,23 @@ type codexHook struct {
 	timeout int
 }
 
+// codexEventLabel is the name Codex keys event's trust under.
+func codexEventLabel(event string) (string, error) {
+	label, ok := codexEventLabels[event]
+	if !ok {
+		return "", fmt.Errorf("no Codex hook event %q", event)
+	}
+	return label, nil
+}
+
 // codexHookKey is the key under which Codex looks up the trust of a hook
 // given in a -c override: group of event's hooks in the session flags.
-func codexHookKey(event string, group int) string {
-	return "/<session-flags>/config.toml:" + codexEventLabels[event] + ":" + strconv.Itoa(group) + ":0"
+func codexHookKey(event string, group int) (string, error) {
+	label, err := codexEventLabel(event)
+	if err != nil {
+		return "", err
+	}
+	return "/<session-flags>/config.toml:" + label + ":" + strconv.Itoa(group) + ":0", nil
 }
 
 // codexTrustHash is the hash under which Codex trusts h without asking: the
@@ -55,8 +68,12 @@ func codexTrustHash(h codexHook) (string, error) {
 	if strings.IndexFunc(h.command, func(r rune) bool { return r < ' ' || r > '~' }) >= 0 {
 		return "", fmt.Errorf("hook command %q is not printable ASCII", h.command)
 	}
+	label, err := codexEventLabel(h.event)
+	if err != nil {
+		return "", err
+	}
 	identity := map[string]any{
-		"event_name": codexEventLabels[h.event],
+		"event_name": label,
 		"hooks":      []map[string]any{{"async": false, "command": h.command, "timeout": h.timeout, "type": "command"}},
 	}
 	var buf bytes.Buffer
@@ -95,7 +112,7 @@ func codexHooks(l boxlayout.Layout, relay bool) (events []string, hooks map[stri
 	if relay {
 		cmux := shellQuote(filepath.Join(l.HookBin(), "cmux"))
 		for _, h := range cmuxcodex.Hooks {
-			add(codexHook{event: h.Event, command: cmux + " " + strings.Join(h.Argv, " "), timeout: codexHookTimeout})
+			add(codexHook{event: h.Event, command: cmux + " " + strings.Join(h.Argv, " "), timeout: h.Timeout})
 		}
 	}
 	return events, hooks
@@ -114,8 +131,12 @@ func codexHooksOverride(l boxlayout.Layout, relay bool) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			key, err := codexHookKey(event, g)
+			if err != nil {
+				return "", err
+			}
 			groups = append(groups, fmt.Sprintf(`{hooks=[{type="command",command=%s,timeout=%d}]}`, tomlString(h.command), h.timeout))
-			trust = append(trust, fmt.Sprintf(`%s={trusted_hash=%s}`, tomlString(codexHookKey(event, g)), tomlString(hash)))
+			trust = append(trust, fmt.Sprintf(`%s={trusted_hash=%s}`, tomlString(key), tomlString(hash)))
 		}
 		decls = append(decls, event+"=["+strings.Join(groups, ",")+"]")
 	}
@@ -132,7 +153,11 @@ func withCodexHooks(l boxlayout.Layout, argv []string, relay bool) ([]string, er
 		return nil, err
 	}
 	front := []string{"--no-daemon", "--enable", "hooks", "-c", override}
-	if slices.Contains(argv[1:], "--no-daemon") {
+	options := argv[1:]
+	if end := slices.Index(options, "--"); end >= 0 {
+		options = options[:end]
+	}
+	if slices.Contains(options, "--no-daemon") {
 		front = front[1:]
 	}
 	return slices.Concat(argv[:1], front, argv[1:]), nil
@@ -145,7 +170,8 @@ var errCodexCoordinating = errors.New("a Codex holds the coordination lock of it
 // codexHeld reports whether a running Codex holds session id. A Codex
 // writing a session holds an exclusive flock on its lock file, which it
 // takes only under the coordination lock; probing under that lock cannot
-// race a Codex taking the session. Without a coordination lock file, no
+// race a Codex taking the session; a Codex that wants the coordination lock
+// meanwhile retries it for 30 seconds. Without a coordination lock file, no
 // Codex has taken a session lock.
 func codexHeld(home, id string) (bool, error) {
 	dir := filepath.Join(home, "thread-writer-locks")

@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"remote-agents/internal/agentcli"
-	"remote-agents/internal/claudeargs"
 )
 
 // Options that take a value, as codex-cli 0.166 defines them. --image takes
@@ -148,7 +147,7 @@ func scanArgs(args []string) scan {
 
 // resumed is the session id a resume names, or "" for the picker, --last or a session name.
 func (s scan) resumed() string {
-	if s.sub != "resume" || s.last || len(s.positionals) == 0 || !claudeargs.IsUUID(s.positionals[0]) {
+	if s.sub != "resume" || s.last || len(s.positionals) == 0 || !agentcli.IsUUID(s.positionals[0]) {
 		return ""
 	}
 	return s.positionals[0]

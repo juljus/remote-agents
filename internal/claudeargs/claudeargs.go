@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
-
 	"remote-agents/internal/agentcli"
 )
 
@@ -173,12 +171,6 @@ func CheckDefaults(args []string) error {
 	return nil
 }
 
-// IsUUID reports whether s is a session id in the canonical form Claude uses.
-func IsUUID(s string) bool {
-	_, err := uuid.Parse(s)
-	return err == nil && len(s) == 36
-}
-
 // Analyze plans an invocation. newID supplies a fresh session id when one must be injected.
 func Analyze(args []string, newID func() string) (agentcli.Plan, error) {
 	s := scanArgs(args)
@@ -187,13 +179,13 @@ func Analyze(args []string, newID func() string) (agentcli.Plan, error) {
 	}
 	switch {
 	case s.sessionID != "":
-		if !IsUUID(s.sessionID) {
+		if !agentcli.IsUUID(s.sessionID) {
 			return agentcli.Plan{}, fmt.Errorf("--session-id must be a UUID, got %q", s.sessionID)
 		}
 		return agentcli.Plan{Mode: agentcli.ModeSession, Args: args, SessionID: s.sessionID}, nil
 	case s.fork && (s.resume || s.cont):
 		return inject(args, newID()), nil
-	case s.resume && IsUUID(s.resumeValue):
+	case s.resume && agentcli.IsUUID(s.resumeValue):
 		return agentcli.Plan{Mode: agentcli.ModeSession, Args: args, SessionID: s.resumeValue, Resumes: true}, nil
 	case s.resume || s.cont:
 		return agentcli.Plan{Mode: agentcli.ModeSession, Args: args}, nil
@@ -210,7 +202,7 @@ func SessionOf(args []string) (string, bool) {
 		return s.sessionID, false
 	case s.fork:
 		return "", false
-	case s.resume && IsUUID(s.resumeValue):
+	case s.resume && agentcli.IsUUID(s.resumeValue):
 		return s.resumeValue, true
 	}
 	return "", false
