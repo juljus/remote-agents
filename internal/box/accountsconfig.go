@@ -14,134 +14,212 @@ import (
 
 	"remote-agents/internal/boxlayout"
 	"remote-agents/internal/claudeauth"
+	"remote-agents/internal/codexauth"
 )
 
-// AccountsConfig is where an install's account commands find Claude Code's
-// login and the services it talks to.
-type AccountsConfig struct {
+// ClaudeAccounts is where an install's Claude account commands find Claude
+// Code's login and the services it talks to.
+type ClaudeAccounts struct {
 	Paths     claudeauth.Paths
 	Endpoints claudeauth.Endpoints
 }
 
+// CodexAccounts is where an install's Codex account commands find Codex's
+// login and the services it talks to.
+type CodexAccounts struct {
+	Paths     codexauth.Paths
+	Endpoints codexauth.Endpoints
+}
+
+// rawAccountsConfig is accounts.toml: a section per agent, for test
+// installs only. The production install has none: its sessions use the
+// agents' own dirs and services.
 type rawAccountsConfig struct {
-	// ClaudeConfigDir is the one dir Claude Code keeps a test install's
-	// login in, as CLAUDE_CONFIG_DIR would point it. Test installs must set
-	// it, so they never reach the real login, and the production install
-	// may not: its sessions use ~/.claude.
-	ClaudeConfigDir *string `toml:"claude_config_dir"`
-	// TokenURL and APIURL point at a stand-in server for tests, on loopback only.
+	Claude *rawAgentAccounts `toml:"claude"`
+	Codex  *rawAgentAccounts `toml:"codex"`
+}
+
+type rawAgentAccounts struct {
+	// ConfigDir is the one dir the agent keeps a test install's login in, as
+	// CLAUDE_CONFIG_DIR or CODEX_HOME would point it. Test installs must set
+	// it, so they never reach the real login.
+	ConfigDir *string `toml:"config_dir"`
+	// TokenURL and APIURL point at a stand-in server, on loopback only.
 	TokenURL *string `toml:"token_url"`
 	APIURL   *string `toml:"api_url"`
 }
 
-// LoadAccountsConfig reads the install's accounts.toml; an absent file means
-// Claude Code's defaults, which only the production install may use.
-func LoadAccountsConfig(l boxlayout.Layout) (AccountsConfig, error) {
-	path := l.AccountsConfig()
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		data, err = nil, nil
-	}
+// testAccounts is one agent's section of a test install, checked.
+type testAccounts struct {
+	dir      string
+	tokenURL *string
+	apiURL   *string
+}
+
+// LoadClaudeAccounts reads the Claude section of the install's accounts.toml.
+func LoadClaudeAccounts(l boxlayout.Layout) (ClaudeAccounts, error) {
+	data, err := readAccountsConfig(l)
 	if err != nil {
-		return AccountsConfig{}, fmt.Errorf("reading accounts config: %w", err)
+		return ClaudeAccounts{}, err
 	}
-	cfg, err := ParseAccountsConfig(data, l)
+	cfg, err := ParseClaudeAccounts(data, l)
 	if err != nil {
-		return AccountsConfig{}, fmt.Errorf("accounts config %s: %w", path, err)
+		return ClaudeAccounts{}, fmt.Errorf("accounts config %s: %w", l.AccountsConfig(), err)
 	}
 	return cfg, nil
 }
 
-func ParseAccountsConfig(data []byte, l boxlayout.Layout) (AccountsConfig, error) {
+// LoadCodexAccounts reads the Codex section of the install's accounts.toml.
+func LoadCodexAccounts(l boxlayout.Layout) (CodexAccounts, error) {
+	data, err := readAccountsConfig(l)
+	if err != nil {
+		return CodexAccounts{}, err
+	}
+	cfg, err := ParseCodexAccounts(data, l)
+	if err != nil {
+		return CodexAccounts{}, fmt.Errorf("accounts config %s: %w", l.AccountsConfig(), err)
+	}
+	return cfg, nil
+}
+
+// readAccountsConfig is accounts.toml, empty when there is none.
+func readAccountsConfig(l boxlayout.Layout) ([]byte, error) {
+	data, err := os.ReadFile(l.AccountsConfig())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading accounts config: %w", err)
+	}
+	return data, nil
+}
+
+func ParseClaudeAccounts(data []byte, l boxlayout.Layout) (ClaudeAccounts, error) {
+	raw, err := parseAccountsConfig(data)
+	if err != nil {
+		return ClaudeAccounts{}, err
+	}
+	cfg := ClaudeAccounts{Endpoints: claudeauth.DefaultEndpoints}
+	if l.Name == boxlayout.DefaultName {
+		if raw.Claude != nil {
+			return ClaudeAccounts{}, fmt.Errorf("[claude] is for test installs only: the %s install's sessions use ~/.claude", l.Name)
+		}
+		cfg.Paths, err = claudeauth.DefaultPaths(l.Home)
+		return cfg, err
+	}
+	test, err := checkTestAccounts(raw.Claude, "claude", l, []string{l.Home, filepath.Join(l.Home, ".claude")}, func(dir string) ([]string, error) {
+		paths, err := claudeauth.PathsIn(dir)
+		return []string{paths.Credentials(), paths.GlobalConfig}, err
+	})
+	if err != nil {
+		return ClaudeAccounts{}, err
+	}
+	if cfg.Paths, err = claudeauth.PathsIn(test.dir); err != nil {
+		return ClaudeAccounts{}, err
+	}
+	setURL(&cfg.Endpoints.TokenURL, test.tokenURL)
+	setURL(&cfg.Endpoints.APIBase, test.apiURL)
+	return cfg, nil
+}
+
+func ParseCodexAccounts(data []byte, l boxlayout.Layout) (CodexAccounts, error) {
+	raw, err := parseAccountsConfig(data)
+	if err != nil {
+		return CodexAccounts{}, err
+	}
+	cfg := CodexAccounts{Endpoints: codexauth.DefaultEndpoints}
+	if l.Name == boxlayout.DefaultName {
+		if raw.Codex != nil {
+			return CodexAccounts{}, fmt.Errorf("[codex] is for test installs only: the %s install's sessions use ~/.codex", l.Name)
+		}
+		cfg.Paths = codexauth.DefaultPaths(l.Home)
+		return cfg, nil
+	}
+	test, err := checkTestAccounts(raw.Codex, "codex", l, []string{codexauth.DefaultPaths(l.Home).Home}, func(dir string) ([]string, error) {
+		return []string{codexauth.Paths{Home: dir}.AuthFile()}, nil
+	})
+	if err != nil {
+		return CodexAccounts{}, err
+	}
+	cfg.Paths = codexauth.Paths{Home: test.dir}
+	setURL(&cfg.Endpoints.TokenOverride, test.tokenURL)
+	setURL(&cfg.Endpoints.APIBase, test.apiURL)
+	return cfg, nil
+}
+
+func setURL(field *string, value *string) {
+	if value != nil {
+		*field = *value
+	}
+}
+
+func parseAccountsConfig(data []byte) (rawAccountsConfig, error) {
 	var raw rawAccountsConfig
 	dec := toml.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&raw); err != nil {
 		var strict *toml.StrictMissingError
 		if errors.As(err, &strict) {
-			return AccountsConfig{}, fmt.Errorf("unknown keys:\n%s", strict.String())
+			return rawAccountsConfig{}, fmt.Errorf("unknown keys:\n%s", strict.String())
 		}
-		return AccountsConfig{}, fmt.Errorf("parsing toml: %w", err)
+		return rawAccountsConfig{}, fmt.Errorf("parsing toml: %w", err)
 	}
-	cfg := AccountsConfig{Endpoints: claudeauth.DefaultEndpoints}
-	var err error
-	switch {
-	case l.Name == boxlayout.DefaultName && raw.ClaudeConfigDir != nil:
-		return AccountsConfig{}, fmt.Errorf("claude_config_dir is for test installs only: the %s install's sessions use ~/.claude", l.Name)
-	case l.Name == boxlayout.DefaultName:
-		cfg.Paths, err = claudeauth.DefaultPaths(l.Home)
-	case raw.ClaudeConfigDir == nil:
-		return AccountsConfig{}, fmt.Errorf("install %s needs claude_config_dir: only the %s install may use ~/.claude", l.Name, boxlayout.DefaultName)
-	default:
-		var dir string
-		dir, err = testConfigDir(*raw.ClaudeConfigDir, l.Home)
-		if err != nil {
-			return AccountsConfig{}, fmt.Errorf("claude_config_dir: %w", err)
-		}
-		cfg.Paths, err = claudeauth.PathsIn(dir)
-	}
-	if err != nil {
-		return AccountsConfig{}, err
-	}
-	for key, set := range map[string]struct {
-		raw   *string
-		field *string
-	}{"token_url": {raw.TokenURL, &cfg.Endpoints.TokenURL}, "api_url": {raw.APIURL, &cfg.Endpoints.APIBase}} {
-		if set.raw == nil {
-			continue
-		}
-		if l.Name == boxlayout.DefaultName {
-			return AccountsConfig{}, fmt.Errorf("%s is for test installs only", key)
-		}
-		if err := loopbackURL(*set.raw); err != nil {
-			return AccountsConfig{}, fmt.Errorf("%s: %w", key, err)
-		}
-		*set.field = *set.raw
-	}
-	return cfg, nil
+	return raw, nil
 }
 
-// testConfigDir resolves a test install's Claude Code config dir, which
-// must exist and must not be the real login's: ~/.claude holds its
-// credentials, and home its global config. Its login files must be its own,
-// not links to others.
-func testConfigDir(dir, home string) (string, error) {
+// checkTestAccounts checks a test install's section of agent: its config
+// dir must exist, must not be one of the real login's dirs, and the login
+// files loginFiles names in it must be its own, not links to others; its
+// URLs must be on loopback.
+func checkTestAccounts(raw *rawAgentAccounts, agent string, l boxlayout.Layout, realDirs []string, loginFiles func(dir string) ([]string, error)) (testAccounts, error) {
+	if raw == nil || raw.ConfigDir == nil {
+		return testAccounts{}, fmt.Errorf("install %s needs [%s] config_dir: only the %s install may use the real login", l.Name, agent, boxlayout.DefaultName)
+	}
+	dir := *raw.ConfigDir
 	if !filepath.IsAbs(dir) {
-		return "", fmt.Errorf("must be absolute, got %q", dir)
+		return testAccounts{}, fmt.Errorf("[%s] config_dir must be absolute, got %q", agent, dir)
 	}
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return "", err
+		return testAccounts{}, fmt.Errorf("[%s] config_dir: %w", agent, err)
 	}
-	for _, loginDir := range []string{home, filepath.Join(home, ".claude")} {
-		loginResolved, err := filepath.EvalSymlinks(loginDir)
+	for _, realDir := range realDirs {
+		realResolved, err := filepath.EvalSymlinks(realDir)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return "", err
+			return testAccounts{}, err
 		}
-		if resolved == loginResolved {
-			return "", fmt.Errorf("%s is the real login's dir %s", dir, loginDir)
+		if resolved == realResolved {
+			return testAccounts{}, fmt.Errorf("[%s] config_dir %s is the real login's dir %s", agent, dir, realDir)
 		}
 	}
-	paths, err := claudeauth.PathsIn(resolved)
+	files, err := loginFiles(resolved)
 	if err != nil {
-		return "", err
+		return testAccounts{}, err
 	}
-	for _, file := range []string{paths.Credentials(), paths.GlobalConfig} {
+	for _, file := range files {
 		info, err := os.Lstat(file)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return "", err
+			return testAccounts{}, err
 		}
 		if info.Mode()&fs.ModeSymlink != 0 {
-			return "", fmt.Errorf("%s is a symlink, which may lead to the real login's files", file)
+			return testAccounts{}, fmt.Errorf("%s is a symlink, which may lead to the real login's files", file)
 		}
 	}
-	return resolved, nil
+	for key, value := range map[string]*string{"token_url": raw.TokenURL, "api_url": raw.APIURL} {
+		if value == nil {
+			continue
+		}
+		if err := loopbackURL(*value); err != nil {
+			return testAccounts{}, fmt.Errorf("[%s] %s: %w", agent, key, err)
+		}
+	}
+	return testAccounts{dir: resolved, tokenURL: raw.TokenURL, apiURL: raw.APIURL}, nil
 }
 
 // loopbackURL admits only a test server on the box itself, so no setting

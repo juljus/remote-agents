@@ -1497,7 +1497,7 @@ for i in $(seq 50); do [ -s %[3]q ] && break; sleep 0.1; done
 	}
 	api := "http://127.0.0.1:" + strings.TrimSpace(port)
 	// The test install has no accounts config otherwise, so its account commands refuse to run.
-	if _, err := onBox(fmt.Sprintf(`printf 'claude_config_dir = "%%s"\ntoken_url = "%%s/token"\napi_url = "%%s"\n' %q %q %q > %q`, cfg, api, api, box.AccountsConfig())); err != nil {
+	if _, err := onBox(fmt.Sprintf(`printf '[claude]\nconfig_dir = "%%s"\ntoken_url = "%%s/token"\napi_url = "%%s"\n' %q %q %q > %q`, cfg, api, api, box.AccountsConfig())); err != nil {
 		t.Fatal(err)
 	}
 	run := func(args ...string) *term {
