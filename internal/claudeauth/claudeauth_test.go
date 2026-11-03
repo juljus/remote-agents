@@ -46,24 +46,14 @@ func mustAccount(t *testing.T, raw string) Account {
 }
 
 func TestPathsFollowClaudeCode(t *testing.T) {
-	env := func(vars map[string]string) func(string) (string, bool) {
-		return func(k string) (string, bool) { v, ok := vars[k]; return v, ok }
-	}
 	home := t.TempDir()
-	cases := []struct {
-		vars map[string]string
-		want Paths
-	}{
-		{nil, Paths{ConfigDir: home + "/.claude", SecureDir: home + "/.claude", GlobalConfig: home + "/.claude.json"}},
-		{map[string]string{"CLAUDE_CONFIG_DIR": "/c"}, Paths{ConfigDir: "/c", SecureDir: "/c", GlobalConfig: "/c/.claude.json"}},
-		{map[string]string{"CLAUDE_CONFIG_DIR": "/c", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/s"}, Paths{ConfigDir: "/c", SecureDir: "/s", GlobalConfig: "/c/.claude.json"}},
-		{map[string]string{"CLAUDE_CONFIG_DIR": "/c", "CLAUDE_SECURESTORAGE_CONFIG_DIR": ""}, Paths{ConfigDir: "/c", SecureDir: home + "/.claude", GlobalConfig: "/c/.claude.json"}},
+	got, err := DefaultPaths(home)
+	if want := (Paths{ConfigDir: home + "/.claude", SecureDir: home + "/.claude", GlobalConfig: home + "/.claude.json"}); err != nil || got != want {
+		t.Fatalf("default %+v, %v", got, err)
 	}
-	for _, c := range cases {
-		got, err := PathsFromEnv(env(c.vars), home)
-		if err != nil || got != c.want {
-			t.Errorf("%v: got %+v, %v; want %+v", c.vars, got, err, c.want)
-		}
+	got, err = PathsIn("/c")
+	if want := (Paths{ConfigDir: "/c", SecureDir: "/c", GlobalConfig: "/c/.claude.json"}); err != nil || got != want {
+		t.Fatalf("in /c %+v, %v", got, err)
 	}
 	if err := os.MkdirAll(home+"/.claude", 0o700); err != nil {
 		t.Fatal(err)
@@ -71,7 +61,7 @@ func TestPathsFollowClaudeCode(t *testing.T) {
 	if err := os.WriteFile(home+"/.claude/.config.json", []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PathsFromEnv(env(nil), home); err == nil || !strings.Contains(err.Error(), "legacy") {
+	if _, err := DefaultPaths(home); err == nil || !strings.Contains(err.Error(), "legacy") {
 		t.Fatalf("legacy config: %v", err)
 	}
 }
@@ -95,6 +85,56 @@ func testStore(t *testing.T, ep Endpoints) Store {
 	return Store{Paths: p, Endpoints: ep, Client: http.DefaultClient, Now: func() time.Time { return t0 }}
 }
 
+// withLive runs fn as a command does: on the live login it read just before.
+func withLive(t *testing.T, s Store, fn func(LiveTx) error) error {
+	t.Helper()
+	live, err := s.ReadLive(context.Background())
+	if err != nil {
+		return err
+	}
+	return s.WithLive(context.Background(), live, fn)
+}
+
+func TestWithLiveAndReplaceRefuseALoginThatChangedSinceRead(t *testing.T) {
+	s := testStore(t, Endpoints{})
+	writeLive(t, s, loginJSON("a", t0), accountJSON("a"))
+	read, err := s.ReadLive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A session refreshed the login after the command read it.
+	writeLive(t, s, loginJSON("a2", t0), accountJSON("a"))
+	ran := false
+	if err := s.WithLive(context.Background(), read, func(LiveTx) error { ran = true; return nil }); !errors.Is(err, ErrLoginChanged) || ran {
+		t.Fatalf("WithLive = %v, ran %v", err, ran)
+	}
+	// A sign-in in a session lands while the command holds the refresh lock:
+	// Claude Code's sign-in takes only the credentials write lock.
+	read, err = s.ReadLive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.WithLive(context.Background(), read, func(tx LiveTx) error {
+		writeLive(t, s, loginJSON("c", t0), accountJSON("c"))
+		return tx.Replace(mustLogin(t, loginJSON("b", t0)), mustAccount(t, accountJSON("b")))
+	})
+	if !errors.Is(err, ErrLoginChanged) {
+		t.Fatalf("Replace = %v", err)
+	}
+	if data, _ := os.ReadFile(s.Paths.Credentials()); !strings.Contains(string(data), "fake-access-c") {
+		t.Fatalf("the sign-in was overwritten:\n%s", data)
+	}
+	// A box with no login stays without one until the switch writes it.
+	if err := os.Remove(s.Paths.Credentials()); err != nil {
+		t.Fatal(err)
+	}
+	if err := withLive(t, s, func(tx LiveTx) error {
+		return tx.Replace(mustLogin(t, loginJSON("b", t0)), mustAccount(t, accountJSON("b")))
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 const otherCredentials = `{"mcpOAuth":{"srv|1":{"serverName":"srv","accessToken":""}},"claudeAiOauth":%s}`
 
 func writeLive(t *testing.T, s Store, login, account string) {
@@ -115,16 +155,14 @@ func TestReplaceSwapsOnlyTheLoginAndTheAccount(t *testing.T) {
 	s := testStore(t, Endpoints{})
 	writeLive(t, s, loginJSON("a", t0.Add(time.Hour)), accountJSON("a"))
 	b, ab := mustLogin(t, loginJSON("b", t0.Add(time.Hour))), mustAccount(t, accountJSON("b"))
-	err := s.WithLive(context.Background(), func(tx LiveTx) error {
-		live, err := tx.Read()
-		if err != nil {
-			return err
-		}
-		if live.Login == nil || live.Account == nil || live.Account.Identity() != (Identity{"acc-a", "org-a"}) {
-			return fmt.Errorf("read %+v", live)
-		}
-		return tx.Replace(b, ab)
-	})
+	live, err := s.ReadLive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Login == nil || live.Account == nil || live.Account.Identity() != (Identity{"acc-a", "org-a"}) {
+		t.Fatalf("read %+v", live)
+	}
+	err = s.WithLive(context.Background(), live, func(tx LiveTx) error { return tx.Replace(b, ab) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +204,7 @@ func TestWithLiveWaitsForClaudeCodesRefresh(t *testing.T) {
 	var entered atomic.Bool
 	done := make(chan error, 1)
 	go func() {
-		done <- s.WithLive(context.Background(), func(LiveTx) error { entered.Store(true); return nil })
+		done <- withLive(t, s, func(LiveTx) error { entered.Store(true); return nil })
 	}()
 	time.Sleep(300 * time.Millisecond)
 	if entered.Load() {
@@ -280,8 +318,10 @@ func TestRefreshAsksForTheScopesClaudeCodeAsksFor(t *testing.T) {
 		// A claude.ai login: Claude Code's scopes plus the project scopes it holds, then its own on invalid_scope.
 		{`{"accessToken":"a","refreshToken":"r","expiresAt":0,"scopes":["user:inference","user:projects:read","org:x"]}`,
 			[]string{"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins user:projects:read", "user:inference user:projects:read org:x"}},
-		// One with a client id of its own asks for what it holds.
+		// One with a client id of its own asks for what it holds, or the defaults when it holds none.
 		{`{"accessToken":"a","refreshToken":"r","expiresAt":0,"scopes":["user:inference"],"clientId":"c"}`, []string{"user:inference"}},
+		{`{"accessToken":"a","refreshToken":"r","expiresAt":0,"scopes":[],"clientId":"c"}`,
+			[]string{"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins"}},
 		// Without the inference scope Claude Code does not ask again.
 		{`{"accessToken":"a","refreshToken":"r","expiresAt":0,"scopes":[],"subscriptionType":"max"}`,
 			[]string{"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins"}},
@@ -328,7 +368,7 @@ func TestIdentityReadsTheProfileStrictly(t *testing.T) {
 			t.Errorf("%s: %v", bad, err)
 		}
 	}
-	if _, err := s.Identity(context.Background(), mustLogin(t, loginJSON("2", t0))); err == nil || !strings.Contains(err.Error(), "profile endpoint answered 401") {
+	if _, err := s.Identity(context.Background(), mustLogin(t, loginJSON("2", t0))); !errors.Is(err, ErrTokenRefused) {
 		t.Fatalf("refused token: %v", err)
 	}
 }
@@ -342,7 +382,7 @@ func TestReplaceWaitsForClaudeCodesCredentialsWrite(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- s.WithLive(context.Background(), func(tx LiveTx) error {
+		done <- withLive(t, s, func(tx LiveTx) error {
 			return tx.Replace(mustLogin(t, loginJSON("b", t0)), mustAccount(t, accountJSON("b")))
 		})
 	}()
@@ -371,7 +411,7 @@ func TestReplaceWritesThroughASymlinkedConfigAndRefusesSymlinkedCredentials(t *t
 	if err := os.Symlink(real, s.Paths.GlobalConfig); err != nil {
 		t.Fatal(err)
 	}
-	err := s.WithLive(context.Background(), func(tx LiveTx) error { return tx.ReplaceAccount(mustAccount(t, accountJSON("b"))) })
+	err := withLive(t, s, func(tx LiveTx) error { return tx.ReplaceAccount(mustAccount(t, accountJSON("b"))) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +428,7 @@ func TestReplaceWritesThroughASymlinkedConfigAndRefusesSymlinkedCredentials(t *t
 	if err := os.Symlink(creds, s.Paths.Credentials()); err != nil {
 		t.Fatal(err)
 	}
-	err = s.WithLive(context.Background(), func(tx LiveTx) error {
+	err = withLive(t, s, func(tx LiveTx) error {
 		return tx.Replace(mustLogin(t, loginJSON("b", t0)), mustAccount(t, accountJSON("b")))
 	})
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
@@ -457,7 +497,7 @@ func TestUsageReadsBothWindowsStrictly(t *testing.T) {
 
 func TestWriteAccountNeedsClaudeCodesConfig(t *testing.T) {
 	s := testStore(t, Endpoints{})
-	err := s.WithLive(context.Background(), func(tx LiveTx) error { return tx.ReplaceAccount(mustAccount(t, accountJSON("a"))) })
+	err := withLive(t, s, func(tx LiveTx) error { return tx.ReplaceAccount(mustAccount(t, accountJSON("a"))) })
 	if err == nil || !strings.Contains(err.Error(), "start Claude Code once") {
 		t.Fatalf("err = %v", err)
 	}

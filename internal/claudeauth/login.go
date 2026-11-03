@@ -51,6 +51,18 @@ func (l Login) SameTokens(other Login) bool {
 	return l.tokens.AccessToken == other.tokens.AccessToken && l.tokens.RefreshToken == other.tokens.RefreshToken
 }
 
+// AccessExpired reports whether the access token has expired, so the server no longer takes it.
+func (l Login) AccessExpired(now time.Time) bool { return now.UnixMilli() >= l.tokens.ExpiresAt }
+
+// NewerThan reports whether l was issued after other, judged by their access token expiries.
+func (l Login) NewerThan(other Login) bool { return l.tokens.ExpiresAt > other.tokens.ExpiresAt }
+
+// SameRefreshToken reports whether l and other hold the same refresh token,
+// so they are one login that nobody refreshed since.
+func (l Login) SameRefreshToken(other Login) bool {
+	return l.tokens.RefreshToken == other.tokens.RefreshToken
+}
+
 // accessExpired is Claude Code's test: the access token expires within five minutes.
 func (l Login) accessExpired(now time.Time) bool {
 	return now.UnixMilli()+5*60*1000 >= l.tokens.ExpiresAt

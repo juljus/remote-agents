@@ -35,6 +35,9 @@ const (
 // oauthBeta is the anthropic-beta value Claude Code sends with OAuth tokens.
 const oauthBeta = "oauth-2025-04-20"
 
+// ErrTokenRefused means the server no longer takes an access token.
+var ErrTokenRefused = errors.New("the server refused the access token")
+
 // ErrRefreshRefused means the server refused the refresh token: the login
 // is gone and only a new sign-in brings the account back.
 var ErrRefreshRefused = errors.New("the server refused the refresh token; sign in to this account again")
@@ -61,7 +64,7 @@ const inferenceScope = "user:inference"
 // asks again for the held ones when the server refuses them.
 func (t tokens) refreshScopes() (scopes []string, retry bool) {
 	if t.ClientID != nil || (!slices.Contains(t.Scopes, inferenceScope) && t.SubscriptionType == nil) {
-		return t.Scopes, false
+		return t.heldScopes(), false
 	}
 	scopes = slices.Clone(defaultScopes)
 	for _, s := range t.Scopes {
@@ -70,6 +73,14 @@ func (t tokens) refreshScopes() (scopes []string, retry bool) {
 		}
 	}
 	return scopes, slices.Contains(t.Scopes, inferenceScope)
+}
+
+// heldScopes are the login's scopes; Claude Code asks for its defaults when it holds none.
+func (t tokens) heldScopes() []string {
+	if len(t.Scopes) == 0 {
+		return slices.Clone(defaultScopes)
+	}
+	return t.Scopes
 }
 
 // errInvalidScope is the server refusing the scopes asked for, before it rotated anything.
@@ -85,7 +96,7 @@ func refresh(ctx context.Context, client *http.Client, ep Endpoints, l Login, no
 	scopes, retry := l.tokens.refreshScopes()
 	next, err := requestTokens(ctx, client, ep, l, scopes, now, save)
 	if errors.Is(err, errInvalidScope) && retry {
-		next, err = requestTokens(ctx, client, ep, l, l.tokens.Scopes, now, save)
+		next, err = requestTokens(ctx, client, ep, l, l.tokens.heldScopes(), now, save)
 	}
 	return next, err
 }
@@ -140,9 +151,10 @@ func requestTokens(ctx context.Context, client *http.Client, ep Endpoints, l Log
 	return next, nil
 }
 
-// refreshed is l with reply's tokens, as Claude Code merges them: an absent
-// refresh token or refresh expiry keeps the old one, an absent scope means
-// the scopes asked for. complete is false when the reply had no usable access token.
+// refreshed is l with reply's tokens. As Claude Code merges them, an absent
+// refresh token or refresh expiry keeps the old one; an absent scope means
+// the scopes asked for, as OAuth defines it, where Claude Code would store
+// none. complete is false when the reply had no usable access token.
 func (l Login) refreshed(reply tokenReply, asked []string, issuedAt time.Time) (next Login, complete bool, err error) {
 	complete = reply.AccessToken != nil && *reply.AccessToken != "" && reply.ExpiresIn != nil && *reply.ExpiresIn > 0
 	if !complete && (reply.RefreshToken == nil || *reply.RefreshToken == l.tokens.RefreshToken) {
@@ -247,6 +259,9 @@ func get(ctx context.Context, client *http.Client, ep Endpoints, path string, l 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("reading the %s: %w", what, err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("%s endpoint answered 401: %w", what, ErrTokenRefused)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s endpoint answered %d", what, resp.StatusCode)

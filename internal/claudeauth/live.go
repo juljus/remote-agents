@@ -22,7 +22,7 @@ type Live struct {
 	Account *Account
 }
 
-// readLive reads both files; the caller holds the refresh lock.
+// readLive reads both files; the caller holds the credentials write lock.
 func readLive(p Paths) (Live, error) {
 	creds, err := readObjectFile(p.Credentials())
 	if err != nil {
@@ -66,16 +66,27 @@ func readObjectFile(path string) (object, error) {
 	return o, nil
 }
 
-// writeLogin replaces claudeAiOauth and keeps every other key, such as
-// mcpOAuth, under the lock Claude Code takes for each write of the file; the
-// caller holds the refresh lock.
-func writeLogin(ctx context.Context, p Paths, l Login) error {
+func withStorageLock(ctx context.Context, p Paths, fn func() error) error {
 	ctx, cancel := context.WithTimeout(ctx, lockWait)
 	defer cancel()
-	return withLocks(ctx, []string{p.storageWriteLock()}, storageWriteLockTiming, func() error {
+	return withLocks(ctx, []string{p.storageWriteLock()}, storageWriteLockTiming, fn)
+}
+
+// writeLogin replaces claudeAiOauth, if it is still read, and keeps every
+// other key, such as mcpOAuth, under the lock Claude Code takes for each
+// write of the file; a Claude Code sign-in takes only that lock.
+func writeLogin(ctx context.Context, p Paths, read *Login, l Login) error {
+	return withStorageLock(ctx, p, func() error {
 		// Claude Code refuses a symlinked credentials file, so it is never one of ours.
 		if info, err := os.Lstat(p.Credentials()); err == nil && info.Mode()&fs.ModeSymlink != 0 {
 			return fmt.Errorf("%s is a symlink, which Claude Code refuses", p.Credentials())
+		}
+		now, err := readLive(p)
+		if err != nil {
+			return err
+		}
+		if !sameLogin(read, now.Login) {
+			return ErrLoginChanged
 		}
 		creds, err := readObjectFile(p.Credentials())
 		if err != nil {

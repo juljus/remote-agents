@@ -13,31 +13,31 @@ import (
 
 // Paths are the files Claude Code keeps its login in.
 type Paths struct {
-	// ConfigDir is $CLAUDE_CONFIG_DIR, else ~/.claude.
+	// ConfigDir and SecureDir are ~/.claude, or one dir Claude Code is pointed at.
 	ConfigDir string
-	// SecureDir holds .credentials.json: $CLAUDE_SECURESTORAGE_CONFIG_DIR, else ConfigDir.
+	// SecureDir holds .credentials.json.
 	SecureDir string
-	// GlobalConfig holds oauthAccount: .claude.json in $CLAUDE_CONFIG_DIR, else in home.
+	// GlobalConfig holds oauthAccount: ~/.claude.json, or .claude.json in that one dir.
 	GlobalConfig string
 }
 
-// PathsFromEnv resolves Paths as Claude Code does for a process with this
-// environment; lookupEnv is os.LookupEnv or a stand-in.
-func PathsFromEnv(lookupEnv func(string) (string, bool), home string) (Paths, error) {
-	p := Paths{ConfigDir: filepath.Join(home, ".claude"), GlobalConfig: filepath.Join(home, ".claude.json")}
-	if dir, _ := lookupEnv("CLAUDE_CONFIG_DIR"); dir != "" {
-		p.ConfigDir = dir
-		p.GlobalConfig = filepath.Join(dir, ".claude.json")
-	}
-	p.SecureDir = p.ConfigDir
-	// Set but empty, it means ~/.claude.
-	if dir, set := lookupEnv("CLAUDE_SECURESTORAGE_CONFIG_DIR"); set {
-		p.SecureDir = dir
-		if dir == "" {
-			p.SecureDir = filepath.Join(home, ".claude")
-		}
-	}
-	// Claude Code prefers a legacy .config.json in the config dir over .claude.json.
+// EnvVars point Claude Code at other config dirs. A command can't tell
+// whether the box's sessions see the same values, so it refuses them and
+// takes the dir from its own config instead.
+var EnvVars = []string{"CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"}
+
+// DefaultPaths are where Claude Code keeps a login with none of EnvVars set.
+func DefaultPaths(home string) (Paths, error) {
+	return checked(Paths{ConfigDir: filepath.Join(home, ".claude"), SecureDir: filepath.Join(home, ".claude"), GlobalConfig: filepath.Join(home, ".claude.json")})
+}
+
+// PathsIn are where Claude Code keeps a login with CLAUDE_CONFIG_DIR=dir.
+func PathsIn(dir string) (Paths, error) {
+	return checked(Paths{ConfigDir: dir, SecureDir: dir, GlobalConfig: filepath.Join(dir, ".claude.json")})
+}
+
+// checked refuses a legacy .config.json, which Claude Code prefers over .claude.json.
+func checked(p Paths) (Paths, error) {
 	legacy := filepath.Join(p.ConfigDir, ".config.json")
 	if _, err := os.Stat(legacy); err == nil {
 		return Paths{}, fmt.Errorf("%s is Claude Code's legacy global config, which remote-agents does not handle", legacy)
