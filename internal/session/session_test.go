@@ -5,14 +5,18 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
+	"golang.org/x/term"
 
+	"remote-agents/internal/corner"
 	"remote-agents/internal/spec"
 	"remote-agents/internal/sshrun"
 )
@@ -41,6 +45,10 @@ func newPTY(t *testing.T) *ptyHarness {
 			h.mu.Lock()
 			h.out.Write(buf[:n])
 			h.mu.Unlock()
+			// Like a terminal, it says where the cursor is when asked; the session starts at the top.
+			if bytes.Contains(buf[:n], []byte("\x1b[6n")) {
+				master.Write([]byte("\x1b[1;1R"))
+			}
 			if err != nil {
 				return
 			}
@@ -56,10 +64,17 @@ func (h *ptyHarness) output() string {
 	return h.out.String()
 }
 
+// marking is what the session adds to the output for the remote mark: the
+// cursor query, the mark and the moves to the corner and back.
+var marking = regexp.MustCompile(`\x1b\[6n|` + corner.Mark + `|\x1b\[\d+;\d+H|\x1b\[2X|\x1b\[0(;[\d;]+)?m`)
+
+// text is the output without the remote mark.
+func (h *ptyHarness) text() string { return marking.ReplaceAllString(h.output(), "") }
+
 func (h *ptyHarness) waitFor(t *testing.T, s string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(h.output(), s) {
+	for !strings.Contains(h.text(), s) {
 		if time.Now().After(deadline) {
 			t.Fatalf("output never contained %q:\n%q", s, h.output())
 		}
@@ -161,7 +176,7 @@ func TestOutageStatusNeverWrapsOnANarrowTerminal(t *testing.T) {
 	if r := wait(t, start(testOptions(ssh, h))); r.err != nil || r.code != 5 {
 		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
 	}
-	out := h.output()
+	out := h.text()
 	if n := strings.Count(out, "reconnecting"); n < 10 {
 		t.Fatalf("status drawn %d times, want an animation: %q", n, out)
 	}
@@ -194,7 +209,7 @@ func TestCtrlCWhileDisconnectedDetaches(t *testing.T) {
 			h.waitFor(t, "reattach with: claude --resume abc")
 			// Detaching leaves the detach lines in place of the status, nothing behind them.
 			scr := newScreen(80)
-			scr.Write([]byte(h.output()))
+			scr.Write([]byte(h.text()))
 			rows := scr.used()
 			if len(rows) != 2 || !strings.HasPrefix(rows[0], "[remote-agents] detached;") {
 				t.Fatalf("rows after detach %q", rows)
@@ -319,5 +334,59 @@ func TestEachAttemptCarriesTheNextAttemptNumber(t *testing.T) {
 		if s.Attempt != i+1 || s.RunID != testOptions(ssh, h).Spec.RunID {
 			t.Fatalf("attempt %d sent run %s attempt %d", i+1, s.RunID, s.Attempt)
 		}
+	}
+}
+
+// screenOf is what a terminal shows after the harness's output.
+func screenOf(t *testing.T, h *ptyHarness) *vt.Emulator {
+	t.Helper()
+	e := vt.NewEmulator(80, 24)
+	// The emulator would answer the cursor query to no one and block.
+	e.WriteString(strings.ReplaceAll(h.output(), "\x1b[6n", ""))
+	return e
+}
+
+func TestTheMarkShowsWhileTheSessionRunsAndGoesWithIt(t *testing.T) {
+	h := newPTY(t)
+	ssh := fakeSSH(t, `for i in $(seq 40); do echo line $i; done; sleep 1; exit 0`)
+	done := start(testOptions(ssh, h))
+	h.waitFor(t, "line 40")
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.HasPrefix(screenOf(t, h).CellAt(78, 23).Content, "☁") {
+		if time.Now().After(deadline) {
+			t.Fatalf("no mark in the corner:\n%s", screenOf(t, h).String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if r := wait(t, done); r.err != nil || r.code != 0 {
+		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
+	}
+	e := screenOf(t, h)
+	if strings.Contains(e.String(), corner.Mark) {
+		t.Fatalf("a mark left behind:\n%s", e.String())
+	}
+	for y := range e.ScrollbackLen() {
+		for x := range 80 {
+			if c := e.ScrollbackCellAt(x, y); c != nil && strings.Contains(c.Content, "☁") {
+				t.Fatalf("a mark in scrollback line %d", y)
+			}
+		}
+	}
+	if e.ScrollbackLen() == 0 {
+		t.Fatal("the session never scrolled")
+	}
+}
+
+func TestCursorPositionSkipsTypeahead(t *testing.T) {
+	h := newPTY(t)
+	if _, err := term.MakeRaw(int(h.slave.Fd())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.master.Write([]byte("typed")); err != nil {
+		t.Fatal(err)
+	}
+	row, col, err := cursorPosition(int(h.slave.Fd()), h.slave, time.Second)
+	if err != nil || row != 1 || col != 1 {
+		t.Fatalf("cursorPosition = %d, %d, %v", row, col, err)
 	}
 }

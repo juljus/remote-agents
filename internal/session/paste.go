@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"remote-agents/internal/corner"
 	"remote-agents/internal/paste"
 	"remote-agents/internal/pastefile"
 	"remote-agents/internal/reconnect"
@@ -314,12 +315,11 @@ const noticeQuiet = 150 * time.Millisecond
 const noticeWait = 2 * time.Second
 
 // screenOut is the one writer of the session's output to the terminal. It
-// clears the outage status before the first byte of a redraw, and draws
-// notices once the output pauses.
+// clears the outage status before the first byte of a redraw, keeps the
+// remote mark in the corner, and draws notices once the output pauses.
 type screenOut struct {
-	w      io.Writer
+	screen *corner.Writer
 	outage *outage
-	width  func() (int, error)
 	logf   func(format string, args ...any)
 
 	mu        sync.Mutex
@@ -329,8 +329,8 @@ type screenOut struct {
 	notices   sync.WaitGroup
 }
 
-func newScreenOut(w io.Writer, o *outage, width func() (int, error), logf func(format string, args ...any)) *screenOut {
-	return &screenOut{w: w, outage: o, width: width, logf: logf, stop: make(chan struct{})}
+func newScreenOut(screen *corner.Writer, o *outage, logf func(format string, args ...any)) *screenOut {
+	return &screenOut{screen: screen, outage: o, logf: logf, stop: make(chan struct{})}
 }
 
 func (s *screenOut) Write(p []byte) (int, error) {
@@ -338,7 +338,8 @@ func (s *screenOut) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastWrite = time.Now()
-	return s.w.Write(p)
+	s.screen.Show()
+	return s.screen.Write(p)
 }
 
 // notify shows text on the bottom row once the agent has redrawn the screen
@@ -362,37 +363,33 @@ func (s *screenOut) notify(text string) {
 			case <-time.After(noticeQuiet / 3):
 			}
 			s.mu.Lock()
-			quiet := time.Since(s.lastWrite) >= noticeQuiet
-			if quiet {
-				s.draw(text)
+			drawn := false
+			if time.Since(s.lastWrite) >= noticeQuiet {
+				drawn = s.draw(text)
 			}
 			s.mu.Unlock()
-			if quiet {
+			if drawn {
 				return
 			}
 			// Drawing into a flow of output could split an escape sequence.
 			if time.Now().After(deadline) {
-				s.logf("notice not shown, the output never paused: %s", text)
+				s.logf("notice not shown, the output never paused with the cursor known: %s", text)
 				return
 			}
 		}
 	}()
 }
 
-// draw writes the notice over the bottom row and puts the cursor back.
-func (s *screenOut) draw(text string) {
-	width, err := s.width()
+// draw writes the notice over the bottom row and puts the cursor back. It
+// reports false, drawing nothing, while the cursor is not known well enough
+// to come back to.
+func (s *screenOut) draw(text string) bool {
+	drawn, err := s.screen.BottomLine("[remote-agents] " + printable(text))
 	if err != nil {
-		s.logf("notice: reading terminal width: %v", err)
-		return
-	}
-	line := "[remote-agents] " + printable(text)
-	if len(line) > width-1 {
-		line = line[:max(width-1, 0)]
-	}
-	if _, err := fmt.Fprint(s.w, "\x1b7\x1b[999;1H\x1b[2K"+line+"\x1b8"); err != nil {
 		s.logf("notice: %v", err)
+		return true
 	}
+	return drawn
 }
 
 // close drops the notices not drawn yet; later calls do nothing.

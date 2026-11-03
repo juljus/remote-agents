@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
@@ -90,5 +93,58 @@ func (c *current) resize() {
 	}
 	if err := pty.InheritSize(c.outer, c.t.slave); err != nil {
 		c.logf("resizing ssh's terminal: %v", err)
+	}
+}
+
+// cursorReportWait bounds the wait for the terminal to say where its cursor is.
+const cursorReportWait = time.Second
+
+var cursorReport = regexp.MustCompile(`\x1b\[(\d+);(\d+)R`)
+
+// cursorPosition asks the raw terminal on fd where its cursor is, counting
+// from 1. Keys typed meanwhile are dropped, as all keys are until the
+// session draws.
+func cursorPosition(fd int, out io.Writer, wait time.Duration) (int, int, error) {
+	if _, err := io.WriteString(out, "\x1b[6n"); err != nil {
+		return 0, 0, err
+	}
+	deadline := time.Now().Add(wait)
+	var got []byte
+	buf := make([]byte, 256)
+	for {
+		left := time.Until(deadline)
+		if left <= 0 {
+			return 0, 0, fmt.Errorf("the terminal did not report it within %s", wait)
+		}
+		n, err := unix.Poll([]unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}, int(left/time.Millisecond)+1)
+		if errors.Is(err, unix.EINTR) || err == nil && n == 0 {
+			continue
+		}
+		if err != nil {
+			return 0, 0, err
+		}
+		k, err := unix.Read(fd, buf)
+		if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) {
+			continue
+		}
+		if err != nil {
+			return 0, 0, err
+		}
+		if k == 0 {
+			return 0, 0, io.EOF
+		}
+		got = append(got, buf[:k]...)
+		if m := cursorReport.FindSubmatch(got); m != nil {
+			row, rowErr := strconv.Atoi(string(m[1]))
+			col, colErr := strconv.Atoi(string(m[2]))
+			if err := errors.Join(rowErr, colErr); err != nil {
+				return 0, 0, fmt.Errorf("cursor report %q: %w", m[0], err)
+			}
+			return row, col, nil
+		}
+		// Typeahead before the report is dropped; a report is never longer than this.
+		if len(got) > 64 {
+			got = got[len(got)-64:]
+		}
 	}
 }

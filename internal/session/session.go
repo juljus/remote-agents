@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"remote-agents/internal/control"
+	"remote-agents/internal/corner"
 	"remote-agents/internal/linkproto"
 	"remote-agents/internal/paste"
 	"remote-agents/internal/reconnect"
@@ -67,7 +68,8 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		return 0, errors.New("an interactive session needs a terminal on stdin")
 	}
 	// shpool cannot restore a 0x0 screen; such a "terminal" would leave a broken session behind.
-	if cols, rows, err := term.GetSize(fd); err != nil {
+	cols, rows, err := term.GetSize(fd)
+	if err != nil {
 		return 0, fmt.Errorf("reading terminal size: %w", err)
 	} else if cols == 0 || rows == 0 {
 		return 0, fmt.Errorf("terminal reports size %dx%d", cols, rows)
@@ -104,11 +106,13 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	keys := &input{fd: fd, logf: opts.Logf, onInterrupt: func() { cancel(detached{syscall.SIGINT}) }, onError: func(err error) { cancel(err) }}
 	go keys.run(ctx)
 
+	// Every write to the terminal goes through screen, which keeps the remote mark in the corner.
+	screen := corner.New(opts.Stdout, cols, rows, opts.Logf)
 	status := &outage{
-		out: opts.Stderr,
+		out: screen,
 		width: func() (int, error) {
 			cols, _, err := term.GetSize(fd)
-			return cols, err
+			return cols - corner.MarkCells, err
 		},
 		now:      time.Now,
 		host:     opts.Box.Host,
@@ -117,11 +121,17 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	obs := &observer{keys: keys, status: status}
 	// ssh's stderr is only captured, so the session's output is the one other writer to the terminal.
-	stdout := newScreenOut(opts.Stdout, status, status.width, opts.Logf)
+	stdout := newScreenOut(screen, status, opts.Logf)
 	defer stdout.close()
 	// ssh reads a terminal of its own, so the terminal stays raw throughout and resizes are passed on.
 	if _, err := term.MakeRaw(fd); err != nil {
 		return 0, fmt.Errorf("making the terminal raw: %w", err)
+	}
+	// Without the cursor's position the mark waits for the session to place the cursor itself.
+	if row, col, err := cursorPosition(fd, opts.Stdout, cursorReportWait); err != nil {
+		opts.Logf("%s: cursor position: %v", opts.Spec.Session, err)
+	} else if err := screen.At(row, col); err != nil {
+		return 0, fmt.Errorf("writing to the terminal: %w", err)
 	}
 	attached := &current{outer: opts.Stdin, logf: opts.Logf}
 	winch := make(chan os.Signal, 1)
@@ -132,6 +142,11 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			select {
 			case <-winch:
 				attached.resize()
+				if cols, rows, err := term.GetSize(fd); err != nil {
+					opts.Logf("reading terminal size: %v", err)
+				} else {
+					screen.Resize(cols, rows)
+				}
 			case <-ctx.Done():
 				return
 			}
@@ -167,6 +182,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	keys.stop()
 	stdout.close()
 	statusShown := status.End()
+	if err := screen.Close(); err != nil {
+		opts.Logf("taking the remote mark away: %v", err)
+	}
 	var d detached
 	isDetach := loopErr != nil && errors.As(context.Cause(ctx), &d)
 	sig, _ := d.sig.(syscall.Signal)

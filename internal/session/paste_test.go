@@ -101,7 +101,7 @@ func TestPastedLaptopFilesTheBoxLacksGoToItUnderTheirBoxPaths(t *testing.T) {
 		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
 	}
 	want := "got[\x1b[200~/home/agent/.local/state/ra-test/pasted/abc/my\\ shot.png /nonexistent/box.pdf " + strings.ReplaceAll(onBox, " ", `\ `) + "\x1b[201~]"
-	if !strings.Contains(h.output(), want) {
+	if !strings.Contains(h.text(), want) {
 		t.Fatalf("output %q lacks %q", h.output(), want)
 	}
 	query, uploads := received(t, receivedAt)
@@ -292,7 +292,7 @@ func progressPaste(t *testing.T, pasteFiles string) {
 	if r := wait(t, done); r.err != nil || r.code != 0 {
 		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
 	}
-	if want := "got[\x1b[200~/box/p.png\x1b[201~]"; !strings.Contains(h.output(), want) {
+	if want := "got[\x1b[200~/box/p.png\x1b[201~]"; !strings.Contains(h.text(), want) {
 		t.Fatalf("output %q lacks %q", h.output(), want)
 	}
 }
@@ -470,7 +470,7 @@ func TestKeystrokesAfterAPasteWaitForItsUpload(t *testing.T) {
 	if r := wait(t, done); r.err != nil || r.code != 0 {
 		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
 	}
-	if want := "got[\x1b[200~/box/p.png\x1b[201~][typed after]"; !strings.Contains(h.output(), want) {
+	if want := "got[\x1b[200~/box/p.png\x1b[201~][typed after]"; !strings.Contains(h.text(), want) {
 		t.Fatalf("output %q lacks %q", h.output(), want)
 	}
 }

@@ -8,6 +8,10 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/charmbracelet/x/vt"
+
+	"remote-agents/internal/corner"
 )
 
 const timedOut = "ssh: connect to host 198.51.100.76 port 22: Operation timed out"
@@ -154,7 +158,8 @@ func TestOutageKeepsOneRowAtWidth40(t *testing.T) {
 func TestScreenOutClearsTheStatusBeforeTheSessionRedraws(t *testing.T) {
 	scr := &recordingScreen{screen: newScreen(40)}
 	o := newOutage(scr, 40, &fakeClock{}, time.Hour)
-	g := newScreenOut(scr, o, func() (int, error) { return 40, nil }, t.Logf)
+	// With the cursor unknown the screen draws no mark, so the toy screen sees the output alone.
+	g := newScreenOut(corner.New(scr, 40, 10, t.Logf), o, t.Logf)
 	defer g.close()
 	o.Down(timedOut)
 	fmt.Fprint(g, "redrawn")
@@ -240,7 +245,11 @@ func TestOutageLogsAnUnreadableWidthOnce(t *testing.T) {
 func TestNoticesWaitForTheOutputToPause(t *testing.T) {
 	var out lockedBuffer
 	o := newOutage(&recordingScreen{screen: newScreen(40)}, 40, &fakeClock{}, time.Hour)
-	g := newScreenOut(&out, o, func() (int, error) { return 40, nil }, t.Logf)
+	screen := corner.New(&out, 40, 5, t.Logf)
+	if err := screen.At(1, 1); err != nil {
+		t.Fatal(err)
+	}
+	g := newScreenOut(screen, o, t.Logf)
 	defer g.close()
 	g.notify("pasted image not uploaded: \x1b[31mdisk full")
 	// Output keeps the notice back until it pauses.
@@ -255,9 +264,13 @@ func TestNoticesWaitForTheOutputToPause(t *testing.T) {
 	for !strings.Contains(out.String(), "[remote-agents]") && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	// It goes on the bottom row, cut to the width, with the cursor put back.
-	want := "xxxxxx\x1b7\x1b[999;1H\x1b[2K[remote-agents] pasted image not upload\x1b8"
-	if out.String() != want {
-		t.Fatalf("output %q, want %q", out.String(), want)
+	// It goes on the bottom row, cut clear of the mark, with the cursor put back.
+	e := vt.NewEmulator(40, 5)
+	e.WriteString(out.String())
+	if got, want := strings.TrimRight(e.String(), " \n"), "xxxxxx\n\n\n\n[remote-agents] pasted image not uploa"+corner.Mark; got != want {
+		t.Fatalf("screen:\n%s\nwant:\n%s", got, want)
+	}
+	if at := e.CursorPosition(); at.X != 6 || at.Y != 0 {
+		t.Fatalf("cursor at %v", at)
 	}
 }
