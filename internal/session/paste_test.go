@@ -308,22 +308,45 @@ func TestTheLaptopReadsProgressWhileItSends(t *testing.T) {
 	progressPaste(t, `printf '1\n0'; awk 'BEGIN { for (i = 0; i < 200000; i++) printf "0\n" }'; cat >/dev/null; printf '10\n/box/p.png'`)
 }
 
-func TestAPasteGoesOnWhileTheBoxFinishesUp(t *testing.T) {
-	h := newPTY(t)
+// logRecorder collects what a session logs.
+type logRecorder struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logRecorder) logf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+
+func (l *logRecorder) holding(s string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, line := range l.lines {
+		if strings.Contains(line, s) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// lateBox is a paste-files box that stores one upload at /box/p.png, then runs finish.
+func lateBox(finish string) string {
+	return `printf '1\n0'; cat >/dev/null; printf '10\n/box/p.png'; ` + finish
+}
+
+// pasteOnce pastes a laptop image into a session running attach, whose box
+// runs pasteFiles, and waits for it to reach the session as /box/p.png.
+func pasteOnce(t *testing.T, h *ptyHarness, attach, pasteFiles string, logs *logRecorder) chan result {
+	t.Helper()
 	shot := filepath.Join(t.TempDir(), "a.png")
 	if err := os.WriteFile(shot, onePixelPNG, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ssh := fakeBox(t, echoLine+`; sleep 3; exit 0`,
-		`printf '1\n0'; cat >/dev/null; printf '10\n/box/p.png'; sleep 2; echo "remote-agents-box: pruning: disk error" >&2; exit 1`)
-	opts := testOptions(ssh, h)
-	var mu sync.Mutex
-	var logged []string
-	opts.Logf = func(format string, args ...any) {
-		mu.Lock()
-		defer mu.Unlock()
-		logged = append(logged, fmt.Sprintf(format, args...))
-	}
+	opts := testOptions(fakeBox(t, attach, pasteFiles), h)
+	opts.Logf = logs.logf
 	done := start(opts)
 	h.waitFor(t, "ready")
 	sent := time.Now()
@@ -332,15 +355,73 @@ func TestAPasteGoesOnWhileTheBoxFinishesUp(t *testing.T) {
 	}
 	h.waitFor(t, "got[\x1b[200~/box/p.png\x1b[201~]")
 	if elapsed := time.Since(sent); elapsed > time.Second {
-		t.Fatalf("the paste waited %s on the box's exit", elapsed)
+		t.Fatalf("the paste waited %s on the box finishing up", elapsed)
 	}
+	return done
+}
+
+func TestABoxFailingAfterItStoredAPasteSaysSo(t *testing.T) {
+	h := newPTY(t)
+	var logs logRecorder
+	done := pasteOnce(t, h, echoLine+`; sleep 3; exit 0`, lateBox(`sleep 0.5; echo "remote-agents-box: pruning: disk error" >&2; exit 1`), &logs)
+	h.waitFor(t, "disk error")
 	if r := wait(t, done); r.err != nil {
 		t.Fatal(r.err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if !slices.ContainsFunc(logged, func(l string) bool { return strings.Contains(l, "disk error") }) {
-		t.Fatalf("the box's late failure was not logged: %q", logged)
+	if len(logs.holding("disk error")) == 0 {
+		t.Fatalf("the box's late failure was not logged: %q", logs.lines)
+	}
+}
+
+func TestTheAttemptEndingLeavesTheBoxToFinishUp(t *testing.T) {
+	h := newPTY(t)
+	finished := filepath.Join(t.TempDir(), "finished")
+	var logs logRecorder
+	done := pasteOnce(t, h, echoLine+`; exit 0`, lateBox(`sleep 1; touch '`+finished+`'`), &logs)
+	if r := wait(t, done); r.err != nil {
+		t.Fatal(r.err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(finished); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the box was stopped before it finished up")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// The wait's own goroutine logs right after ssh exits.
+	time.Sleep(200 * time.Millisecond)
+	if failed := logs.holding("failed"); len(failed) != 0 {
+		t.Fatalf("logged %q", failed)
+	}
+}
+
+func TestAPasteThatArrivedIsNoStallWhileTheBoxFinishesUp(t *testing.T) {
+	defer func(was time.Duration) { stallTimeout = was }(stallTimeout)
+	stallTimeout = 300 * time.Millisecond
+	h := newPTY(t)
+	finished := filepath.Join(t.TempDir(), "finished")
+	var logs logRecorder
+	done := pasteOnce(t, h, echoLine+`; sleep 2; exit 0`, lateBox(`sleep 1; touch '`+finished+`'`), &logs)
+	if r := wait(t, done); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if _, err := os.Stat(finished); err != nil {
+		t.Fatalf("the box was stopped before it finished up: %v; logged %q", err, logs.lines)
+	}
+}
+
+func TestABoxThatNeverFinishesUpIsCutOff(t *testing.T) {
+	defer func(was time.Duration) { finishLimit = was }(finishLimit)
+	finishLimit = 300 * time.Millisecond
+	h := newPTY(t)
+	var logs logRecorder
+	done := pasteOnce(t, h, echoLine+`; sleep 3; exit 0`, lateBox(`sleep 10`), &logs)
+	h.waitFor(t, "took over 300ms to finish")
+	if r := wait(t, done); r.err != nil {
+		t.Fatal(r.err)
 	}
 }
 

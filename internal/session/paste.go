@@ -24,6 +24,11 @@ var stallTimeout = 15 * time.Second
 
 var errStalled = errors.New("the exchange stalled")
 
+// finishLimit bounds how long the box may take to finish up once it has sent where the uploads landed.
+var finishLimit = time.Minute
+
+var errFinishLimit = errors.New("the box took too long to finish up")
+
 // errBoxEnded is what the exchange reads once ssh has exited; its writes fail
 // with EPIPE, or ErrClosed once the pipe is closed under them.
 var errBoxEnded = errors.New("the box ended the exchange early")
@@ -39,9 +44,13 @@ func pasteRewriter(ctx context.Context, opts Options, out *screenOut) func([]byt
 		if err == nil && len(files) == 0 {
 			return content
 		}
+		lateFailure := func(err error) {
+			opts.Logf("%s: the box stored a paste, then failed: %v", opts.Spec.Session, err)
+			out.notify("after storing the paste: " + err.Error())
+		}
 		var up uploaded
 		if err == nil {
-			up, err = upload(ctx, opts, files)
+			up, err = upload(ctx, opts, files, lateFailure)
 		}
 		if ctx.Err() != nil {
 			opts.Logf("%s: the attempt ended while a pasted file was uploading; the paste went with it", opts.Spec.Session)
@@ -71,15 +80,18 @@ type uploaded struct {
 }
 
 // upload runs one paste-files exchange with the box over ssh. It returns
-// once the box has sent where the uploads landed; the box prunes old pastes
-// after that, and a failure there is logged.
-func upload(ctx context.Context, opts Options, files []paste.File) (uploaded, error) {
-	ctx, cancel := context.WithCancelCause(ctx)
+// once the box has sent where the uploads landed. The box prunes old pastes
+// after that, even when the attempt ends meanwhile; lateFailure hears how
+// that failed.
+func upload(ctx context.Context, opts Options, files []paste.File, lateFailure func(error)) (uploaded, error) {
+	sshCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	stopFollowing := context.AfterFunc(ctx, func() { cancel(context.Cause(ctx)) })
 	stall := time.AfterFunc(stallTimeout, func() { cancel(errStalled) })
 	// ssh reads its stdin straight from the pipe, so its exit is not held up by a copy waiting on the laptop.
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		stall.Stop()
+		stopFollowing()
 		cancel(nil)
 		return uploaded{}, err
 	}
@@ -87,12 +99,13 @@ func upload(ctx context.Context, opts Options, files []paste.File) (uploaded, er
 	var stderr bytes.Buffer
 	ran := make(chan reconnect.Result, 1)
 	go func() {
-		res := sshrun.Run(ctx, sshrun.PasteFilesArgv(opts.SSH, opts.Box), sshrun.Stdio{Stdin: stdinR, Stdout: stdoutW, Stderr: &stderr}, 2*time.Second)
+		res := sshrun.Run(sshCtx, sshrun.PasteFilesArgv(opts.SSH, opts.Box), sshrun.Stdio{Stdin: stdinR, Stdout: stdoutW, Stderr: &stderr}, 2*time.Second)
 		// A process ssh left behind may still hold the pipes; the exchange is over all the same.
 		stdoutW.CloseWithError(errBoxEnded)
 		stdinR.Close()
 		stdinW.Close()
 		stall.Stop()
+		stopFollowing()
 		cancel(nil)
 		ran <- res
 	}()
@@ -100,9 +113,15 @@ func upload(ctx context.Context, opts Options, files []paste.File) (uploaded, er
 	// ssh's exit waits on its output reaching a reader.
 	stdoutR.Close()
 	if err == nil {
+		stall.Stop()
+		// When the attempt ended first, ssh is going down with it and the paste is dropped.
+		attemptEnded := !stopFollowing()
+		finish := time.AfterFunc(finishLimit, func() { cancel(errFinishLimit) })
 		go func() {
-			if failed := boxFailure(ctx, <-ran, opts, &stderr); failed != nil {
-				opts.Logf("%s: the box stored a paste, then failed: %v", opts.Spec.Session, failed)
+			res := <-ran
+			finish.Stop()
+			if failed := boxFailure(sshCtx, res, opts, &stderr); failed != nil && !attemptEnded {
+				lateFailure(failed)
 			}
 		}()
 		return up, nil
@@ -112,7 +131,7 @@ func upload(ctx context.Context, opts Options, files []paste.File) (uploaded, er
 	if !errors.Is(err, errBoxEnded) && !errors.Is(err, syscall.EPIPE) && !errors.Is(err, os.ErrClosed) {
 		return uploaded{}, err
 	}
-	if failed := boxFailure(ctx, res, opts, &stderr); failed != nil {
+	if failed := boxFailure(sshCtx, res, opts, &stderr); failed != nil {
 		return uploaded{}, failed
 	}
 	return uploaded{}, err
@@ -125,6 +144,8 @@ func boxFailure(ctx context.Context, res reconnect.Result, opts Options, stderr 
 		return res.Err
 	case errors.Is(context.Cause(ctx), errStalled):
 		return fmt.Errorf("the upload to %s stalled for %s", opts.Box.Host, stallTimeout)
+	case errors.Is(context.Cause(ctx), errFinishLimit):
+		return fmt.Errorf("the box took over %s to finish", finishLimit)
 	case res.Transport:
 		return fmt.Errorf("uploading to %s: %s", opts.Box.Host, res.Detail)
 	case res.ExitCode != 0:
@@ -292,8 +313,8 @@ type screenOut struct {
 
 	mu        sync.Mutex
 	lastWrite time.Time
+	closed    bool
 	stop      chan struct{}
-	stopOnce  sync.Once
 	notices   sync.WaitGroup
 }
 
@@ -312,7 +333,14 @@ func (s *screenOut) Write(p []byte) (int, error) {
 // notify shows text on the bottom row once the agent has redrawn the screen
 // after the input that caused it. It stays until the agent draws over it.
 func (s *screenOut) notify(text string) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		s.logf("notice not shown, the session had ended: %s", text)
+		return
+	}
 	s.notices.Add(1)
+	s.mu.Unlock()
 	go func() {
 		defer s.notices.Done()
 		deadline := time.Now().Add(noticeWait)
@@ -358,6 +386,11 @@ func (s *screenOut) draw(text string) {
 
 // close drops the notices not drawn yet; later calls do nothing.
 func (s *screenOut) close() {
-	s.stopOnce.Do(func() { close(s.stop) })
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.stop)
+	}
+	s.mu.Unlock()
 	s.notices.Wait()
 }
