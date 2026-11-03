@@ -83,7 +83,7 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   to exit on that stop is killed, which ends the session for an attached wrapper. A Codex lost
   before its first turn has no session yet and starts again.
 
-## Claude accounts
+## Accounts
 
 The box can hold several Claude logins and switch between them; a switch applies to every
 session at once, running ones included, from their next request to Claude.
@@ -115,11 +115,23 @@ unknown; it fails, refreshing none, while nothing says whose the box's login is.
 login's account from `/api/oauth/profile`; both are undocumented, so a change in their shape
 shows as an error.
 
-Account commands use `~/.claude`, as the sessions do, and refuse `CLAUDE_CONFIG_DIR` and
-`CLAUDE_SECURESTORAGE_CONFIG_DIR`, which the sessions may not see. A test install never
-reaches that login: it must set `claude_config_dir = "<dir>"` in its
-`~/.config/<install>/accounts.toml`, a dir other than `~/.claude` and `~`, and only the
-`remote-agents` install refreshes saved logins.
+`rcodex account` does the same for Codex's ChatGPT logins, with one difference: a running Codex
+keeps the login it started with, so a switch reaches only the Codex sessions started after it.
+It names the running ones; restart each with `rcodex resume <id>` to move it over. Codex keeps
+its login in `~/.codex/auth.json`, which a switch replaces whole under Codex's `auth.lock`; the
+saved ones wait in `~/.config/remote-agents/accounts/codex/`. The login names its own account,
+so the vault always knows whose the live one is. A switch waits while the live access token is
+within 15 minutes of expiry, when a Codex may be refreshing it. The timer refreshes an idle
+login a day before its access token expires, as often as a Codex that used it would. Usage
+comes from `chatgpt.com/backend-api/wham/usage`, the endpoint Codex's `/status` reads, which is
+undocumented too. Accounts need Codex's logins in `auth.json`, the default: a `config.toml`
+with another `cli_auth_credentials_store` is refused.
+
+Account commands use `~/.claude` and `~/.codex`, as the sessions do, and refuse
+`CLAUDE_CONFIG_DIR`, `CLAUDE_SECURESTORAGE_CONFIG_DIR` and `CODEX_HOME`, which the sessions may
+not see. A test install never reaches those logins: its `~/.config/<install>/accounts.toml`
+must give each agent it uses a dir of its own (`[claude]` or `[codex]`, `config_dir = "<dir>"`),
+and only the `remote-agents` install refreshes saved logins.
 
 ## Security model
 
