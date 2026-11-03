@@ -51,9 +51,15 @@ func TestPathsFollowClaudeCode(t *testing.T) {
 	if want := (Paths{ConfigDir: home + "/.claude", SecureDir: home + "/.claude", GlobalConfig: home + "/.claude.json"}); err != nil || got != want {
 		t.Fatalf("default %+v, %v", got, err)
 	}
+	if got.EnvDir() != "" {
+		t.Fatalf("default env dir %q", got.EnvDir())
+	}
 	got, err = PathsIn("/c")
 	if want := (Paths{ConfigDir: "/c", SecureDir: "/c", GlobalConfig: "/c/.claude.json"}); err != nil || got != want {
 		t.Fatalf("in /c %+v, %v", got, err)
+	}
+	if got.EnvDir() != "/c" {
+		t.Fatalf("env dir %q, want /c", got.EnvDir())
 	}
 	if err := os.MkdirAll(home+"/.claude", 0o700); err != nil {
 		t.Fatal(err)
@@ -466,7 +472,7 @@ func TestRefreshErrorsNameTheCauseButNoToken(t *testing.T) {
 	}
 }
 
-func TestUsageReadsBothWindowsStrictly(t *testing.T) {
+func TestUsageReadsTheWeeklyWindowStrictly(t *testing.T) {
 	var body string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/oauth/usage" || r.Header.Get("Authorization") != "Bearer fake-access-1" || r.Header.Get("anthropic-beta") != oauthBeta {
@@ -478,15 +484,24 @@ func TestUsageReadsBothWindowsStrictly(t *testing.T) {
 	defer srv.Close()
 	s := testStore(t, Endpoints{APIBase: srv.URL + "/"})
 	l := mustLogin(t, loginJSON("1", t0))
-	body = `{"five_hour":{"utilization":12.5,"resets_at":"2026-11-03T17:00:00.5+00:00"},"seven_day":null,"limits":[]}`
+	body = `{"five_hour":null,"seven_day":{"utilization":12.5,"resets_at":"2026-11-03T17:00:00.5+00:00"},"limits":[]}`
 	u, err := s.Usage(context.Background(), l)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.FiveHour == nil || u.FiveHour.Utilization != 12.5 || !u.FiveHour.ResetsAt.Equal(time.Date(2026, 11, 3, 17, 0, 0, 5e8, time.UTC)) || u.SevenDay != nil {
+	if u.Weekly == nil || u.Weekly.Utilization != 12.5 || u.Weekly.ResetsAt == nil || !u.Weekly.ResetsAt.Equal(time.Date(2026, 11, 3, 17, 0, 0, 5e8, time.UTC)) {
 		t.Fatalf("usage %+v", u)
 	}
-	for _, bad := range []string{`{"five_hour":null}`, `{"five_hour":{"resets_at":null},"seven_day":null}`, `{"five_hour":{"utilization":"x"},"seven_day":null}`, `{"five_hour":{"utilization":1,"resets_at":"soon"},"seven_day":null}`, `[]`} {
+	// A window that has not started names no reset.
+	body = `{"seven_day":{"utilization":0,"resets_at":null}}`
+	if u, err := s.Usage(context.Background(), l); err != nil || u.Weekly == nil || u.Weekly.ResetsAt != nil {
+		t.Fatalf("not started: %+v, %v", u, err)
+	}
+	body = `{"seven_day":null}`
+	if u, err := s.Usage(context.Background(), l); err != nil || u.Weekly != nil {
+		t.Fatalf("no weekly limit: %+v, %v", u, err)
+	}
+	for _, bad := range []string{`{"five_hour":null}`, `{"seven_day":{"resets_at":null}}`, `{"seven_day":{"utilization":"x"}}`, `{"seven_day":{"utilization":1,"resets_at":"soon"}}`, `[]`} {
 		body = bad
 		if _, err := s.Usage(context.Background(), l); err == nil || !strings.Contains(err.Error(), "changed shape") {
 			t.Errorf("%s: err = %v", bad, err)

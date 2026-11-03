@@ -139,20 +139,13 @@ func (v CodexVault) Usage(ctx context.Context) (Listing, error) {
 	if err != nil {
 		return Listing{}, err
 	}
-	return readUsage(rows, func(login codexauth.Login) (*Window, *Window, error) {
+	return readUsage(rows, func(login codexauth.Login) (*Window, error) {
 		u, err := v.Store.Usage(ctx, login)
-		if err != nil {
-			return nil, nil, err
+		if err != nil || u.Weekly == nil {
+			return nil, err
 		}
-		return codexWindow(u.FiveHour), codexWindow(u.SevenDay), nil
+		return &Window{Utilization: u.Weekly.Utilization, ResetsAt: &u.Weekly.ResetsAt}, nil
 	}), nil
-}
-
-func codexWindow(w *codexauth.Window) *Window {
-	if w == nil {
-		return nil
-	}
-	return newWindow(w.Utilization, w.ResetsAt)
 }
 
 // Use makes the named account the box's Codex login for every Codex that
@@ -226,6 +219,11 @@ func (v CodexVault) Save(ctx context.Context, name string) error {
 	})
 }
 
+// Rename gives an account another name.
+func (v CodexVault) Rename(_ context.Context, old, new string) error {
+	return v.locked(func(s *codexState) error { return renameEntry(v.files(), s, old, new) })
+}
+
 // Remove forgets an account that is not the live one.
 func (v CodexVault) Remove(ctx context.Context, name string) error {
 	if err := ValidName(name); err != nil {
@@ -255,7 +253,7 @@ func (v CodexVault) Add(ctx context.Context, name string, signIn func(home strin
 		return 0, err
 	}
 	var made codexauth.Login
-	err = v.files().signIn(func(dir string) error {
+	err = v.files().scratch(func(dir string) error {
 		if err := signIn(dir); err != nil {
 			return err
 		}
@@ -279,7 +277,7 @@ func (v CodexVault) Add(ctx context.Context, name string, signIn func(home strin
 	}
 	id := made.Identity()
 	err = v.locked(func(s *codexState) error {
-		if err := v.files().removeStaleSignIns(); err != nil {
+		if err := v.files().removeStaleScratch(); err != nil {
 			return err
 		}
 		l, err := v.live(ctx, s)

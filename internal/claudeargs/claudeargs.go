@@ -228,3 +228,9 @@ func (CLI) CheckDefaults(args []string) error { return CheckDefaults(args) }
 func (CLI) ResumeBase(args []string) []string { return ResumeBase(args) }
 func (CLI) ResumeArgs(id string) []string     { return ResumeArgs(id) }
 func (CLI) SignInArgs() []string              { return []string{"auth", "login"} }
+
+// HelloArgs ask the cheapest model, keep no session, and load none of the
+// box's MCP servers, user settings or hooks.
+func (CLI) HelloArgs() ([]string, bool) {
+	return []string{"-p", "hi", "--model", "haiku", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", "project"}, true
+}

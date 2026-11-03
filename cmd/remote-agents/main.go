@@ -28,6 +28,7 @@ import (
 	"golang.org/x/term"
 
 	"remote-agents/internal/accounts"
+	"remote-agents/internal/accountui"
 	"remote-agents/internal/agentcli"
 	"remote-agents/internal/cmuxcapture"
 	"remote-agents/internal/cmuxcodex"
@@ -51,8 +52,9 @@ const usage = `usage:
   remote-agents ls                                 list sessions running on the box
   remote-agents link                               run the link daemon (launchd runs this)
   r<agent> [agent args...]                         same as run <agent>, e.g. rclaude
-  rclaude account [list [--json] | use <name> | add <name> | save <name> | remove <name>]
-                                                   pick, list and switch the box's Claude accounts`
+  r<agent> account                                 pick, add, rename and remove the box's accounts
+  r<agent> account [list [--json] | use <name> | add <name> | save <name> |
+                    rename <name> <new name> | remove <name> | start <name>]`
 
 // configEnvVar points at a config file other than ~/.config/remote-agents/config.toml.
 const configEnvVar = "REMOTE_AGENTS_CONFIG"
@@ -376,75 +378,180 @@ func runCommand(e env, agent config.Agent, args []string) (int, error) {
 	return passthrough(sshrun.ExecArgv(e.ssh, e.box(), token, tty))
 }
 
-// account runs the box's account commands; without arguments it lists the
-// accounts and switches to the one picked.
+// accountUsage is the account command's usage; %s is the agent's kind.
+const accountUsage = "usage: r%s account [list [--json] | use <name> | add <name> | save <name> | rename <name> <new name> | remove <name> | start <name>]"
+
+// account runs the box's account commands; without arguments it opens the
+// account picker.
 func account(e env, agent config.Agent, args []string) (int, error) {
-	kind := string(agent.Kind)
+	box := boxAccounts{e: e, agent: agent}
+	cli := "r" + box.kind()
 	if len(args) == 0 {
-		return pickAccount(e, kind)
+		return pickAccount(box)
 	}
 	switch {
 	case len(args) == 1 && args[0] == "list":
-		listing, code, err := accountListing(e, kind)
-		if err != nil || code != 0 {
-			return code, err
-		}
-		return 0, accounts.Render(os.Stdout, listing, time.Now(), "r"+kind)
-	case len(args) == 2 && args[0] == "list" && args[1] == "--json":
-		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), false, kind, "list"))
-	case len(args) == 2 && (args[0] == "use" || args[0] == "save" || args[0] == "remove"):
-		if err := accounts.ValidName(args[1]); err != nil {
-			return 2, err
-		}
-		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), false, kind, args...))
-	case len(args) == 2 && args[0] == "add":
-		if err := accounts.ValidName(args[1]); err != nil {
-			return 2, err
-		}
-		s := spec.Spec{Mode: spec.ModeExec, Workdir: e.cfg.Workdir, Argv: append([]string{agent.Command}, agent.CLI().SignInArgs()...), Env: terminalEnv()}
-		token, err := s.Encode()
+		listing, err := box.List()
 		if err != nil {
 			return 1, err
 		}
-		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), true, kind, "add", args[1], token))
+		return 0, accounts.Render(os.Stdout, listing, time.Now(), term.IsTerminal(int(os.Stdout.Fd())), cli)
+	case len(args) == 2 && args[0] == "list" && args[1] == "--json":
+		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), false, box.kind(), "list"))
+	case len(args) == 2 && (args[0] == "use" || args[0] == "save" || args[0] == "remove"),
+		len(args) == 3 && args[0] == "rename":
+		if err := validNames(args[1:]); err != nil {
+			return 2, err
+		}
+		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), false, box.kind(), args...))
+	case len(args) == 2 && args[0] == "add":
+		if err := validNames(args[1:]); err != nil {
+			return 2, err
+		}
+		argv, err := box.addArgv(args[1])
+		if err != nil {
+			return 1, err
+		}
+		return passthrough(argv)
+	case len(args) == 2 && args[0] == "start":
+		if err := validNames(args[1:]); err != nil {
+			return 2, err
+		}
+		argv, err := box.startArgv(args[1])
+		if err != nil {
+			return 2, err
+		}
+		return passthrough(argv)
 	}
-	return 2, fmt.Errorf("usage: r%s account [list [--json] | use <name> | add <name> | save <name> | remove <name>]", kind)
+	return 2, fmt.Errorf(accountUsage, box.kind())
 }
 
-func accountListing(e env, kind string) (accounts.Listing, int, error) {
-	var out bytes.Buffer
-	res := sshrun.Run(context.Background(), sshrun.AccountArgv(e.ssh, e.box(), false, kind, "list"), sshrun.Stdio{Stdout: &out, Stderr: os.Stderr}, 2*time.Second)
-	switch {
-	case res.Err != nil:
-		return accounts.Listing{}, 1, res.Err
-	case res.Transport:
-		return accounts.Listing{}, 255, fmt.Errorf("link to box failed: %s", res.Detail)
-	case res.ExitCode != 0:
-		return accounts.Listing{}, res.ExitCode, nil
+func validNames(names []string) error {
+	for _, name := range names {
+		if err := accounts.ValidName(name); err != nil {
+			return err
+		}
 	}
-	var l accounts.Listing
-	if err := json.Unmarshal(out.Bytes(), &l); err != nil {
-		return accounts.Listing{}, 1, fmt.Errorf("reading the box's account listing: %w", err)
-	}
-	return l, 0, nil
+	return nil
 }
 
-func pickAccount(e env, kind string) (int, error) {
-	listing, code, err := accountListing(e, kind)
-	if err != nil || code != 0 {
-		return code, err
+// pickAccount opens the picker on a terminal; elsewhere it lists the
+// accounts and says how to switch.
+func pickAccount(box boxAccounts) (int, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+		listing, err := box.List()
+		if err != nil {
+			return 1, err
+		}
+		cli := "r" + box.kind()
+		if err := accounts.Render(os.Stdout, listing, time.Now(), term.IsTerminal(int(os.Stdout.Fd())), cli); err != nil {
+			return 1, err
+		}
+		fmt.Printf("not a terminal, so no picker; switch with: %s account use <name>\n", cli)
+		return 0, nil
 	}
-	if err := accounts.Render(os.Stdout, listing, time.Now(), "r"+kind); err != nil {
-		return 1, err
-	}
-	name, err := accounts.Choose(os.Stdin, os.Stdout, listing, "r"+kind)
+	said, err := accountui.Run(os.Stdin, os.Stdout, box)
 	if err != nil {
 		return 1, err
 	}
-	if name == "" {
-		return 0, nil
+	fmt.Print(said)
+	return 0, nil
+}
+
+// boxAccounts runs the box's account commands for one agent.
+type boxAccounts struct {
+	e     env
+	agent config.Agent
+}
+
+func (b boxAccounts) kind() string { return string(b.agent.Kind) }
+
+func (b boxAccounts) List() (accounts.Listing, error) {
+	out, err := b.Do("list")
+	if err != nil {
+		return accounts.Listing{}, err
 	}
-	return passthrough(sshrun.AccountArgv(e.ssh, e.box(), false, kind, "use", name))
+	var l accounts.Listing
+	if err := json.Unmarshal([]byte(out), &l); err != nil {
+		return accounts.Listing{}, fmt.Errorf("reading the box's account listing: %w", err)
+	}
+	return l, nil
+}
+
+func (b boxAccounts) Do(args ...string) (string, error) {
+	return b.query(sshrun.AccountArgv(b.e.ssh, b.e.box(), false, b.kind(), args...))
+}
+
+func (b boxAccounts) Add(name string) error {
+	argv, err := b.addArgv(name)
+	if err != nil {
+		return err
+	}
+	code, err := passthrough(argv)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("adding %s failed (exit %d)", name, code)
+	}
+	return nil
+}
+
+func (b boxAccounts) Start(name string) error {
+	argv, err := b.startArgv(name)
+	if err != nil {
+		return err
+	}
+	_, err = b.query(argv)
+	return err
+}
+
+// addArgv signs a new account in on the box, in a terminal.
+func (b boxAccounts) addArgv(name string) ([]string, error) {
+	token, err := b.execToken(b.agent.CLI().SignInArgs(), terminalEnv())
+	if err != nil {
+		return nil, err
+	}
+	return sshrun.AccountArgv(b.e.ssh, b.e.box(), true, b.kind(), "add", name, token), nil
+}
+
+// startArgv sends the account the agent's one short request.
+func (b boxAccounts) startArgv(name string) ([]string, error) {
+	hello, ok := b.agent.CLI().HelloArgs()
+	if !ok {
+		return nil, fmt.Errorf("%s accounts have no weekly window a request starts", b.kind())
+	}
+	token, err := b.execToken(hello, map[string]string{})
+	if err != nil {
+		return nil, err
+	}
+	return sshrun.AccountArgv(b.e.ssh, b.e.box(), false, b.kind(), "start", name, token), nil
+}
+
+func (b boxAccounts) execToken(args []string, env map[string]string) (string, error) {
+	s := spec.Spec{Mode: spec.ModeExec, Workdir: b.e.cfg.Workdir, Argv: append([]string{b.agent.Command}, args...), Env: env}
+	return s.Encode()
+}
+
+// query runs an account command that needs no terminal, and returns what
+// it printed; a failure is the box's own message.
+func (b boxAccounts) query(argv []string) (string, error) {
+	var out, errOut bytes.Buffer
+	res := sshrun.Run(context.Background(), argv, sshrun.Stdio{Stdout: &out, Stderr: &errOut}, 2*time.Second)
+	switch {
+	case res.Err != nil:
+		return "", res.Err
+	case res.Transport:
+		return "", fmt.Errorf("link to box failed: %s", res.Detail)
+	case res.ExitCode != 0:
+		lines := strings.Split(strings.TrimSpace(errOut.String()), "\n")
+		last := strings.TrimPrefix(lines[len(lines)-1], "remote-agents-box: ")
+		if last == "" {
+			return "", fmt.Errorf("the box's account command failed (exit %d)", res.ExitCode)
+		}
+		return "", errors.New(last)
+	}
+	return out.String(), nil
 }
 
 func list() (int, error) {

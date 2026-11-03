@@ -39,8 +39,8 @@ type files struct {
 
 const entryMode = 0o600
 
-// signInDirPrefix names the agent config dirs that Add signs in to.
-const signInDirPrefix = ".login-"
+// scratchPrefix names the agent config dirs that Add signs in to and Start runs in.
+const scratchPrefix = ".login-"
 
 // signInMaxAge is how long a sign-in may take before its leftover dir is a
 // crash's to remove.
@@ -148,6 +148,25 @@ func writeEntry[E any](f files, s *state[E], name string, e E) error {
 	return nil
 }
 
+// renameEntry moves old's entry to new, which must be free.
+func renameEntry[E any](f files, s *state[E], old, new string) error {
+	if err := ValidName(new); err != nil {
+		return err
+	}
+	if _, ok := s.entries[old]; !ok {
+		return fmt.Errorf("no account %s", old)
+	}
+	if _, ok := s.entries[new]; ok {
+		return fmt.Errorf("account %s exists already", new)
+	}
+	if err := os.Rename(f.entryPath(old), f.entryPath(new)); err != nil {
+		return err
+	}
+	s.entries[new] = s.entries[old]
+	delete(s.entries, old)
+	return atomicfile.SyncDir(f.dir)
+}
+
 func removeEntry[E any](f files, s *state[E], name string) error {
 	delete(s.entries, name)
 	return atomicfile.Remove(f.entryPath(name))
@@ -166,12 +185,12 @@ func sameJSON[E any](a, b E) (bool, error) {
 	return string(x) == string(y), nil
 }
 
-// signIn runs fn in a new empty dir of the vault, which it removes after.
-func (f files) signIn(fn func(dir string) error) (err error) {
+// scratch runs fn in a new empty dir of the vault, which it removes after.
+func (f files) scratch(fn func(dir string) error) (err error) {
 	if err := f.ensureDir(); err != nil {
 		return err
 	}
-	dir, err := os.MkdirTemp(f.dir, signInDirPrefix)
+	dir, err := os.MkdirTemp(f.dir, scratchPrefix)
 	if err != nil {
 		return err
 	}
@@ -179,10 +198,10 @@ func (f files) signIn(fn func(dir string) error) (err error) {
 	return fn(dir)
 }
 
-// removeStaleSignIns removes the sign-in dirs a crashed Add left behind; the
+// removeStaleScratch removes the scratch dirs a crashed command left behind; the
 // caller holds the vault lock.
-func (f files) removeStaleSignIns() error {
-	dirs, err := filepath.Glob(filepath.Join(f.dir, signInDirPrefix+"*"))
+func (f files) removeStaleScratch() error {
+	dirs, err := filepath.Glob(filepath.Join(f.dir, scratchPrefix+"*"))
 	if err != nil {
 		return err
 	}

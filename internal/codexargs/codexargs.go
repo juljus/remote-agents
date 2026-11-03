@@ -240,3 +240,6 @@ func (CLI) CheckDefaults(args []string) error                             { retu
 func (CLI) ResumeBase(args []string) []string                             { return ResumeBase(args) }
 func (CLI) ResumeArgs(id string) []string                                 { return ResumeArgs(id) }
 func (CLI) SignInArgs() []string                                          { return []string{"login"} }
+
+// HelloArgs are none: a Codex weekly window always reports when it resets.
+func (CLI) HelloArgs() ([]string, bool) { return nil, false }

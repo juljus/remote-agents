@@ -180,3 +180,9 @@ func TestSignInArgs(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestCodexHasNoHello(t *testing.T) {
+	if got, ok := (CLI{}).HelloArgs(); ok {
+		t.Fatalf("got %q", got)
+	}
+}

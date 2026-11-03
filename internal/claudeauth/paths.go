@@ -36,6 +36,15 @@ func PathsIn(dir string) (Paths, error) {
 	return checked(Paths{ConfigDir: dir, SecureDir: dir, GlobalConfig: filepath.Join(dir, ".claude.json")})
 }
 
+// EnvDir is the CLAUDE_CONFIG_DIR that points Claude Code at p: "" for
+// DefaultPaths, dir for PathsIn(dir).
+func (p Paths) EnvDir() string {
+	if p.GlobalConfig == filepath.Join(p.ConfigDir, ".claude.json") {
+		return p.ConfigDir
+	}
+	return ""
+}
+
 // checked refuses a legacy .config.json, which Claude Code prefers over .claude.json.
 func checked(p Paths) (Paths, error) {
 	legacy := filepath.Join(p.ConfigDir, ".config.json")

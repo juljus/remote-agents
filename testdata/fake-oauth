@@ -4,9 +4,12 @@ and Anthropic's profile endpoint, in end-to-end tests. Each refresh token
 fake-refresh-<tag>-<n> works once, as a rotating server's does; an access
 token of tag signs in as acc-<tag> in org-<tag> (Anthropic) or account
 acct-<tag> (OpenAI, whose tokens are JWTs) and has used 10% per letter of
-the tag. Writes its port to argv[1]."""
+the tag. An Anthropic account's weekly window starts once a file
+started-<tag> is beside argv[1], which fake-claude -p writes; until then
+it is unused and has no reset time. Writes its port to argv[1]."""
 import base64
 import json
+import os
 import re
 import sys
 import time
@@ -85,8 +88,10 @@ class Handler(BaseHTTPRequestHandler):
                                     "organization": {"uuid": f"org-{tag}"}})
         if self.path != "/api/oauth/usage":
             return self.reply(404, {})
-        self.reply(200, {"five_hour": {"utilization": 10 * len(tag), "resets_at": "2030-01-01T00:00:00+00:00"},
-                         "seven_day": None, "limits": []})
+        if not os.path.exists(os.path.join(os.path.dirname(sys.argv[1]), f"started-{tag}")):
+            return self.reply(200, {"five_hour": None, "seven_day": {"utilization": 0, "resets_at": None}, "limits": []})
+        self.reply(200, {"five_hour": None, "seven_day": {"utilization": 10 * len(tag), "resets_at": "2030-01-01T00:00:00+00:00"},
+                         "limits": []})
 
 
 server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

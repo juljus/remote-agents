@@ -273,15 +273,16 @@ func get(ctx context.Context, client *http.Client, ep Endpoints, path string, l 
 type Window struct {
 	// Utilization is the percentage of the window's limit used.
 	Utilization float64
-	// ResetsAt is zero when the server names no reset.
-	ResetsAt time.Time
+	// ResetsAt is nil while the window has not started: the server names
+	// no reset, as the usage endpoint's schema in Claude Code allows.
+	ResetsAt *time.Time
 }
 
-// Usage is how much of its plan limits an account has used. A nil window is
-// one the server reports as not running, as before the first request in it.
+// Usage is how much of its weekly limit an account has used. Claude has
+// dropped the 5-hour limit, whose window the reply reports as null.
 type Usage struct {
-	FiveHour *Window
-	SevenDay *Window
+	// Weekly is nil for a plan without a weekly limit.
+	Weekly *Window
 }
 
 // fetchUsage reads /api/oauth/usage, an endpoint Anthropic does not document:
@@ -325,17 +326,13 @@ func parseUsage(data []byte) (Usage, error) {
 			if err != nil {
 				return nil, fmt.Errorf("usage reply changed shape: %s resets_at: %w", key, err)
 			}
-			out.ResetsAt = t
+			out.ResetsAt = &t
 		}
 		return out, nil
 	}
-	five, err := window("five_hour")
+	weekly, err := window("seven_day")
 	if err != nil {
 		return Usage{}, err
 	}
-	seven, err := window("seven_day")
-	if err != nil {
-		return Usage{}, err
-	}
-	return Usage{FiveHour: five, SevenDay: seven}, nil
+	return Usage{Weekly: weekly}, nil
 }

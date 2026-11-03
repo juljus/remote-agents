@@ -322,7 +322,7 @@ func TestFreshRefreshesOnlyNearExpiry(t *testing.T) {
 	}
 }
 
-func TestUsageReadsBothWindowsByTheirLength(t *testing.T) {
+func TestUsageReadsTheWeeklyWindowByItsLength(t *testing.T) {
 	var body string
 	var status int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -341,18 +341,18 @@ func TestUsageReadsBothWindowsByTheirLength(t *testing.T) {
 	  "primary_window":{"used_percent":11,"limit_window_seconds":604800,"reset_after_seconds":5,"reset_at":1793000000},
 	  "secondary_window":{"used_percent":40.5,"limit_window_seconds":18000,"reset_after_seconds":5,"reset_at":1792000000}},"credits":{}}`
 	u, err := s.Usage(context.Background(), l)
-	if err != nil || u.SevenDay == nil || u.SevenDay.Utilization != 11 || !u.SevenDay.ResetsAt.Equal(time.Unix(1793000000, 0)) || u.FiveHour == nil || u.FiveHour.Utilization != 40.5 {
+	if err != nil || u.Weekly == nil || u.Weekly.Utilization != 11 || !u.Weekly.ResetsAt.Equal(time.Unix(1793000000, 0)) {
 		t.Fatalf("usage %+v, %v", u, err)
 	}
 	body = `{"rate_limit":{"primary_window":{"used_percent":3,"limit_window_seconds":604800,"reset_after_seconds":5,"reset_at":1793000000},"secondary_window":null}}`
-	if u, err := s.Usage(context.Background(), l); err != nil || u.FiveHour != nil || u.SevenDay == nil {
+	if u, err := s.Usage(context.Background(), l); err != nil || u.Weekly == nil {
 		t.Fatalf("one window: %+v, %v", u, err)
 	}
 	for _, bad := range []string{
 		`{}`,
 		`{"rate_limit":{"primary_window":{"used_percent":3,"limit_window_seconds":3600,"reset_at":1}}}`,
 		`{"rate_limit":{"primary_window":{"limit_window_seconds":18000,"reset_at":1}}}`,
-		`{"rate_limit":{"primary_window":{"used_percent":3,"limit_window_seconds":18000,"reset_at":1},"secondary_window":{"used_percent":3,"limit_window_seconds":18000,"reset_at":1}}}`,
+		`{"rate_limit":{"primary_window":{"used_percent":3,"limit_window_seconds":604800,"reset_at":1},"secondary_window":{"used_percent":3,"limit_window_seconds":604800,"reset_at":1}}}`,
 	} {
 		body = bad
 		if _, err := s.Usage(context.Background(), l); err == nil {

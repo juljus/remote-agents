@@ -104,7 +104,7 @@ func (f *fakeAnthropic) issue(tag string, n int) (access, refresh string) {
 	access, refresh = fmt.Sprintf("fake-access-%s-%d", tag, n), fmt.Sprintf("fake-refresh-%s-%d", tag, n)
 	f.valid[refresh] = tag
 	f.tags[access] = tag
-	f.usage[access] = fmt.Sprintf(`{"five_hour":{"utilization":%d,"resets_at":"2026-11-03T15:00:00+00:00"},"seven_day":null}`, len(tag)*10)
+	f.usage[access] = fmt.Sprintf(`{"five_hour":null,"seven_day":{"utilization":%d,"resets_at":"2026-11-03T15:00:00+00:00"}}`, len(tag)*10)
 	return access, refresh
 }
 
@@ -337,8 +337,8 @@ func TestTheServerSaysWhichEntryTheLiveLoginIs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.Active() != "home" || f.liveEmail() != "home@example.com" {
-		t.Fatalf("active %q, record %s", l.Active(), f.liveEmail())
+	if activeName(l) != "home" || f.liveEmail() != "home@example.com" {
+		t.Fatalf("active %q, record %s", activeName(l), f.liveEmail())
 	}
 	if f.entryTokens("home").RefreshToken != "fake-refresh-home-2" || f.entryTokens("work").RefreshToken != "fake-refresh-work-1" {
 		t.Fatalf("home %+v, work %+v", f.entryTokens("home"), f.entryTokens("work"))
@@ -401,9 +401,9 @@ func TestUsageRefreshesOnlyInactiveAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"accounts":[` +
-		`{"name":"gone","email":"gone@example.com","active":false,"five_hour":null,"seven_day":null,"error":"signed out: log in again with ` + "`rclaude account add gone`" + `"},` +
-		`{"name":"home","email":"home@example.com","active":false,"five_hour":{"utilization":40,"resets_at":"2026-11-03T15:00:00Z"},"seven_day":null},` +
-		`{"name":"work","email":"work@example.com","active":true,"five_hour":{"utilization":40,"resets_at":"2026-11-03T15:00:00Z"},"seven_day":null}]}`
+		`{"name":"gone","email":"gone@example.com","active":false,"weekly":null,"error":"signed out: log in again with ` + "`rclaude account add gone`" + `"},` +
+		`{"name":"home","email":"home@example.com","active":false,"weekly":{"utilization":40,"resets_at":"2026-11-03T15:00:00Z"}},` +
+		`{"name":"work","email":"work@example.com","active":true,"weekly":{"utilization":40,"resets_at":"2026-11-03T15:00:00Z"}}]}`
 	if string(got) != want {
 		t.Fatalf("listing\n%s\nwant\n%s", got, want)
 	}
@@ -461,8 +461,8 @@ func TestAnUnverifiedBoxLoginIsNeverRefreshed(t *testing.T) {
 			if got := rowSummary(l); got != c.wantRows {
 				t.Fatalf("rows %q, want %q", got, c.wantRows)
 			}
-			if l.Active() != taken {
-				t.Fatalf("active %q, want %q", l.Active(), taken)
+			if activeName(l) != taken {
+				t.Fatalf("active %q, want %q", activeName(l), taken)
 			}
 			var log bytes.Buffer
 			err = f.vault.KeepFresh(ctx, &log)
@@ -527,8 +527,8 @@ func rowSummary(l Listing) string {
 			s += ":unverified"
 		case r.Error != "":
 			s += ":" + r.Error
-		case r.FiveHour != nil:
-			s += fmt.Sprintf(":%.0f", r.FiveHour.Utilization)
+		case r.Weekly != nil:
+			s += fmt.Sprintf(":%.0f", r.Weekly.Utilization)
 		}
 		out = append(out, s)
 	}
@@ -643,7 +643,7 @@ func TestUsageShowsAnUnnamedLiveLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(l.Accounts) != 1 || l.Accounts[0].Name != "" || !l.Accounts[0].Active || l.Accounts[0].FiveHour == nil || l.Active() != "" || len(l.Named()) != 0 {
+	if len(l.Accounts) != 1 || l.Accounts[0].Name != "" || !l.Accounts[0].Active || l.Accounts[0].Weekly == nil {
 		t.Fatalf("listing %+v", l)
 	}
 }
@@ -855,32 +855,157 @@ func TestKeepFreshWithNoAccountsLeavesTheBoxAlone(t *testing.T) {
 }
 
 func TestRender(t *testing.T) {
-	reset := time.Date(2026, 11, 3, 15, 0, 0, 0, time.UTC)
-	week := time.Date(2026, 11, 9, 23, 59, 0, 0, time.UTC)
+	// Thursday 18:00 in the laptop's zone, which is not the server's.
+	zone := time.FixedZone("EET", 2*60*60)
+	reset := time.Date(2026, 11, 5, 16, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, zone)
 	l := Listing{Accounts: []Row{
-		{Name: "", Email: "stray@example.com", Active: true, FiveHour: &Window{Utilization: 3, ResetsAt: &reset}},
-		{Name: "home", Email: "home@example.com", SevenDay: &Window{Utilization: 49.4, ResetsAt: &week}},
+		{Name: "", Email: "stray@example.com", Active: true, Weekly: &Window{Utilization: 3, ResetsAt: &reset}},
+		{Name: "juljus", Email: "juljus@example.com", Weekly: &Window{Utilization: 51, ResetsAt: &reset}},
+		{Name: "molton", Email: "m@example.com", Weekly: &Window{Utilization: 0}},
+		{Name: "team", Email: "team@example.com"},
 		{Name: "work", Email: "work@example.com", Error: "signed out"},
 	}}
 	var out bytes.Buffer
-	if err := Render(&out, l, t0, "rclaude"); err != nil {
+	if err := Render(&out, l, now, false, "rclaude"); err != nil {
 		t.Fatal(err)
 	}
-	want := `   ACCOUNT    EMAIL              5-HOUR          WEEKLY
-*  (no name)  stray@example.com  3% until 15:00  -
-1  home       home@example.com   -               49% until Nov 9 23:59
-2  work       work@example.com   error: signed out
+	want := `unsaved  stray@example.com   ▰▰▰▰▰ 97% left · resets Thu 18:00  active
+juljus   juljus@example.com  ▰▰▱▱▱ 49% left · resets Thu 18:00
+molton   m@example.com       ▰▰▰▰▰ 100% left · not started
+team     team@example.com    no weekly limit
+work     work@example.com    error: signed out
 The box's login has no name: keep it with ` + "`rclaude account save <name>`" + `.
 `
 	if out.String() != want {
 		t.Fatalf("rendered\n%s\nwant\n%s", out.String(), want)
 	}
+	// In colour, "not started" stands out; times are the same.
+	out.Reset()
+	if err := Render(&out, Listing{Accounts: l.Accounts[2:3]}, now, true, "rclaude"); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "molton  m@example.com  ▰▰▰▰▰ 100% left · "+sgrYellow+"not started"+sgrReset+"\n" {
+		t.Fatalf("coloured %q", out.String())
+	}
 	// An unverified login cannot be saved, so the hint stays away.
 	out.Reset()
-	if err := Render(&out, Listing{Accounts: []Row{{Active: true, Error: "unverified"}}}, t0, "rcodex"); err != nil {
+	if err := Render(&out, Listing{Accounts: []Row{{Active: true, Error: "unverified"}}}, now, false, "rcodex"); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "account save") {
 		t.Fatalf("rendered\n%s", out.String())
 	}
+}
+
+func TestRenameKeepsTheLoginAndTheLastSwitch(t *testing.T) {
+	f := newFixture(t)
+	f.seed("work", f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+	f.seed("home", f.login("home", 1, time.Hour, 20*24*time.Hour), account("home"))
+	f.markLast("work")
+	if err := f.vault.Rename(ctx, "work", "job"); err != nil {
+		t.Fatal(err)
+	}
+	if f.entryTokens("job").RefreshToken != "fake-refresh-work-1" {
+		t.Fatalf("job %+v", f.entryTokens("job"))
+	}
+	if last, err := f.vault.lastSwitched(); err != nil || last != "job" {
+		t.Fatalf("last switched %q, %v", last, err)
+	}
+	if _, err := os.Stat(f.vault.files().entryPath("work")); !os.IsNotExist(err) {
+		t.Fatalf("work left: %v", err)
+	}
+	for _, c := range []struct{ old, new, want string }{
+		{"job", "home", "account home exists already"},
+		{"nobody", "x", "no account nobody"},
+		{"job", "Bad", "invalid account name"},
+	} {
+		if err := f.vault.Rename(ctx, c.old, c.new); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s -> %s: %v", c.old, c.new, err)
+		}
+	}
+}
+
+func TestStartAsksAsTheAccountAndKeepsWhatClaudeRotated(t *testing.T) {
+	f := newFixture(t)
+	f.setLive(f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+	if err := f.vault.Save(ctx, "work"); err != nil {
+		t.Fatal(err)
+	}
+	f.seed("home", f.login("home", 1, time.Hour, 20*24*time.Hour), account("home"))
+	// Claude Code refreshes the login it was given, as it may.
+	rotated := f.login("home", 2, 8*time.Hour, 30*24*time.Hour)
+	var asked []string
+	err := f.vault.Start(ctx, "home", func(workdir, configDir string) error {
+		creds, err := os.ReadFile(filepath.Join(configDir, ".credentials.json"))
+		if err != nil {
+			return err
+		}
+		config, err := os.ReadFile(filepath.Join(configDir, ".claude.json"))
+		if err != nil {
+			return err
+		}
+		asked = append(asked, fmt.Sprint(workdir == configDir, strings.Contains(string(creds), "fake-refresh-home-1"), strings.Contains(string(config), "home@example.com")))
+		return os.WriteFile(filepath.Join(configDir, ".credentials.json"), []byte(`{"claudeAiOauth":`+rotated+`}`), 0o600)
+	})
+	if err != nil || fmt.Sprint(asked) != "[true true true]" {
+		t.Fatalf("Start = %v, asked %v", err, asked)
+	}
+	if f.entryTokens("home").RefreshToken != "fake-refresh-home-2" {
+		t.Fatalf("home %+v", f.entryTokens("home"))
+	}
+	// A failed ask still keeps what Claude Code rotated before it failed.
+	rotated = f.login("home", 3, 8*time.Hour, 30*24*time.Hour)
+	err = f.vault.Start(ctx, "home", func(_, configDir string) error {
+		if err := os.WriteFile(filepath.Join(configDir, ".credentials.json"), []byte(`{"claudeAiOauth":`+rotated+`}`), 0o600); err != nil {
+			return err
+		}
+		return errors.New("claude exited 1")
+	})
+	if err == nil || !strings.Contains(err.Error(), "claude exited 1") || f.entryTokens("home").RefreshToken != "fake-refresh-home-3" {
+		t.Fatalf("failed ask: %v, home %+v", err, f.entryTokens("home"))
+	}
+	// The box's own account asks with the box's login, as it is.
+	err = f.vault.Start(ctx, "work", func(workdir, configDir string) error {
+		if configDir != "" {
+			return fmt.Errorf("config dir %s", configDir)
+		}
+		entries, err := os.ReadDir(workdir)
+		if err != nil || len(entries) != 0 {
+			return fmt.Errorf("workdir %v, %v", entries, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirents, err := os.ReadDir(f.vault.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range dirents {
+		if strings.HasPrefix(d.Name(), scratchPrefix) {
+			t.Fatalf("scratch dir %s left", d.Name())
+		}
+	}
+}
+
+func TestStartRefusesAnAccountThatMayBeTheUnverifiedBoxLogin(t *testing.T) {
+	f := newFixture(t)
+	f.seed("home", f.login("home", 1, time.Hour, 20*24*time.Hour), account("home"))
+	f.setLive(f.login("work", 2, -time.Hour, 20*24*time.Hour), account("work"))
+	ran := false
+	if err := f.vault.Start(ctx, "home", func(string, string) error { ran = true; return nil }); err == nil || ran {
+		t.Fatalf("Start = %v, ran %v", err, ran)
+	}
+}
+
+// activeName is the name of the listing's active account.
+func activeName(l Listing) string {
+	for _, r := range l.Accounts {
+		if r.Active {
+			return r.Name
+		}
+	}
+	return ""
 }

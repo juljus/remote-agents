@@ -212,10 +212,10 @@ type Window struct {
 	ResetsAt    time.Time
 }
 
-// Usage is a login's plan usage; a nil window is one the plan does not have.
+// Usage is a login's weekly usage; Weekly is nil for a plan without a
+// weekly limit. A plan's 5-hour window, which some have, goes unread.
 type Usage struct {
-	FiveHour *Window
-	SevenDay *Window
+	Weekly *Window
 }
 
 // The window lengths the usage endpoint reports, in seconds.
@@ -287,19 +287,17 @@ func parseUsage(data []byte) (Usage, error) {
 		if w.UsedPercent == nil || w.WindowSeconds == nil || w.ResetAt == nil {
 			return Usage{}, errors.New("usage reply has a window without used_percent, limit_window_seconds or reset_at")
 		}
-		var slot **Window
 		switch *w.WindowSeconds {
 		case fiveHourWindow:
-			slot = &u.FiveHour
+			continue
 		case sevenDayWindow:
-			slot = &u.SevenDay
 		default:
 			return Usage{}, fmt.Errorf("usage reply has a %d-second window", *w.WindowSeconds)
 		}
-		if *slot != nil {
+		if u.Weekly != nil {
 			return Usage{}, fmt.Errorf("usage reply has two %d-second windows", *w.WindowSeconds)
 		}
-		*slot = &Window{Utilization: *w.UsedPercent, ResetsAt: time.Unix(*w.ResetAt, 0)}
+		u.Weekly = &Window{Utilization: *w.UsedPercent, ResetsAt: time.Unix(*w.ResetAt, 0)}
 	}
 	return u, nil
 }

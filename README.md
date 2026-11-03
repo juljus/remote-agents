@@ -88,13 +88,23 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
 The box can hold several Claude logins and switch between them; a switch applies to every
 session at once, running ones included, from their next request to Claude.
 
-- `rclaude account` lists the accounts with their 5-hour and weekly usage and switches to the
-  one you pick. `rclaude account list` prints the table; `list --json` is the form for scripts.
+- `rclaude account` opens a picker: each account with what is left of its weekly window and
+  when it resets (`▰▰▱▱▱ 49% left · resets Thu 18:00`), the cursor on the active one. ↑/↓ or
+  j/k move, 1-9 jump to a row, Enter switches, Esc, q or Ctrl+C leave. a adds an account, e
+  renames the highlighted one, d removes it after a y/N. A login the box has that no account
+  names shows as `unsaved`; e names it. A weekly window that has not started shows as
+  `not started`, and s starts it: Claude Code sends that account one `hi` to the cheapest
+  model, from an empty dir with none of the box's MCP servers, settings or hooks, and the
+  picker reads the usage again to say whether the window started. Outside a terminal it prints
+  the table instead.
+- `rclaude account list` prints the table; `list --json` is the form for scripts.
 - `rclaude account use <name>` switches without asking.
-- `rclaude account save <name>` names the login the box has now; do this first.
+- `rclaude account save <name>` names the login the box has now.
 - `rclaude account add <name>` logs in to another account: Claude's `auth login` runs on the
   box and opens its page in the laptop browser. Run it again for an account that was signed out.
+- `rclaude account rename <name> <new name>` renames an account.
 - `rclaude account remove <name>` forgets an account other than the active one.
+- `rclaude account start <name>` sends the account its one request, as s does.
 
 Claude Code keeps the box's login in `~/.claude/.credentials.json` (`claudeAiOauth`) and
 `~/.claude.json` (`oauthAccount`). A switch replaces only those two keys, under Claude Code's own
@@ -113,7 +123,9 @@ refreshes the inactive logins a week before they would expire, and each day thos
 unknown; it fails, refreshing none, while nothing says whose the box's login is. Usage comes from
 `api.anthropic.com/api/oauth/usage`, the endpoint Claude Code's `/usage` reads, and the live
 login's account from `/api/oauth/profile`; both are undocumented, so a change in their shape
-shows as an error.
+shows as an error. A weekly window with no reset time is taken as not started. To start an
+inactive account's window, Claude Code runs with a copy of its login in a dir of its own, under
+the vault's lock, and any tokens it rotates there go back to the account.
 
 `rcodex account` does the same for Codex's ChatGPT logins, with one difference: a running Codex
 keeps the login it started with, so a switch reaches only the Codex sessions started after it.
@@ -127,7 +139,8 @@ token is expired or within 15 minutes of expiry, when a Codex refreshes it; a Co
 refreshes because a request was refused can still race a switch, which is rare. The timer refreshes an idle
 login a day before its access token expires, as often as a Codex that used it would. Usage
 comes from `chatgpt.com/backend-api/wham/usage`, the endpoint Codex's `/status` reads, which is
-undocumented too. Accounts need Codex's logins in `auth.json`, the default: a `config.toml`
+undocumented too. A Codex weekly window always has a reset time, so `rcodex account` has no s
+and no `start`. Accounts need Codex's logins in `auth.json`, the default: a `config.toml`
 with another `cli_auth_credentials_store` is refused.
 
 Account commands use `~/.claude` and `~/.codex`, as the sessions do, and refuse

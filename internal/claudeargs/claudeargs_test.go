@@ -207,3 +207,11 @@ func TestSignInArgs(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestHelloArgsAskTheCheapestModelWithNothingOfTheBoxs(t *testing.T) {
+	got, ok := (CLI{}).HelloArgs()
+	want := []string{"-p", "hi", "--model", "haiku", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", "project"}
+	if !ok || !slices.Equal(got, want) {
+		t.Fatalf("got %q, %v", got, ok)
+	}
+}

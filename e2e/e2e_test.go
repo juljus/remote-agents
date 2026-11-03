@@ -1521,7 +1521,7 @@ func TestAccountsAddListAndSwitchTheBoxLogin(t *testing.T) {
 	cfg := boxHome + "/" + boxTestDir + "/accounts-claude"
 	vault := box.AccountsDir("claude")
 	if _, err := onBox(fmt.Sprintf(`set -e
-rm -rf %[1]q %[2]q && mkdir -p %[1]q
+rm -rf %[1]q %[2]q %[3]q/started-* && mkdir -p %[1]q
 expires=$(( $(date +%%s) * 1000 + 3600000 ))
 printf '{"claudeAiOauth":{"accessToken":"fake-access-work-1","refreshToken":"fake-refresh-work-1","expiresAt":%%s}}' "$expires" > %[1]q/.credentials.json
 printf '{"numStartups":1,"oauthAccount":{"accountUuid":"acc-work","organizationUuid":"org-work","emailAddress":"work@example.com"}}' > %[1]q/.claude.json
@@ -1529,7 +1529,7 @@ echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir)); err != nil 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if out, err := onBox(fmt.Sprintf(`rm -rf %q %q`, cfg, vault)); err != nil {
+		if out, err := onBox(fmt.Sprintf(`rm -rf %q %q %q/started-*`, cfg, vault, boxHome+"/"+boxTestDir)); err != nil {
 			t.Logf("cleanup: %v %s", err, out)
 		}
 	})
@@ -1553,12 +1553,18 @@ echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir)); err != nil 
 	}
 
 	list := run("list")
-	list.expect(`(?s)1\s+home\s+home@example.com\s+40% until \S+.*2\*\s+work\s+work@example.com\s+40% until`, 20*time.Second)
+	list.expect(`(?s)home\s+home@example.com\s+▰▰▰▰▰ 100% left · not started\n.*work\s+work@example.com\s+▰▰▰▰▰ 100% left · not started\s+active`, 20*time.Second)
 	waitOK(t, list)
 
+	// The picker starts home's week as home, then switches the box to it.
 	pick := run()
-	pick.expect(`Switch to \(1-2 or a name, Enter keeps work\): `, 20*time.Second)
-	pick.send("1\r")
+	pick.expect(`▸ work .*\n.*s start week · q quit`, 20*time.Second)
+	pick.send("k")
+	mark := len(pick.text())
+	pick.expectAfter(mark, `▸ home `, 10*time.Second)
+	pick.send("s")
+	pick.expectAfter(mark, `started home's week; it resets \w{3} \d\d:\d\d`, 60*time.Second)
+	pick.send("\r")
 	pick.expect(`switched the box to home; running sessions use it from their next request`, 20*time.Second)
 	waitOK(t, pick)
 
@@ -1566,11 +1572,15 @@ echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir)); err != nil 
 grep -o 'fake-refresh-[a-z]*-[0-9]*' %[1]q/.credentials.json
 grep -o '"emailAddress": "[^"]*"' %[1]q/.claude.json
 stat -c '%%a %%n' %[2]q %[2]q/work.json %[2]q/home.json | sed 's|%[2]s|VAULT|'
-find ~/.config/systemd/user -name '%[3]s-accounts-refresh*' | wc -l`, cfg, vault, boxInstall))
+find ~/.config/systemd/user -name '%[3]s-accounts-refresh*' | wc -l
+ls -A %[2]q
+cat %[4]q/started-home`, cfg, vault, boxInstall, boxHome+"/"+boxTestDir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "fake-refresh-home-1\n\"emailAddress\": \"home@example.com\"\n700 VAULT\n600 VAULT/work.json\n600 VAULT/home.json\n0\n"
+	want := "fake-refresh-home-1\n\"emailAddress\": \"home@example.com\"\n700 VAULT\n600 VAULT/work.json\n600 VAULT/home.json\n0\n" +
+		".live.json\n.lock\nhome.json\nwork.json\n" +
+		"-p hi --model haiku --no-session-persistence --strict-mcp-config --setting-sources project\n"
 	if out != want {
 		t.Fatalf("box state:\n%s\nwant\n%s", out, want)
 	}
@@ -1615,12 +1625,15 @@ echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir, live)); err !
 	}
 
 	list := run("list")
-	list.expect(`(?s)1\s+home\s+home@example.com\s+-\s+40% until \S+.*2\*\s+work\s+work@example.com\s+-\s+40% until`, 20*time.Second)
+	list.expect(`(?s)home\s+home@example.com\s+▰▰▰▱▱ 60% left · resets \w{3} \d\d:\d\d\n.*work\s+work@example.com\s+▰▰▰▱▱ 60% left · resets \w{3} \d\d:\d\d\s+active`, 20*time.Second)
 	waitOK(t, list)
 
 	pick := run()
-	pick.expect(`Switch to \(1-2 or a name, Enter keeps work\): `, 20*time.Second)
-	pick.send("1\r")
+	pick.expect(`▸ work .*\n.*d remove · q quit`, 20*time.Second)
+	pick.send("\x1b[A")
+	mark := len(pick.text())
+	pick.expectAfter(mark, `▸ home `, 10*time.Second)
+	pick.send("\r")
 	pick.expect(`switched the box's Codex to home; Codex sessions started from now on use it`, 20*time.Second)
 	waitOK(t, pick)
 

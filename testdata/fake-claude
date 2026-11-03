@@ -8,7 +8,7 @@
 # shell; daemon <s> starts a sleep that detaches into its own session; hog
 # allocates memory until it is killed; lines <n> prints n numbered lines.
 # auth login signs in as the account named in ~/remote-agents-test/next-login,
-# opening a URL like Claude does.
+# opening a URL like Claude does; -p hi starts the account's week at fake-oauth.
 echo "fake-claude args=$*"
 if [ "$1 $2" = "auth login" ]; then
   tag="$(cat "$HOME/remote-agents-test/next-login")"
@@ -17,6 +17,13 @@ if [ "$1 $2" = "auth login" ]; then
   printf '{"claudeAiOauth":{"accessToken":"fake-access-%s-1","refreshToken":"fake-refresh-%s-1","expiresAt":%s,"scopes":["user:inference"]}}' "$tag" "$tag" "$expires" > "$CLAUDE_CONFIG_DIR/.credentials.json"
   printf '{"oauthAccount":{"accountUuid":"acc-%s","organizationUuid":"org-%s","emailAddress":"%s@example.com"}}' "$tag" "$tag" "$tag" > "$CLAUDE_CONFIG_DIR/.claude.json"
   echo "Login successful."
+  exit 0
+fi
+if [ "$1 $2" = "-p hi" ]; then
+  # A one-request run starts the account's weekly window at fake-oauth.
+  tag="$(grep -o 'fake-access-[a-z]*' "$CLAUDE_CONFIG_DIR/.credentials.json")" || exit 1
+  echo "$*" > "$HOME/remote-agents-test/started-${tag#fake-access-}"
+  echo "Hi!"
   exit 0
 fi
 id=""

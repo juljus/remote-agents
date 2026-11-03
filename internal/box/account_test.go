@@ -81,7 +81,7 @@ func TestAccountAddsASignInAndListsItsUsage(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &listing); err != nil {
 		t.Fatalf("%v: %s", err, out.String())
 	}
-	if len(listing.Accounts) != 1 || listing.Accounts[0].Name != "home" || listing.Accounts[0].SevenDay == nil || listing.Accounts[0].SevenDay.Utilization != 7 || listing.Accounts[0].Error != "" {
+	if len(listing.Accounts) != 1 || listing.Accounts[0].Name != "home" || listing.Accounts[0].Weekly == nil || listing.Accounts[0].Weekly.Utilization != 7 || listing.Accounts[0].Error != "" {
 		t.Fatalf("listing %s", out.String())
 	}
 }
@@ -275,7 +275,7 @@ func TestCodexAccountAddsListsAndSwitches(t *testing.T) {
 	if err := json.Unmarshal([]byte(run("list")), &listing); err != nil {
 		t.Fatal(err)
 	}
-	if len(listing.Accounts) != 2 || listing.Accounts[1].Name != "work" || !listing.Accounts[1].Active || listing.Accounts[0].SevenDay == nil || listing.Accounts[0].SevenDay.Utilization != 40 {
+	if len(listing.Accounts) != 2 || listing.Accounts[1].Name != "work" || !listing.Accounts[1].Active || listing.Accounts[0].Weekly == nil || listing.Accounts[0].Weekly.Utilization != 40 {
 		t.Fatalf("listing %+v", listing)
 	}
 	// A run's Codex holds its session and a subagent's: the switch leaves both on work.
@@ -429,5 +429,86 @@ func TestCodexSwitchSaysWhenItCannotTellTheRunningSessions(t *testing.T) {
 	err := codexSwitched(l, home, &out, "home")
 	if err == nil || !strings.Contains(err.Error(), "could not tell which Codex sessions are running") || !strings.Contains(out.String(), "switched the box's Codex to home") {
 		t.Fatalf("%v\n%s", err, out.String())
+	}
+}
+
+// fakeHello stands in for `claude -p hi`: it records how it ran and, given
+// an account's config dir, refreshes the login there as Claude Code may.
+const fakeHello = `#!/bin/sh
+echo "args=$* config=${CLAUDE_CONFIG_DIR:-own} empty=$(ls -A | wc -l | tr -d " ")" >> "$(dirname "$0")/asked"
+if [ -n "$CLAUDE_CONFIG_DIR" ]; then
+  printf '{"claudeAiOauth":{"accessToken":"fake-access-w2","refreshToken":"fake-refresh-w2","expiresAt":4102444800000}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+fi
+`
+
+func TestAccountStartSendsTheAccountARequest(t *testing.T) {
+	l := testLayout(t)
+	l.Name = "remote-agents-test"
+	cfg := filepath.Join(l.Home, "cfg")
+	if err := os.Mkdir(cfg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/oauth/profile" || r.Header.Get("Authorization") != "Bearer fake-access" {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"account":{"uuid":"acc-home"},"organization":{"uuid":"org-home"}}`)
+	}))
+	defer api.Close()
+	writeAccountsConfig(t, l, fmt.Sprintf("[claude]\nconfig_dir = %q\napi_url = %q\n", cfg, api.URL))
+	for file, body := range map[string]string{
+		".credentials.json": `{"claudeAiOauth":{"accessToken":"fake-access","refreshToken":"fake-refresh","expiresAt":4102444800000}}`,
+		".claude.json":      `{"oauthAccount":{"accountUuid":"acc-home","organizationUuid":"org-home","emailAddress":"home@example.com"}}`,
+	} {
+		if err := os.WriteFile(filepath.Join(cfg, file), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	work := t.TempDir()
+	script := filepath.Join(work, "claude")
+	if err := os.WriteFile(script, []byte(fakeHello), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(string) (string, bool) { return "", false }
+	var out bytes.Buffer
+	run := func(args ...string) error {
+		out.Reset()
+		return Account(context.Background(), l, append([]string{"claude"}, args...), IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}, []string{"HOME=" + l.Home}, lookup)
+	}
+	if err := run("save", "home"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.AccountsDir("claude"), "work.json"), []byte(`{"claudeAiOauth":{"accessToken":"fake-access-w","refreshToken":"fake-refresh-w","expiresAt":4102444800000},"oauthAccount":{"accountUuid":"acc-work","organizationUuid":"org-work","emailAddress":"work@example.com"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token, err := spec.Spec{Mode: spec.ModeExec, Workdir: work, Argv: []string{script, "-p", "hi"}}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"work", "home"} {
+		if err := run("start", name, token); err != nil || out.String() != "sent account "+name+" a request\n" {
+			t.Fatalf("start %s: %v\n%s", name, err, out.String())
+		}
+	}
+	asked, err := os.ReadFile(filepath.Join(work, "asked"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The box's own account asks with the install's live login, which is
+	// cfg here, never with ~/.claude.
+	live, err := filepath.EvalSymlinks(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(asked)), "\n"); len(lines) != 2 || !strings.Contains(lines[0], "args=-p hi config=") || strings.Contains(lines[0], "config="+live+" ") || !strings.HasSuffix(lines[0], "empty=2") || lines[1] != "args=-p hi config="+live+" empty=0" {
+		t.Fatalf("asked:\n%s", asked)
+	}
+	entry, err := os.ReadFile(filepath.Join(l.AccountsDir("claude"), "work.json"))
+	if err != nil || !strings.Contains(string(entry), "fake-refresh-w2") {
+		t.Fatalf("work entry: %v", err)
+	}
+	if err := Account(context.Background(), l, []string{"codex", "start", "x", token}, IO{}, nil, lookup); err == nil {
+		t.Fatal("codex start ran")
 	}
 }

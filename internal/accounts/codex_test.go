@@ -236,10 +236,10 @@ func TestCodexUsageListsEveryAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := rowSummary(l); got != "* home ok" {
+	if got := rowSummary(l); got != "*:40 home:40 ok:20" {
 		t.Fatalf("rows %q", got)
 	}
-	if l.Accounts[0].Email != "work@example.com" || l.Accounts[0].SevenDay == nil || l.Accounts[0].SevenDay.Utilization != 40 || l.Accounts[1].SevenDay.Utilization != 40 {
+	if l.Accounts[0].Email != "work@example.com" || l.Accounts[0].Weekly == nil || l.Accounts[0].Weekly.Utilization != 40 || l.Accounts[1].Weekly.Utilization != 40 {
 		t.Fatalf("listing %+v", l)
 	}
 	if f.entryRefresh("home") == "fake-refresh-home-1" {
@@ -301,7 +301,7 @@ func TestCodexAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range dirents {
-		if strings.HasPrefix(d.Name(), signInDirPrefix) {
+		if strings.HasPrefix(d.Name(), scratchPrefix) {
 			t.Fatalf("sign-in dir %s left", d.Name())
 		}
 	}
@@ -328,5 +328,17 @@ func TestCodexSaveAndRemove(t *testing.T) {
 	}
 	if _, err := os.Stat(f.vault.files().entryPath("home")); !os.IsNotExist(err) {
 		t.Fatalf("home left: %v", err)
+	}
+}
+
+func TestCodexRename(t *testing.T) {
+	f := newCodexFixture(t)
+	f.seed("work", "work", 1, later)
+	f.seed("home", "home", 1, later)
+	if err := f.vault.Rename(ctx, "work", "job"); err != nil || f.entryRefresh("job") != "fake-refresh-work-1" {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := f.vault.Rename(ctx, "job", "home"); err == nil || !strings.Contains(err.Error(), "exists already") {
+		t.Fatalf("onto home: %v", err)
 	}
 }

@@ -1,6 +1,7 @@
 package box
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,7 +25,7 @@ import (
 	"remote-agents/internal/spec"
 )
 
-const AccountUsage = "usage: remote-agents-box account [claude|codex] keep-fresh | claude|codex list | use <name> | save <name> | remove <name> | add <name> <exec spec>"
+const AccountUsage = "usage: remote-agents-box account [claude|codex] keep-fresh | claude|codex list | use <name> | save <name> | remove <name> | rename <name> <new name> | add <name> <exec spec> | claude start <name> <exec spec>"
 
 // vault is one agent's saved accounts, as account commands use them.
 type vault interface {
@@ -32,6 +33,7 @@ type vault interface {
 	Use(ctx context.Context, name string) (bool, error)
 	Save(ctx context.Context, name string) error
 	Remove(ctx context.Context, name string) error
+	Rename(ctx context.Context, old, new string) error
 	Add(ctx context.Context, name string, signIn func(dir string) error) (accounts.Added, error)
 	KeepFresh(ctx context.Context, log io.Writer) error
 }
@@ -50,6 +52,9 @@ type accountAgent struct {
 type openVault struct {
 	vault
 	switched func(stdout io.Writer, name string) error
+	// start sends an account a request through ask, to start its weekly
+	// window; nil for an agent whose window does not start that way.
+	start func(ctx context.Context, name string, ask func(workdir, configDir string) error) error
 }
 
 var accountAgents = map[string]accountAgent{
@@ -81,7 +86,7 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 		return errors.New(AccountUsage)
 	}
 	verb, rest := args[1], args[2:]
-	need := map[string]int{"list": 0, "use": 1, "save": 1, "remove": 1, "add": 2, "keep-fresh": 0}
+	need := map[string]int{"list": 0, "use": 1, "save": 1, "remove": 1, "rename": 2, "add": 2, "start": 2, "keep-fresh": 0}
 	if n, ok := need[verb]; !ok || len(rest) != n {
 		return errors.New(AccountUsage)
 	}
@@ -124,13 +129,30 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 		}
 		fmt.Fprintf(stdio.Stdout, "removed %s\n", rest[0])
 		return nil
-	case "add":
-		s, err := spec.Decode(rest[1])
+	case "rename":
+		if err := v.Rename(ctx, rest[0], rest[1]); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdio.Stdout, "renamed %s to %s\n", rest[0], rest[1])
+		return nil
+	case "start":
+		if v.start == nil {
+			return fmt.Errorf("%s accounts have no weekly window a request starts", kind)
+		}
+		s, err := execSpec(rest[1])
 		if err != nil {
 			return err
 		}
-		if s.Mode != spec.ModeExec {
-			return fmt.Errorf("add needs an exec spec, got mode %q", s.Mode)
+		ask := func(workdir, configDir string) error { return askAgent(ctx, l, agent, s, base, workdir, configDir) }
+		if err := v.start(ctx, rest[0], ask); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdio.Stdout, "sent account %s a request\n", rest[0])
+		return nil
+	case "add":
+		s, err := execSpec(rest[1])
+		if err != nil {
+			return err
 		}
 		signIn := func(dir string) error { return signIn(l, agent, s, base, dir, stdio) }
 		added, err := v.Add(ctx, rest[0], signIn)
@@ -181,7 +203,8 @@ func openClaudeVault(l boxlayout.Layout) (openVault, error) {
 		_, err := fmt.Fprintf(w, "switched the box to %s; running sessions use it from their next request\n", name)
 		return err
 	}
-	return openVault{vault: accounts.ClaudeVault{Dir: l.AccountsDir("claude"), Store: store}, switched: switched}, nil
+	v := accounts.ClaudeVault{Dir: l.AccountsDir("claude"), Store: store}
+	return openVault{vault: v, switched: switched, start: v.Start}, nil
 }
 
 func openCodexVault(l boxlayout.Layout) (openVault, error) {
@@ -284,27 +307,75 @@ func heldCodexSessions(home string) ([]string, error) {
 	}
 }
 
-// signIn runs the spec's sign-in command with dir as the agent's config dir
-// and the session's shims, so the login's browser opens on the laptop and
-// its callback reaches the box.
-func signIn(l boxlayout.Layout, agent accountAgent, s spec.Spec, base []string, dir string, stdio IO) error {
+func execSpec(token string) (spec.Spec, error) {
+	s, err := spec.Decode(token)
+	if err != nil {
+		return spec.Spec{}, err
+	}
+	if s.Mode != spec.ModeExec {
+		return spec.Spec{}, fmt.Errorf("want an exec spec, got mode %q", s.Mode)
+	}
+	return s, nil
+}
+
+// agentCommand is the spec's command with the session's shims, and with
+// configDir, when set, as the agent's config dir.
+func agentCommand(ctx context.Context, l boxlayout.Layout, agent accountAgent, s spec.Spec, base []string, configDir string) (*exec.Cmd, error) {
 	// The base environment sets none of these either: Account refuses them.
 	for _, key := range agent.envVars {
 		if _, set := s.Env[key]; set {
-			return fmt.Errorf("the sign-in spec sets %s, which would move the login out of its sign-in dir", key)
+			return nil, fmt.Errorf("the spec sets %s, which would move the login it runs with", key)
 		}
 	}
 	path, env, err := prepareAgent(l, s, base)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	env = append(env, agent.dirVar+"="+dir)
-	cmd := exec.Command(path, s.Argv[1:]...)
+	if configDir != "" {
+		env = append(env, agent.dirVar+"="+configDir)
+	}
+	cmd := exec.CommandContext(ctx, path, s.Argv[1:]...)
 	cmd.Args[0] = s.Argv[0]
 	cmd.Dir, cmd.Env = s.Workdir, env
+	return cmd, nil
+}
+
+// signIn runs the spec's sign-in command with dir as the agent's config dir
+// and the session's shims, so the login's browser opens on the laptop and
+// its callback reaches the box.
+func signIn(l boxlayout.Layout, agent accountAgent, s spec.Spec, base []string, dir string, stdio IO) error {
+	cmd, err := agentCommand(context.Background(), l, agent, s, base, dir)
+	if err != nil {
+		return err
+	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio.Stdin, stdio.Stdout, stdio.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("signing in: %w", err)
 	}
 	return nil
+}
+
+// askTimeout bounds one request an account sends to start its window.
+const askTimeout = 2 * time.Minute
+
+// askAgent runs the spec's one-request command in workdir, its output kept
+// from the terminal and quoted only when it fails.
+func askAgent(ctx context.Context, l boxlayout.Layout, agent accountAgent, s spec.Spec, base []string, workdir, configDir string) error {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
+	defer cancel()
+	cmd, err := agentCommand(ctx, l, agent, s, base, configDir)
+	if err != nil {
+		return err
+	}
+	var out bytes.Buffer
+	cmd.Dir, cmd.Stdout, cmd.Stderr = workdir, &out, &out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("the request failed (%w): %s", err, lastLine(out.String()))
+	}
+	return nil
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	return lines[len(lines)-1]
 }

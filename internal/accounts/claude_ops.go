@@ -2,11 +2,13 @@ package accounts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"time"
 
+	"remote-agents/internal/atomicfile"
 	"remote-agents/internal/claudeauth"
 )
 
@@ -64,20 +66,13 @@ func (v ClaudeVault) Usage(ctx context.Context) (Listing, error) {
 	if err != nil {
 		return Listing{}, err
 	}
-	return readUsage(rows, func(login claudeauth.Login) (*Window, *Window, error) {
+	return readUsage(rows, func(login claudeauth.Login) (*Window, error) {
 		u, err := v.Store.Usage(ctx, login)
-		if err != nil {
-			return nil, nil, err
+		if err != nil || u.Weekly == nil {
+			return nil, err
 		}
-		return claudeWindow(u.FiveHour), claudeWindow(u.SevenDay), nil
+		return &Window{Utilization: u.Weekly.Utilization, ResetsAt: u.Weekly.ResetsAt}, nil
 	}), nil
-}
-
-func claudeWindow(w *claudeauth.Window) *Window {
-	if w == nil {
-		return nil
-	}
-	return newWindow(w.Utilization, w.ResetsAt)
 }
 
 // Use switches every Claude Code on the box to the named account, keeping
@@ -186,6 +181,92 @@ func (v ClaudeVault) nameLive(s *claudeState, l *live, name string, account clau
 	return v.markSwitched(name)
 }
 
+// Rename gives an account another name, which the record of the last
+// switch follows.
+func (v ClaudeVault) Rename(_ context.Context, old, new string) error {
+	return v.locked(func(s *claudeState) error {
+		if err := renameEntry(v.files(), s, old, new); err != nil {
+			return err
+		}
+		last, err := v.lastSwitched()
+		if err != nil || last != old {
+			return err
+		}
+		return v.markSwitched(new)
+	})
+}
+
+// Start sends the account one request through ask, which starts its weekly
+// window when it has not started. ask runs Claude Code in workdir, an empty
+// dir, with configDir as its config dir ("" for ~/.claude); the box's own
+// account asks with the box's login as it is, in its own dir. Any
+// other account asks from a config dir that holds its login, and keeps the
+// tokens Claude Code may rotate there.
+func (v ClaudeVault) Start(ctx context.Context, name string, ask func(workdir, configDir string) error) error {
+	if err := ValidName(name); err != nil {
+		return err
+	}
+	return v.locked(func(s *claudeState) error {
+		e, ok := s.entries[name]
+		if !ok {
+			return fmt.Errorf("no account %s", name)
+		}
+		l, err := v.live(ctx, s)
+		if err != nil {
+			return err
+		}
+		switch {
+		case l.state != liveNone && l.active == name:
+			return v.files().scratch(func(dir string) error { return ask(dir, v.Store.Paths.EnvDir()) })
+		case l.state == liveUnknown:
+			return fmt.Errorf("the box's login is unverified (%s) and may be account %s's; %s, then start it", l.unverified, name, unverifiedHint)
+		case l.possiblyLive(name):
+			return copyError(name)
+		}
+		login, err := v.fresh(ctx, s, name)
+		if err != nil {
+			return err
+		}
+		return v.files().scratch(func(dir string) error {
+			paths, err := claudeauth.PathsIn(dir)
+			if err != nil {
+				return err
+			}
+			if err := writeJSON(paths.Credentials(), map[string]any{"claudeAiOauth": login}); err != nil {
+				return err
+			}
+			if err := writeJSON(paths.GlobalConfig, map[string]any{"oauthAccount": e.Account}); err != nil {
+				return err
+			}
+			asked := ask(dir, dir)
+			return errors.Join(asked, v.keepRotated(ctx, s, name, paths, login))
+		})
+	})
+}
+
+// keepRotated saves to name's entry the login Claude Code left in paths
+// when it refreshed the one it was given.
+func (v ClaudeVault) keepRotated(ctx context.Context, s *claudeState, name string, paths claudeauth.Paths, given claudeauth.Login) error {
+	store := v.Store
+	store.Paths = paths
+	after, err := store.ReadLive(ctx)
+	if err != nil {
+		return fmt.Errorf("reading what Claude Code left of account %s's login: %w", name, err)
+	}
+	if after.Login == nil || after.Login.SignedOut() || after.Login.SameTokens(given) {
+		return nil
+	}
+	return v.writeEntry(s, name, claudeEntry{Login: *after.Login, Account: s.entries[name].Account})
+}
+
+func writeJSON(path string, v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(path, data, entryMode)
+}
+
 // Remove forgets an account that is not, and may not be, the live one.
 func (v ClaudeVault) Remove(ctx context.Context, name string) error {
 	if err := ValidName(name); err != nil {
@@ -219,7 +300,7 @@ func (v ClaudeVault) Add(ctx context.Context, name string, signIn func(configDir
 		made claudeauth.Live
 		id   claudeauth.Identity
 	)
-	err = v.files().signIn(func(dir string) error {
+	err = v.files().scratch(func(dir string) error {
 		if err := signIn(dir); err != nil {
 			return err
 		}
@@ -230,7 +311,7 @@ func (v ClaudeVault) Add(ctx context.Context, name string, signIn func(configDir
 		return 0, err
 	}
 	err = v.locked(func(s *claudeState) error {
-		if err := v.files().removeStaleSignIns(); err != nil {
+		if err := v.files().removeStaleScratch(); err != nil {
 			return err
 		}
 		l, err := v.live(ctx, s)

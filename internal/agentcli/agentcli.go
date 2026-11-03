@@ -59,4 +59,8 @@ type CLI interface {
 	// SignInArgs follow the agent command to sign it in to an account,
 	// opening the account's login page in a browser.
 	SignInArgs() []string
+	// HelloArgs follow the agent command to send its account one short
+	// request, which starts a weekly window that has not started; ok is
+	// false for an agent whose windows no request starts.
+	HelloArgs() (args []string, ok bool)
 }
