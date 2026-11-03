@@ -411,6 +411,11 @@ func (tm *term) marks() []string {
 	return found
 }
 
+// cornerOf is where marks finds the remote mark when it is in the corner of a cols by rows screen.
+func cornerOf(cols, rows int) []string {
+	return []string{fmt.Sprintf("screen %d,%d", cols-2, rows-1)}
+}
+
 // expectMarks waits until the screen and scrollback show the remote mark exactly at want.
 func (tm *term) expectMarks(want []string, timeout time.Duration) {
 	tm.t.Helper()
@@ -596,7 +601,7 @@ func TestSessionLifecycle(t *testing.T) {
 // runs and after it reattaches, scrolled output leaves no copies of it, and it
 // goes when the session ends.
 func TestTheCornerMarksTheRemoteSession(t *testing.T) {
-	bottomRight := []string{fmt.Sprintf("screen %d,%d", termCols-2, termRows-1)}
+	bottomRight := cornerOf(termCols, termRows)
 	tm := start(t, "rfakeclaude")
 	tm.drawnAfter(0)
 	tm.expectMarks(bottomRight, 10*time.Second)
@@ -632,9 +637,9 @@ func TestTheCornerMarksTheRemoteSession(t *testing.T) {
 func TestRealClaudeGetsTheMarkInTheCornerAfterAResize(t *testing.T) {
 	tm := start(t, "risolatedclaude")
 	tm.expectCompact(0, "Not logged in", 30*time.Second)
-	tm.expectMarks([]string{fmt.Sprintf("screen %d,%d", termCols-2, termRows-1)}, 10*time.Second)
+	tm.expectMarks(cornerOf(termCols, termRows), 10*time.Second)
 	tm.resize(termCols+10, termRows+10)
-	tm.expectMarks([]string{fmt.Sprintf("screen %d,%d", termCols+8, termRows+9)}, 10*time.Second)
+	tm.expectMarks(cornerOf(termCols+10, termRows+10), 10*time.Second)
 	tm.send("\x03")
 	time.Sleep(300 * time.Millisecond)
 	tm.send("\x03")

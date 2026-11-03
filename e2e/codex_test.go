@@ -46,6 +46,7 @@ func TestCodexSessionLifecycle(t *testing.T) {
 		t.Fatalf("agent env: BROWSER=%s SESSION=%s", browser, session)
 	}
 	turn(t, tm, "prompt", "stop")
+	tm.expectMarks(cornerOf(termCols, termRows), 10*time.Second)
 
 	mark := len(tm.text())
 	if err := syscall.Kill(tm.sshChild(), syscall.SIGKILL); err != nil {
