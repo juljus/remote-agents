@@ -146,10 +146,8 @@ chmod +x %[1]s/claude-isolated`, boxTestDir, boxHome)); err != nil {
 		return 0, err
 	}
 	writeExec := func(path, body string) error { return os.WriteFile(path, []byte("#!/bin/bash\n"+body+"\n"), 0o755) }
-	// The block file simulates an outage: every new connection fails like an
-	// unreachable network. RA_E2E_REMOTE_ENV exports variables for the remote command.
+	// The block file simulates an outage: every new connection fails like an unreachable network.
 	if err := writeExec(filepath.Join(sshDir, "ssh"), fmt.Sprintf(`if [ -e %q ]; then sleep 0.5; echo "ssh: connect to host %s port 22: Network is unreachable" >&2; exit 255; fi
-if [ -n "$RA_E2E_REMOTE_ENV" ]; then set -- "${@:1:$#-1}" "export $RA_E2E_REMOTE_ENV; ${!#}"; fi
 exec %q "$@"`, blockFile, host, realSSH)); err != nil {
 		return 0, err
 	}
@@ -1489,7 +1487,7 @@ for i in $(seq 50); do [ -s %[3]q ] && break; sleep 0.1; done
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if out, err := onBox(fmt.Sprintf(`kill "$(cat %q)"; rm -rf %q %q %q`, pidFile, cfg, vault, portFile)); err != nil {
+		if out, err := onBox(fmt.Sprintf(`kill "$(cat %[1]q)"; rm -rf %[1]q %[2]q %[3]q %[4]q %[5]q`, pidFile, cfg, vault, portFile, box.AccountsConfig())); err != nil {
 			t.Logf("cleanup: %v %s", err, out)
 		}
 	})
@@ -1498,11 +1496,13 @@ for i in $(seq 50); do [ -s %[3]q ] && break; sleep 0.1; done
 		t.Fatal(err)
 	}
 	api := "http://127.0.0.1:" + strings.TrimSpace(port)
-	extra := []string{fmt.Sprintf("RA_E2E_REMOTE_ENV=CLAUDE_CONFIG_DIR=%s REMOTE_AGENTS_CLAUDE_API_URL=%s REMOTE_AGENTS_CLAUDE_TOKEN_URL=%s/token", cfg, api, api)}
+	// The test install has no accounts config otherwise, so its account commands refuse to run.
+	if _, err := onBox(fmt.Sprintf(`printf 'claude_config_dir = "%%s"\ntoken_url = "%%s/token"\napi_url = "%%s"\n' %q %q %q > %q`, cfg, api, api, box.AccountsConfig())); err != nil {
+		t.Fatal(err)
+	}
 	run := func(args ...string) *term {
 		t.Helper()
-		tm := startEnv(t, extra, "rfakeclaude", append([]string{"account"}, args...)...)
-		return tm
+		return start(t, "rfakeclaude", append([]string{"account"}, args...)...)
 	}
 	waitOK := func(tm *term) {
 		t.Helper()
@@ -1537,11 +1537,11 @@ for i in $(seq 50); do [ -s %[3]q ] && break; sleep 0.1; done
 grep -o 'fake-refresh-[a-z]*-[0-9]*' %[1]q/.credentials.json
 grep -o '"emailAddress": "[^"]*"' %[1]q/.claude.json
 stat -c '%%a %%n' %[2]q %[2]q/work.json %[2]q/home.json | sed 's|%[2]s|VAULT|'
-systemctl --user is-enabled %[3]s-accounts-refresh.timer`, cfg, vault, boxInstall))
+find ~/.config/systemd/user -name '%[3]s-accounts-refresh*' | wc -l`, cfg, vault, boxInstall))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "fake-refresh-home-1\n\"emailAddress\": \"home@example.com\"\n700 VAULT\n600 VAULT/work.json\n600 VAULT/home.json\nenabled\n"
+	want := "fake-refresh-home-1\n\"emailAddress\": \"home@example.com\"\n700 VAULT\n600 VAULT/work.json\n600 VAULT/home.json\n0\n"
 	if out != want {
 		t.Fatalf("box state:\n%s\nwant\n%s", out, want)
 	}

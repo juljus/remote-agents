@@ -97,16 +97,27 @@ session at once, running ones included, from their next request to Claude.
 - `rclaude account remove <name>` forgets an account other than the active one.
 
 Claude Code keeps the box's login in `~/.claude/.credentials.json` (`claudeAiOauth`) and
-`~/.claude.json` (`oauthAccount`), or under `$CLAUDE_CONFIG_DIR`. A switch replaces only those
-two keys, the way Claude Code itself does under its own locks; running sessions notice the
-changed file. The other accounts wait in `~/.config/remote-agents/accounts/claude/<name>.json`
-(mode 0600, directory 0700) on the box. Refresh tokens change with every refresh, so each
-account command first asks Anthropic whom the live login signs in as and copies it back to that
-account, and a daily timer
-(`remote-agents-accounts-refresh.timer`) refreshes logins nobody uses a week before they would
-expire. Usage comes from `api.anthropic.com/api/oauth/usage`, the endpoint Claude Code's `/usage`
-reads, and the live login's account from `/api/oauth/profile`; both are undocumented, so a change
-in their shape shows as an error.
+`~/.claude.json` (`oauthAccount`). A switch replaces only those two keys, under Claude Code's own
+locks, and only if no session refreshed or replaced the login meanwhile; running sessions notice
+the changed file. The other accounts wait in `~/.config/remote-agents/accounts/claude/<name>.json`
+(mode 0600, directory 0700) on the box.
+
+Nothing here refreshes the live login: Claude Code does. Its refresh tokens change with every
+refresh, so each account command asks Anthropic whom the live login signs in as and copies it
+back to that account. When it can't (the access token expired while no session ran, or was
+refused), the login is unverified: its account is the one whose saved copy holds the same
+token, or the one Claude Code's record and the last switch agree on; a switch then keeps it
+there, unless that copy is newer. When nothing says whose it is, no account switches or refreshes
+until a session has refreshed the login. A daily timer (`remote-agents-accounts-refresh.timer`)
+refreshes the inactive logins a week before they would expire. Usage comes from
+`api.anthropic.com/api/oauth/usage`, the endpoint Claude Code's `/usage` reads, and the live
+login's account from `/api/oauth/profile`; both are undocumented, so a change in their shape
+shows as an error.
+
+Account commands refuse `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`, since the
+sessions may not see the same values. To use another config dir, set
+`claude_config_dir = "<dir>"` in `~/.config/remote-agents/accounts.toml` on the box; installs
+other than `remote-agents` must set it, so a test install never reaches the real login.
 
 ## Security model
 
