@@ -19,10 +19,13 @@ import (
 	"remote-agents/internal/sshrun"
 )
 
-// uploadTimeout bounds one paste's exchange with the box.
-const uploadTimeout = time.Minute
+// stallTimeout bounds how long one paste's exchange with the box may go without moving a byte.
+var stallTimeout = 15 * time.Second
 
-// errBoxEnded is what the exchange reads and writes once ssh has exited.
+var errStalled = errors.New("the exchange stalled")
+
+// errBoxEnded is what the exchange reads once ssh has exited; its writes fail
+// with EPIPE, or ErrClosed once the pipe is closed under them.
 var errBoxEnded = errors.New("the box ended the exchange early")
 
 // pasteRewriter is the Rewrite of an attempt's paste filter: each laptop path
@@ -69,36 +72,41 @@ type uploaded struct {
 
 // upload runs one paste-files exchange with the box over ssh.
 func upload(ctx context.Context, opts Options, files []paste.File) (uploaded, error) {
-	ctx, cancel := context.WithTimeout(ctx, uploadTimeout)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	stall := time.AfterFunc(stallTimeout, func() { cancel(errStalled) })
+	defer stall.Stop()
 	// ssh reads its stdin straight from the pipe, so its exit is not held up by a copy waiting on the laptop.
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		return uploaded{}, err
 	}
-	defer stdinW.Close()
 	stdoutR, stdoutW := io.Pipe()
 	var stderr bytes.Buffer
 	ran := make(chan reconnect.Result, 1)
 	go func() {
 		res := sshrun.Run(ctx, sshrun.PasteFilesArgv(opts.SSH, opts.Box), sshrun.Stdio{Stdin: stdinR, Stdout: stdoutW, Stderr: &stderr}, 2*time.Second)
+		// A process ssh left behind may still hold the pipes; the exchange is over all the same.
 		stdoutW.CloseWithError(errBoxEnded)
 		stdinR.Close()
+		stdinW.Close()
 		ran <- res
 	}()
-	up, err := exchange(stdinW, stdoutR, files)
+	up, err := exchange(movingWriter{stdinW, stall}, movingReader{stdoutR, stall}, files)
 	if err != nil {
-		cancel()
+		cancel(nil)
 	}
+	// ssh's exit waits on its output reaching a reader.
+	stdoutR.Close()
 	res := <-ran
-	boxEnded := errors.Is(err, errBoxEnded) || errors.Is(err, syscall.EPIPE)
+	boxEnded := errors.Is(err, errBoxEnded) || errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed)
 	switch {
 	case err != nil && !boxEnded:
 		return uploaded{}, err
 	case res.Err != nil:
 		return uploaded{}, res.Err
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return uploaded{}, fmt.Errorf("the upload to %s took over %s", opts.Box.Host, uploadTimeout)
+	case errors.Is(context.Cause(ctx), errStalled):
+		return uploaded{}, fmt.Errorf("the upload to %s stalled for %s", opts.Box.Host, stallTimeout)
 	case res.Transport:
 		return uploaded{}, fmt.Errorf("uploading to %s: %s", opts.Box.Host, res.Detail)
 	case res.ExitCode != 0:
@@ -134,7 +142,16 @@ func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, erro
 			up.refused = append(up.refused, err)
 			continue
 		}
-		if err := send(w, f); err != nil {
+		src, err := f.Open()
+		if err != nil {
+			up.refused = append(up.refused, err)
+			continue
+		}
+		err = send(w, f, src)
+		if closeErr := src.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
 			return uploaded{}, err
 		}
 		up.sent = append(up.sent, f)
@@ -155,13 +172,8 @@ func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, erro
 	return up, nil
 }
 
-// send writes f's base name and content to the box.
-func send(w io.Writer, f paste.File) error {
-	src, err := os.Open(f.Path)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
+// send writes f's base name and its content, read from src, to the box.
+func send(w io.Writer, f paste.File, src *os.File) error {
 	info, err := src.Stat()
 	if err != nil {
 		return err
@@ -173,6 +185,35 @@ func send(w io.Writer, f paste.File) error {
 		return fmt.Errorf("uploading %s: %w", f.Path, err)
 	}
 	return nil
+}
+
+// movingWriter and movingReader hold off the stall timer while bytes move through them.
+type movingWriter struct {
+	w     io.WriteCloser
+	stall *time.Timer
+}
+
+func (m movingWriter) Write(p []byte) (int, error) {
+	n, err := m.w.Write(p)
+	if n > 0 {
+		m.stall.Reset(stallTimeout)
+	}
+	return n, err
+}
+
+func (m movingWriter) Close() error { return m.w.Close() }
+
+type movingReader struct {
+	r     io.Reader
+	stall *time.Timer
+}
+
+func (m movingReader) Read(p []byte) (int, error) {
+	n, err := m.r.Read(p)
+	if n > 0 {
+		m.stall.Reset(stallTimeout)
+	}
+	return n, err
 }
 
 // noticeQuiet is how long the agent's output must pause before a notice is drawn.

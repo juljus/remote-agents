@@ -175,6 +175,75 @@ func TestAFailedUploadShowsWhyAndPastesThePathUnchanged(t *testing.T) {
 	}
 }
 
+func TestAPasteSaysWhyEachFileStayedAndUploadsTheRest(t *testing.T) {
+	h := newPTY(t)
+	dir := t.TempDir()
+	locked := filepath.Join(dir, "locked.txt")
+	if err := os.WriteFile(locked, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	shot := filepath.Join(dir, "a.png")
+	if err := os.WriteFile(shot, onePixelPNG, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receivedAt := filepath.Join(dir, "received")
+	ssh := fakeBox(t, echoLine+`; sleep 1; exit 0`, boxReplies(receivedAt, "00", "/box/pasted/abc/a.png"))
+	done := start(testOptions(ssh, h))
+	h.waitFor(t, "ready")
+	if _, err := h.master.Write([]byte("\x1b[200~" + locked + " " + shot + "\x1b[201~\n")); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor(t, "got[\x1b[200~"+locked+" /box/pasted/abc/a.png\x1b[201~]")
+	h.waitFor(t, "not uploaded: locked.txt cannot be read")
+	if r := wait(t, done); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if _, uploads := received(t, receivedAt); len(uploads) != 1 || uploads[0][0] != "a.png" {
+		t.Fatalf("uploads %q", uploads)
+	}
+}
+
+// failedPaste pastes a laptop file into a session whose box runs pasteFiles,
+// and waits for the paste to reach the session unchanged with a notice
+// holding why.
+func failedPaste(t *testing.T, pasteFiles, why string) {
+	t.Helper()
+	h := newPTY(t)
+	shot := filepath.Join(t.TempDir(), "a.png")
+	if err := os.WriteFile(shot, append(onePixelPNG, make([]byte, 1<<20)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ssh := fakeBox(t, echoLine+`; sleep 1; exit 0`, pasteFiles)
+	done := start(testOptions(ssh, h))
+	h.waitFor(t, "ready")
+	paste := "\x1b[200~" + shot + "\x1b[201~"
+	if _, err := h.master.Write([]byte(paste + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor(t, "got["+paste+"]")
+	h.waitFor(t, why)
+	if r := wait(t, done); r.err != nil {
+		t.Fatal(r.err)
+	}
+}
+
+func TestABoxThatEndsMidUploadFailsThePaste(t *testing.T) {
+	failedPaste(t, `printf '1\n0'; echo "remote-agents-box: receiving a.png: no space left" >&2; exit 1`, "no space left")
+}
+
+func TestABoxThatAnswersNonsenseFailsThePastePromptly(t *testing.T) {
+	failedPaste(t, `printf '1\n0'; cat >/dev/null; printf '3\nabc%020000d' 0`, `the box stored an upload at "abc"`)
+}
+
+func TestAStalledUploadFailsThePaste(t *testing.T) {
+	defer func(was time.Duration) { stallTimeout = was }(stallTimeout)
+	stallTimeout = 300 * time.Millisecond
+	failedPaste(t, `printf '1\n0'; sleep 5`, "stalled")
+}
+
 func TestTheSessionSeesTheTerminalSizeAndItsChanges(t *testing.T) {
 	h := newPTY(t)
 	ssh := fakeBox(t, `trap 'echo "size $(stty size)"' WINCH; echo "size $(stty size)"; IFS= read -r line; exit 0`, `exit 9`)

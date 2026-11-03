@@ -973,9 +973,11 @@ func TestRealClaudePastesLaptopClipboardImage(t *testing.T) {
 }
 
 // A pasted laptop image path, as cmux pastes a clipboard image or a terminal a
-// dropped file, reaches Claude on the box as the path of an uploaded copy.
+// dropped file, reaches Claude on the box as the path of an uploaded copy. The
+// name is a macOS screenshot's, with a narrow no-break space before PM.
 func TestRealClaudeAttachesAPastedLaptopImagePath(t *testing.T) {
-	shot := filepath.Join(t.TempDir(), "pasted shot.png")
+	const name = "Screenshot 2026-11-03 at 4.52.10\u202fPM.png"
+	shot := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(shot, onePixelPNG, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -986,7 +988,7 @@ func TestRealClaudeAttachesAPastedLaptopImagePath(t *testing.T) {
 	tm.expectCompact(mark, "[Image #1]", 15*time.Second)
 	digest := sha256.Sum256(onePixelPNG)
 	sum := hex.EncodeToString(digest[:])
-	out, err := onBox(fmt.Sprintf("sha256sum '%s/.local/state/%s/pasted/%s/pasted shot.png'", boxHome, boxInstall, sum))
+	out, err := onBox(fmt.Sprintf("sha256sum '%s/.local/state/%s/pasted/%s/%s'", boxHome, boxInstall, sum, name))
 	if err != nil || !strings.HasPrefix(out, sum+" ") {
 		t.Fatalf("the upload is not on the box: %v %s", err, out)
 	}

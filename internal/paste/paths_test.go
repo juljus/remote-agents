@@ -132,3 +132,15 @@ func TestReplaceSwapsOnlyTheGivenWords(t *testing.T) {
 		t.Fatalf("Replace = %q, want %q", got, want)
 	}
 }
+
+func TestReplaceEscapesOnlyWhatTheShellWouldReadAsSyntax(t *testing.T) {
+	kept := writeFile(t, t.TempDir(), "a.txt", []byte("x"))
+	files, err := Files([]byte(kept))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("Files = %v, %v", files, err)
+	}
+	got := string(Replace([]byte(kept), files, []string{"/p/Tööplaan (1) at 4.52\u202fPM.png"}))
+	if want := "/p/Tööplaan\\ \\(1\\)\\ at\\ 4.52\u202fPM.png"; got != want {
+		t.Fatalf("Replace = %q, want %q", got, want)
+	}
+}

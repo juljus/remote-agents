@@ -136,6 +136,19 @@ func (f File) Uploadable() error {
 	return nil
 }
 
+// Open opens f to upload it; its error, like Uploadable's, names f by its base name.
+func (f File) Open() (*os.File, error) {
+	src, err := os.Open(f.Path)
+	if err != nil {
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			err = pathErr.Err
+		}
+		return nil, fmt.Errorf("%s cannot be read: %w", filepath.Base(f.Path), err)
+	}
+	return src, nil
+}
+
 // Replace puts boxPaths[i] in place of files[i] in content, escaped for the
 // shell; everything else stays as it was. files are in paste order.
 func Replace(content []byte, files []File, boxPaths []string) []byte {
@@ -161,6 +174,7 @@ func shellEscape(s string) string {
 	return b.String()
 }
 
+// isPlain reports whether the shell reads c as itself; bytes of multibyte UTF-8 characters are.
 func isPlain(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("/._-+=:,@%", c) >= 0
+	return c >= 0x80 || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("/._-+=:,@%", c) >= 0
 }
