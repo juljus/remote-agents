@@ -12,11 +12,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,9 +26,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 
 	"remote-agents/internal/boxlayout"
+	"remote-agents/internal/corner"
 )
 
 const boxTestDir = "remote-agents-test"
@@ -274,6 +278,11 @@ func waitFile(path, needle string, timeout time.Duration, exited <-chan struct{}
 
 var ansi = regexp.MustCompile(`\x1b\[[0-9;?<>=:]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[=>78c]|\r`)
 
+const termCols, termRows = 120, 40
+
+// cursorQuery is the wrapper's cursor position query, which term answers from its screen.
+const cursorQuery = "\x1b[6n"
+
 // term is one laptop terminal running a wrapper command.
 type term struct {
 	t      *testing.T
@@ -281,8 +290,11 @@ type term struct {
 	master *os.File
 	mu     sync.Mutex
 	out    bytes.Buffer
-	done   chan struct{}
-	code   int
+	// screen is what the terminal shows; the replies it makes to queries are dropped.
+	screen   *vt.Emulator
+	answered int
+	done     chan struct{}
+	code     int
 }
 
 func start(t *testing.T, name string, args ...string) *term {
@@ -295,18 +307,24 @@ func startEnv(t *testing.T, extra []string, name string, args ...string) *term {
 	t.Helper()
 	cmd := exec.Command(filepath.Join(binDir, name), args...)
 	cmd.Env = append(testEnv(), extra...)
-	master, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 40, Cols: 120})
+	master, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: termRows, Cols: termCols})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tm := &term{t: t, cmd: cmd, master: master, done: make(chan struct{})}
+	screen := vt.NewEmulator(termCols, termRows)
+	tm := &term{t: t, cmd: cmd, master: master, screen: screen, done: make(chan struct{})}
+	replies := screen.InputPipe().(*io.PipeWriter)
 	go func() {
+		if _, err := io.Copy(io.Discard, screen); err != nil {
+			t.Errorf("dropping the screen's replies: %v", err)
+		}
+	}()
+	go func() {
+		defer replies.Close()
 		buf := make([]byte, 8192)
 		for {
 			n, err := master.Read(buf)
-			tm.mu.Lock()
-			tm.out.Write(buf[:n])
-			tm.mu.Unlock()
+			tm.received(buf[:n])
 			if err != nil {
 				return
 			}
@@ -333,10 +351,69 @@ func startEnv(t *testing.T, extra []string, name string, args ...string) *term {
 	return tm
 }
 
+// received records output and answers each new cursor position query as a terminal would.
+func (tm *term) received(p []byte) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.out.Write(p)
+	if _, err := tm.screen.Write(p); err != nil {
+		tm.t.Errorf("screen: %v", err)
+	}
+	queries := bytes.Count(tm.out.Bytes(), []byte(cursorQuery))
+	for ; tm.answered < queries; tm.answered++ {
+		pos := tm.screen.CursorPosition()
+		if _, err := fmt.Fprintf(tm.master, "\x1b[%d;%dR", pos.Y+1, pos.X+1); err != nil {
+			tm.t.Errorf("answering the cursor query: %v", err)
+		}
+	}
+}
+
+// text is the output without control sequences or the remote mark.
 func (tm *term) text() string {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	return ansi.ReplaceAllString(tm.out.String(), "")
+	return strings.ReplaceAll(ansi.ReplaceAllString(tm.out.String(), ""), corner.Mark, "")
+}
+
+// cloud starts the cell that shows the remote mark; the emulator may keep its variation selector apart.
+const cloud = "\u2601"
+
+// marks lists where the screen and its scrollback show the remote mark, as "screen x,y" or "scrollback x,y".
+func (tm *term) marks() []string {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	var found []string
+	for y := range termRows {
+		for x := range termCols {
+			if c := tm.screen.CellAt(x, y); c != nil && strings.HasPrefix(c.Content, cloud) {
+				found = append(found, fmt.Sprintf("screen %d,%d", x, y))
+			}
+		}
+	}
+	for y := range tm.screen.ScrollbackLen() {
+		for x := range termCols {
+			if c := tm.screen.ScrollbackCellAt(x, y); c != nil && strings.HasPrefix(c.Content, cloud) {
+				found = append(found, fmt.Sprintf("scrollback %d,%d", x, y))
+			}
+		}
+	}
+	return found
+}
+
+// expectMarks waits until the screen and scrollback show the remote mark exactly at want.
+func (tm *term) expectMarks(want []string, timeout time.Duration) {
+	tm.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		got := tm.marks()
+		if slices.Equal(got, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			tm.t.Fatalf("remote mark at %q, want %q; output:\n%s", got, want, tm.text())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (tm *term) expect(pattern string, timeout time.Duration) []string {
@@ -502,6 +579,40 @@ func TestSessionLifecycle(t *testing.T) {
 	if code := again.wait(10 * time.Second); code != 0 {
 		t.Fatalf("resume exit %d", code)
 	}
+}
+
+// The terminal's bottom-right corner shows the remote mark while the session
+// runs and after it reattaches, scrolled output leaves no copies of it, and it
+// goes when the session ends.
+func TestTheCornerMarksTheRemoteSession(t *testing.T) {
+	bottomRight := []string{fmt.Sprintf("screen %d,%d", termCols-2, termRows-1)}
+	tm := start(t, "rfakeclaude")
+	tm.drawnAfter(0)
+	tm.expectMarks(bottomRight, 10*time.Second)
+
+	mark := len(tm.text())
+	tm.send("lines 100\r")
+	tm.expectAfter(mark, `\n100\n`, 10*time.Second)
+	tm.expectMarks(bottomRight, 5*time.Second)
+
+	mark = len(tm.text())
+	if err := syscall.Kill(tm.sshChild(), syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	tm.expectAfter(mark, `reconnecting`, 5*time.Second)
+	// Reattaching redraws the session's screen, which still ends with the lines.
+	tm.expectAfter(mark, `\n100`, 20*time.Second)
+	tm.expectMarks(bottomRight, 5*time.Second)
+	mark = len(tm.text())
+	tm.send("lines 60\r")
+	tm.expectAfter(mark, `\n60\n`, 10*time.Second)
+	tm.expectMarks(bottomRight, 5*time.Second)
+
+	tm.send("exit 0\r")
+	if code := tm.wait(10 * time.Second); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	tm.expectMarks(nil, time.Second)
 }
 
 func TestASessionOverItsMemoryCapLosesOnlyTheProcessThatOverran(t *testing.T) {

@@ -6,7 +6,7 @@
 # the box's activity hook; bg <s> runs a sleep the way the Bash tool does,
 # and busy <s> and leave <s> leave a CPU-busy loop or a sleep behind its
 # shell; daemon <s> starts a sleep that detaches into its own session; hog
-# allocates memory until it is killed.
+# allocates memory until it is killed; lines <n> prints n numbered lines.
 echo "fake-claude args=$*"
 id=""
 act=""
@@ -49,6 +49,7 @@ while true; do
   if [ "$status" -ne 0 ]; then break; fi
   case "$cmd" in
     whoami) echo "fake-claude pid=$$" ;;
+    lines) seq "$arg1" ;;
     adopt) id="$arg1"; echo "fake-claude adopted $id" ;;
     exit) resume_hint; exit "$arg1" ;;
     exitin) (sleep "$arg1"; kill -USR1 $$) & trap 'resume_hint; exit '"$arg2" USR1 ;;
