@@ -101,10 +101,12 @@ Claude Code keeps the box's login in `~/.claude/.credentials.json` (`claudeAiOau
 two keys, the way Claude Code itself does under its own locks; running sessions notice the
 changed file. The other accounts wait in `~/.config/remote-agents/accounts/claude/<name>.json`
 (mode 0600, directory 0700) on the box. Refresh tokens change with every refresh, so each
-account command first copies the live login back to its account, and a daily timer
+account command first asks Anthropic whom the live login signs in as and copies it back to that
+account, and a daily timer
 (`remote-agents-accounts-refresh.timer`) refreshes logins nobody uses a week before they would
 expire. Usage comes from `api.anthropic.com/api/oauth/usage`, the endpoint Claude Code's `/usage`
-reads; it is undocumented, so a change in its shape shows as an error in the listing.
+reads, and the live login's account from `/api/oauth/profile`; both are undocumented, so a change
+in their shape shows as an error.
 
 ## Security model
 
