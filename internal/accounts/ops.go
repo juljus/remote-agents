@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -17,10 +16,12 @@ import (
 // RefreshAhead is how long before its refresh token expires an idle login is refreshed.
 const RefreshAhead = 7 * 24 * time.Hour
 
-// Usage lists every account with its plan usage, refreshing the access
-// tokens that need it first. The live login is a row even when no entry
-// names it. Inactive accounts refresh under the vault's lock only, so Claude
-// Code's refresh lock is held just for the live login.
+// unverifiedHint says how an unverified box login gets verified again.
+const unverifiedHint = "a running session refreshes it on its next request"
+
+// Usage lists every account with its plan usage. The live login is a row
+// even when no entry names it. Only inactive accounts are refreshed first:
+// the live login's usage reads with its own access token or not at all.
 func (v Vault) Usage(ctx context.Context) (Listing, error) {
 	type pending struct {
 		row   Row
@@ -28,27 +29,41 @@ func (v Vault) Usage(ctx context.Context) (Listing, error) {
 	}
 	var rows []pending
 	err := v.locked(func(s *state) error {
-		var activeLogin *claudeauth.Login
-		active := ""
-		if err := v.withLive(ctx, s, func(l *live) error {
-			if l.unnamed() {
-				rows = append(rows, pending{row: Row{Active: true, Email: l.email()}, login: l.login})
-			}
-			active, activeLogin = l.active, l.login
-			return nil
-		}); err != nil {
+		l, err := v.live(ctx, s)
+		if err != nil {
 			return err
 		}
-		for _, name := range s.names() {
-			r := pending{row: Row{Name: name, Email: s.entries[name].Account.Email(), Active: name == active}}
-			if name == active {
-				r.login = activeLogin
-			} else if login, err := v.fresh(ctx, s, name); err != nil {
-				r.row.Error = err.Error()
-			} else {
-				r.login = &login
+		liveRow := func(r Row) pending {
+			if l.state == liveVerified {
+				return pending{row: r, login: l.read.Login}
 			}
-			rows = append(rows, r)
+			r.Error = fmt.Sprintf("the box's login is unverified: %s; %s", l.unverified, unverifiedHint)
+			return pending{row: r}
+		}
+		if l.unnamed() || l.state == liveUnknown {
+			rows = append(rows, liveRow(Row{Active: true, Email: l.email()}))
+		}
+		for _, name := range s.names() {
+			e := s.entries[name]
+			r := Row{Name: name, Email: e.Account.Email(), Active: l.state != liveUnknown && name == l.active}
+			switch {
+			case r.Active:
+				rows = append(rows, liveRow(r))
+			case l.possiblyLive(name) && e.Login.AccessExpired(v.Store.Now()):
+				r.Error = "not refreshed while the box's login is unverified"
+				rows = append(rows, pending{row: r})
+			case l.possiblyLive(name):
+				login := e.Login
+				rows = append(rows, pending{row: r, login: &login})
+			default:
+				login, err := v.fresh(ctx, s, name)
+				if err != nil {
+					r.Error = err.Error()
+					rows = append(rows, pending{row: r})
+					continue
+				}
+				rows = append(rows, pending{row: r, login: &login})
+			}
 		}
 		return nil
 	})
@@ -89,9 +104,9 @@ func window(w *claudeauth.Window) *Window {
 	return out
 }
 
-// Use switches every Claude Code on the box to the named account, saving
-// the live login to its own entry first. It refuses to drop a live login no
-// entry names, and to switch to an account the server signed out.
+// Use switches every Claude Code on the box to the named account, keeping
+// the live login in its own entry first. It refuses to drop a live login
+// whose tokens it cannot keep, and to switch to an account the server signed out.
 func (v Vault) Use(ctx context.Context, name string) (switched bool, err error) {
 	if err := ValidName(name); err != nil {
 		return false, err
@@ -100,23 +115,38 @@ func (v Vault) Use(ctx context.Context, name string) (switched bool, err error) 
 		if _, ok := s.entries[name]; !ok {
 			return fmt.Errorf("no account %s", name)
 		}
-		return v.withLive(ctx, s, func(l *live) error {
-			if l.active == name {
-				return nil
-			}
-			if l.unnamed() {
-				return unnamedError(l)
-			}
-			login, err := v.fresh(ctx, s, name)
-			if err != nil {
-				return err
-			}
-			if err := l.tx.Replace(login, s.entries[name].Account); err != nil {
-				return err
-			}
-			switched = true
+		l, err := v.live(ctx, s)
+		if err != nil {
+			return err
+		}
+		switch {
+		case l.state == liveUnknown:
+			return fmt.Errorf("the box's login is unverified (%s) and no saved account is known to be it, so switching could lose it; %s, then switch", l.unverified, unverifiedHint)
+		case l.state != liveNone && l.active == name:
 			return nil
+		case l.unnamed():
+			return unnamedError(l)
+		case l.state == liveGuessed && s.entries[l.active].Login.NewerThan(*l.read.Login):
+			return fmt.Errorf("the box's login is unverified (%s) and account %s holds a newer login than it; %s, then switch", l.unverified, l.active, unverifiedHint)
+		}
+		login, err := v.fresh(ctx, s, name)
+		if err != nil {
+			return err
+		}
+		err = v.Store.WithLive(ctx, l.read, func(tx claudeauth.LiveTx) error {
+			// The login is still the one read, so it is the latest to keep.
+			if l.state == liveGuessed {
+				if err := v.writeEntry(s, l.active, entry{Login: *l.read.Login, Account: s.entries[l.active].Account}); err != nil {
+					return err
+				}
+			}
+			return tx.Replace(login, s.entries[name].Account)
 		})
+		if err != nil {
+			return err
+		}
+		switched = true
+		return v.markSwitched(name)
 	})
 	return switched, err
 }
@@ -129,32 +159,39 @@ func unnamedError(l *live) error {
 	return fmt.Errorf("the box is logged in to %s; keep that login with `rclaude account save <name>` first", who)
 }
 
-// Save keeps the live login under name.
+// Save keeps the verified live login under name.
 func (v Vault) Save(ctx context.Context, name string) error {
 	if err := ValidName(name); err != nil {
 		return err
 	}
 	return v.locked(func(s *state) error {
-		return v.withLive(ctx, s, func(l *live) error {
-			switch {
-			case l.login == nil:
-				return errors.New("the box has no login to save; log in with `rclaude account add <name>`")
-			case l.active == name:
-				return nil
-			case l.active != "":
-				return fmt.Errorf("the box's login is saved as %s already", l.active)
-			case l.email() == "":
-				return errors.New("the account record in Claude Code's config names another account than the box's login; start a session, then save again")
-			}
-			if _, taken := s.entries[name]; taken {
-				return fmt.Errorf("account %s is another login", name)
-			}
-			return v.writeEntry(s, name, entry{Login: *l.login, Account: *l.account})
-		})
+		l, err := v.live(ctx, s)
+		if err != nil {
+			return err
+		}
+		switch {
+		case l.state == liveNone:
+			return errors.New("the box has no login to save; log in with `rclaude account add <name>`")
+		case l.active == name:
+			return nil
+		case l.state != liveVerified:
+			return fmt.Errorf("the box's login is unverified (%s); %s, then save", l.unverified, unverifiedHint)
+		case l.active != "":
+			return fmt.Errorf("the box's login is saved as %s already", l.active)
+		case l.email() == "":
+			return errors.New("the account record in Claude Code's config names another account than the box's login; start a session, then save again")
+		}
+		if _, taken := s.entries[name]; taken {
+			return fmt.Errorf("account %s is another login", name)
+		}
+		if err := v.writeEntry(s, name, entry{Login: *l.read.Login, Account: *l.read.Account}); err != nil {
+			return err
+		}
+		return v.markSwitched(name)
 	})
 }
 
-// Remove forgets an account other than the live one.
+// Remove forgets an account that is not, and may not be, the live one.
 func (v Vault) Remove(ctx context.Context, name string) error {
 	if err := ValidName(name); err != nil {
 		return err
@@ -163,68 +200,73 @@ func (v Vault) Remove(ctx context.Context, name string) error {
 		if _, ok := s.entries[name]; !ok {
 			return fmt.Errorf("no account %s", name)
 		}
-		return v.withLive(ctx, s, func(l *live) error {
-			if l.active == name {
-				return fmt.Errorf("account %s is the box's login; switch to another one first", name)
-			}
-			delete(s.entries, name)
-			return atomicfile.Remove(v.entryPath(name))
-		})
+		l, err := v.live(ctx, s)
+		if err != nil {
+			return err
+		}
+		if l.possiblyLive(name) {
+			return fmt.Errorf("account %s is, or may be, the box's login; switch to another one first", name)
+		}
+		delete(s.entries, name)
+		return atomicfile.Remove(v.entryPath(name))
 	})
 }
 
-// ErrAddedLive means the login added is of the account the box uses now,
-// whose entry follows the live login, so the new login went unused.
-var ErrAddedLive = errors.New("that account is the box's login already")
-
 // Add saves under name the login that signIn makes in an empty Claude Code
 // config dir. Naming an existing account, it replaces that account's login,
-// which must sign in as the same account.
-func (v Vault) Add(ctx context.Context, name string, signIn func(configDir string) error) (err error) {
+// which must sign in as the same account. saved is false when the login is
+// of the account the box uses now, whose entry follows the live login, so
+// the new login went unused.
+func (v Vault) Add(ctx context.Context, name string, signIn func(configDir string) error) (saved bool, err error) {
 	if err := ValidName(name); err != nil {
-		return err
+		return false, err
 	}
 	if err := v.ensureDir(); err != nil {
-		return err
+		return false, err
 	}
 	dir, err := os.MkdirTemp(v.Dir, ".login-")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
 	if err := signIn(dir); err != nil {
-		return err
+		return false, err
 	}
 	made, id, err := v.signedIn(ctx, dir)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return v.locked(func(s *state) error {
-		return v.withLive(ctx, s, func(l *live) error {
-			if other := s.named(id); other != "" && other != name {
-				return fmt.Errorf("that login is account %s already", other)
-			}
-			if e, ok := s.entries[name]; ok && e.Account.Identity() != id {
-				return fmt.Errorf("account %s is %s, not %s", name, e.Account.Email(), made.Account.Email())
-			}
-			if l.active == name {
-				return ErrAddedLive
-			}
-			return v.writeEntry(s, name, entry{Login: *made.Login, Account: *made.Account})
-		})
+	err = v.locked(func(s *state) error {
+		l, err := v.live(ctx, s)
+		if err != nil {
+			return err
+		}
+		if other := s.named(id); other != "" && other != name {
+			return fmt.Errorf("that login is account %s already", other)
+		}
+		if e, ok := s.entries[name]; ok && e.Account.Identity() != id {
+			return fmt.Errorf("account %s is %s, not %s", name, e.Account.Email(), made.Account.Email())
+		}
+		if l.state == liveVerified && *l.id == id {
+			return nil
+		}
+		saved = true
+		return v.writeEntry(s, name, entry{Login: *made.Login, Account: *made.Account})
 	})
+	return saved, err
 }
 
 // signedIn reads the login a sign-in left in dir and checks with the server
 // that its account record names the account it signs in as.
 func (v Vault) signedIn(ctx context.Context, dir string) (claudeauth.Live, claudeauth.Identity, error) {
+	paths, err := claudeauth.PathsIn(dir)
+	if err != nil {
+		return claudeauth.Live{}, claudeauth.Identity{}, err
+	}
 	store := v.Store
-	store.Paths = claudeauth.Paths{ConfigDir: dir, SecureDir: dir, GlobalConfig: filepath.Join(dir, ".claude.json")}
-	var made claudeauth.Live
-	if err := store.WithLive(ctx, func(tx claudeauth.LiveTx) (err error) {
-		made, err = tx.Read()
-		return err
-	}); err != nil {
+	store.Paths = paths
+	made, err := store.ReadLive(ctx)
+	if err != nil {
 		return claudeauth.Live{}, claudeauth.Identity{}, err
 	}
 	if made.Login == nil || made.Login.SignedOut() || made.Account == nil {
@@ -240,38 +282,29 @@ func (v Vault) signedIn(ctx context.Context, dir string) (claudeauth.Live, claud
 	return made, id, nil
 }
 
-// KeepFresh refreshes every saved login whose refresh token would expire
-// within RefreshAhead, so an account nobody uses stays signed in. It reports
-// each account it could not refresh and carries on with the others.
+// KeepFresh refreshes every inactive saved login whose refresh token would
+// expire within RefreshAhead, so an account nobody uses stays signed in. It
+// never touches the live login, nor a saved login that may be a copy of it.
+// It reports each account it could not refresh and carries on with the others.
 func (v Vault) KeepFresh(ctx context.Context, log io.Writer) error {
 	var failed []error
 	err := v.locked(func(s *state) error {
-		now := v.Store.Now()
-		due := func(l claudeauth.Login) bool {
-			at, known := l.RefreshExpiresAt()
-			return !known || at.Sub(now) < RefreshAhead
+		if len(s.entries) == 0 {
+			return nil
 		}
-		active := ""
-		if err := v.withLive(ctx, s, func(l *live) error {
-			active = l.active
-			// Only a live login the vault names is the vault's to keep.
-			if active == "" || !due(*l.login) {
-				return nil
-			}
-			login, err := l.tx.Refresh(*l.login)
-			if err != nil {
-				failed = append(failed, fmt.Errorf("account %s, the box's login: %w", active, signedOut(active, err)))
-				return nil
-			}
-			l.login = &login
-			fmt.Fprintf(log, "refreshed account %s, the box's login\n", active)
-			return v.saveLive(s, l)
-		}); err != nil {
+		l, err := v.live(ctx, s)
+		if err != nil {
 			return err
 		}
+		if l.state == liveUnknown {
+			fmt.Fprintf(log, "the box's login is unverified (%s) and no saved account is known to be it; refreshed none\n", l.unverified)
+			return nil
+		}
+		now := v.Store.Now()
 		for _, name := range s.names() {
 			e := s.entries[name]
-			if name == active || !due(e.Login) {
+			at, known := e.Login.RefreshExpiresAt()
+			if l.possiblyLive(name) || (known && at.Sub(now) >= RefreshAhead) {
 				continue
 			}
 			_, err := v.Store.Refresh(ctx, e.Login, func(next claudeauth.Login) error {

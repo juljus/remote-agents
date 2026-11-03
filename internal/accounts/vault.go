@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,6 +48,7 @@ const entryMode = 0o600
 
 func (v Vault) entryPath(name string) string { return filepath.Join(v.Dir, name+".json") }
 func (v Vault) lockPath() string             { return filepath.Join(v.Dir, ".lock") }
+func (v Vault) switchedPath() string         { return filepath.Join(v.Dir, ".live.json") }
 
 // ensureDir creates the vault dir, or narrows an existing one, to mode 0700.
 func (v Vault) ensureDir() error {
@@ -108,7 +110,7 @@ func (v Vault) read() (*state, error) {
 	}
 	for _, d := range dirents {
 		name, ok := strings.CutSuffix(d.Name(), ".json")
-		// The lock and temporary files have names no account can have.
+		// The lock, record and temporary files have names no account can have.
 		if !ok || ValidName(name) != nil {
 			continue
 		}
@@ -137,85 +139,167 @@ func (v Vault) writeEntry(s *state, name string, e entry) error {
 	return nil
 }
 
-// live is the box's login, resolved under Claude Code's refresh lock.
+// liveState is how much the vault knows about whose the live login is. It
+// never refreshes the live login to find out: Claude Code refreshes it.
+type liveState int
+
+const (
+	// liveNone: the box has no login the server could still honour.
+	liveNone liveState = iota
+	// liveVerified: the profile endpoint named the login's account.
+	liveVerified
+	// liveProven: unverified, but it holds an entry's refresh token, so it is
+	// that entry's login and nobody refreshed it since.
+	liveProven
+	// liveGuessed: unverified; Claude Code's account record and the vault's
+	// last switch agree on an entry.
+	liveGuessed
+	// liveUnknown: unverified, and nothing says whose it is.
+	liveUnknown
+)
+
+// live is the box's login as one command read it.
 type live struct {
-	tx claudeauth.LiveTx
-	// login is nil when the box has no login the server honours.
-	login *claudeauth.Login
-	// id is whom login signs in as, by the server's word.
+	read  claudeauth.Live
+	state liveState
+	// id is whom the login signs in as, when liveVerified.
 	id *claudeauth.Identity
-	// account is the global config's oauthAccount, which may name someone else.
-	account *claudeauth.Account
-	// active is the entry id names, or "".
+	// active is the entry the login is, or is taken to be; "" when no entry is.
 	active string
+	// unverified says why the server could not name the login's account.
+	unverified string
+}
+
+// possiblyLive reports whether name's saved login may be a copy of the
+// live one, which Claude Code may have refreshed since: refreshing that copy
+// would present a refresh token the server already rotated.
+func (l *live) possiblyLive(name string) bool {
+	switch l.state {
+	case liveNone:
+		return false
+	case liveUnknown:
+		return true
+	}
+	return name == l.active
 }
 
 // email labels the live login, from an account record that matches it.
 func (l *live) email() string {
-	if l.account == nil || l.id == nil || l.account.Identity() != *l.id {
+	if l.read.Account == nil || l.id == nil || l.read.Account.Identity() != *l.id {
 		return ""
 	}
-	return l.account.Email()
+	return l.read.Account.Email()
 }
 
-// unnamed reports a live login no entry names.
-func (l *live) unnamed() bool { return l.login != nil && l.active == "" }
+// unnamed reports a verified live login no entry names.
+func (l *live) unnamed() bool { return l.state == liveVerified && l.active == "" }
 
-// withLive runs fn holding Claude Code's refresh lock, with the live login
-// resolved and its entry brought up to date. The server says whom the login
-// signs in as: oauthAccount is Claude Code's record of it, which a running
-// session may rewrite from a stale profile read and a crash may leave behind.
-func (v Vault) withLive(ctx context.Context, s *state, fn func(*live) error) error {
-	return v.Store.WithLive(ctx, func(tx claudeauth.LiveTx) error {
-		read, err := tx.Read()
-		if err != nil {
-			return err
+// live reads the box's login and works out whose it is. A verified login is
+// saved to its entry, and Claude Code's account record is put back when it
+// names someone else: a running session may write it from a stale profile
+// read, and a crash may leave it behind a switch.
+func (v Vault) live(ctx context.Context, s *state) (*live, error) {
+	read, err := v.Store.ReadLive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	l := &live{read: read}
+	if read.Login == nil || read.Login.SignedOut() {
+		return l, nil
+	}
+	if read.Login.AccessExpired(v.Store.Now()) {
+		l.unverified = "its access token expired"
+	} else {
+		id, err := v.Store.Identity(ctx, *read.Login)
+		switch {
+		case errors.Is(err, claudeauth.ErrTokenRefused):
+			l.unverified = "the server refused its access token"
+		case err != nil:
+			return nil, fmt.Errorf("asking whom the box's login signs in as: %w", err)
+		default:
+			l.state, l.id, l.active = liveVerified, &id, s.named(id)
+			return l, v.saveLive(ctx, s, l)
 		}
-		l := &live{tx: tx, account: read.Account}
-		if read.Login != nil && !read.Login.SignedOut() {
-			login, err := tx.Fresh(*read.Login)
-			switch {
-			case errors.Is(err, claudeauth.ErrRefreshRefused):
-			case err != nil:
-				return fmt.Errorf("refreshing the box's login: %w", err)
-			default:
-				id, err := v.Store.Identity(ctx, login)
-				if err != nil {
-					return fmt.Errorf("asking whom the box's login signs in as: %w", err)
-				}
-				l.login, l.id, l.active = &login, &id, s.named(id)
-			}
+	}
+	for _, name := range s.names() {
+		if s.entries[name].Login.SameRefreshToken(*read.Login) {
+			l.state, l.active = liveProven, name
+			return l, nil
 		}
-		if err := v.saveLive(s, l); err != nil {
-			return err
-		}
-		return fn(l)
-	})
+	}
+	l.state = liveUnknown
+	if read.Account == nil {
+		return l, nil
+	}
+	recorded := s.named(read.Account.Identity())
+	last, err := v.lastSwitched()
+	if err != nil {
+		return nil, err
+	}
+	if recorded != "" && recorded == last {
+		l.state, l.active = liveGuessed, recorded
+	}
+	return l, nil
 }
 
-// saveLive copies the live login into the entry it signs in as, so the entry
-// holds the latest refresh token once Claude Code has rotated it, and puts
-// that entry's account record back when the global config names another.
-func (v Vault) saveLive(s *state, l *live) error {
+// saveLive copies a verified live login into the entry it signs in as, so
+// the entry holds the latest refresh token once Claude Code has rotated it,
+// and puts that entry's account record back when the global config names another.
+func (v Vault) saveLive(ctx context.Context, s *state, l *live) error {
 	if l.active == "" {
-		return nil
+		return v.markSwitched("")
 	}
 	saved := s.entries[l.active]
-	if l.account == nil || l.account.Identity() != *l.id {
-		if err := l.tx.ReplaceAccount(saved.Account); err != nil {
-			return fmt.Errorf("restoring the box's account record: %w", err)
-		}
-		l.account = &saved.Account
+	account := saved.Account
+	if l.read.Account != nil && l.read.Account.Identity() == *l.id {
+		account = *l.read.Account
+	} else if err := v.Store.WithLive(ctx, l.read, func(tx claudeauth.LiveTx) error { return tx.ReplaceAccount(saved.Account) }); err != nil {
+		return fmt.Errorf("restoring the box's account record: %w", err)
 	}
-	e := entry{Login: *l.login, Account: *l.account}
+	e := entry{Login: *l.read.Login, Account: account}
 	same, err := sameEntry(saved, e)
-	if err != nil || same {
+	if err != nil {
 		return err
 	}
-	if err := v.writeEntry(s, l.active, e); err != nil {
-		return fmt.Errorf("saving the live login to account %s: %w", l.active, err)
+	if !same {
+		if err := v.writeEntry(s, l.active, e); err != nil {
+			return fmt.Errorf("saving the live login to account %s: %w", l.active, err)
+		}
 	}
-	return nil
+	return v.markSwitched(l.active)
+}
+
+// lastSwitched is the entry the vault last saw live, or "".
+func (v Vault) lastSwitched() (string, error) {
+	data, err := os.ReadFile(v.switchedPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var m switched
+	if err := json.Unmarshal(data, &m); err != nil {
+		return "", fmt.Errorf("%s: %w", v.switchedPath(), err)
+	}
+	return m.Name, nil
+}
+
+func (v Vault) markSwitched(name string) error {
+	last, err := v.lastSwitched()
+	if err != nil || last == name {
+		return err
+	}
+	data, err := json.Marshal(switched{Name: name})
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(v.switchedPath(), data, entryMode)
+}
+
+// switched records the entry the vault last saw live.
+type switched struct {
+	Name string `json:"name"`
 }
 
 func sameEntry(a, b entry) (bool, error) {
@@ -231,7 +315,8 @@ func sameEntry(a, b entry) (bool, error) {
 }
 
 // fresh is an inactive entry's login with a usable access token, refreshed
-// and saved first if needed; the caller holds the vault's lock.
+// and saved first if needed; the caller holds the vault's lock and has made
+// sure the entry is not possibly live.
 func (v Vault) fresh(ctx context.Context, s *state, name string) (claudeauth.Login, error) {
 	e := s.entries[name]
 	login, err := v.Store.Fresh(ctx, e.Login, func(next claudeauth.Login) error {
