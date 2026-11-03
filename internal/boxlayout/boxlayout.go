@@ -120,6 +120,11 @@ func (l Layout) ReapedSession(session string) string {
 func (l Layout) ReaperLog() string    { return l.state("reaper.log") }
 func (l Layout) ReaperConfig() string { return filepath.Join(l.Home, ".config", l.Name, "reaper.toml") }
 
+// AccountsDir is the vault of the named logins of one agent kind, such as claude.
+func (l Layout) AccountsDir(kind string) string {
+	return filepath.Join(l.Home, ".config", l.Name, "accounts", kind)
+}
+
 // SessionConfig is how the box runs each session.
 func (l Layout) SessionConfig() string {
 	return filepath.Join(l.Home, ".config", l.Name, "session.toml")

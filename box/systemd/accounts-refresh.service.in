@@ -1,0 +1,6 @@
+[Unit]
+Description=@NAME@: refresh the saved Claude logins nobody uses
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/@NAME@/bin/remote-agents-box account claude keep-fresh

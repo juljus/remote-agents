@@ -31,6 +31,7 @@ CONFIG="$HOME/.config/$NAME"
 UNITS="$HOME/.config/systemd/user"
 SERVICE="$NAME-shpool.service"
 SOCKET="$NAME-shpool.socket"
+REFRESH="$NAME-accounts-refresh"
 
 mkdir -p "$SHARE/bin" "$SHARE/shims" "$SHARE/hookbin" "$CONFIG" "$UNITS"
 mkdir -p "$STATE"
@@ -77,15 +78,15 @@ changed="$(install_file "$STAGE/shpool.toml" "$CONFIG/shpool.toml" 0644)"
 [[ -z "$changed" ]] || echo "installed shpool.toml (the daemon reloads it)"
 
 units_changed=""
-for kind in socket service; do
-  sed "s/@NAME@/$NAME/g" "$STAGE/systemd/shpool.$kind.in" > "$STAGE/systemd/$NAME-shpool.$kind"
-  units_changed+="$(install_file "$STAGE/systemd/$NAME-shpool.$kind" "$UNITS/$NAME-shpool.$kind" 0644)"
+for unit in shpool.socket shpool.service accounts-refresh.service accounts-refresh.timer; do
+  sed "s/@NAME@/$NAME/g" "$STAGE/systemd/$unit.in" > "$STAGE/systemd/$NAME-$unit"
+  units_changed+="$(install_file "$STAGE/systemd/$NAME-$unit" "$UNITS/$NAME-$unit" 0644)"
 done
 if [[ -n "$units_changed" ]]; then
   systemctl --user daemon-reload
   echo "installed systemd units"
 fi
-systemctl --user enable --now "$SOCKET" >/dev/null
+systemctl --user enable --now "$SOCKET" "$REFRESH.timer" >/dev/null
 
 if [[ ! -x "$HOME/.local/bin/claude" ]]; then
   curl -fsSL https://claude.ai/install.sh | bash
