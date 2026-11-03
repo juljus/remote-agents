@@ -93,7 +93,7 @@ func (codexKind) relaunchArgs(rec runRecord) ([]string, string, error) {
 func (codexKind) takesSession(args []string) string { return codexargs.SessionOf(args) }
 
 // Codex reports a resumed session only at its next turn.
-func (codexKind) startsWith(args []string) string { return codexargs.SessionOf(args) }
+func (k codexKind) startsWith(args []string) string { return k.takesSession(args) }
 
 func (codexKind) holder(l boxlayout.Layout, env []string, id string) holderProbe {
 	return codexProbe(codexHome(l, env), id)

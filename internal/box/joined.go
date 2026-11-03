@@ -11,7 +11,10 @@ import (
 
 // A run that resumes a session another run's launcher already runs joins
 // that session. The launcher records its end under its own run and under
-// the session's name; the joined run looks for the latter.
+// the session's name; the joined run looks for the latter. A joined run
+// whose launcher is lost resumes the session it joined, even if the agent
+// had since moved to another one (Codex /new); only the launcher's own run
+// follows the agent there.
 type joinedRecord struct {
 	Session string `json:"session"`
 	At      int64  `json:"at_ms"`
