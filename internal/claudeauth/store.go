@@ -44,6 +44,9 @@ func (s Store) WithLive(ctx context.Context, fn func(LiveTx) error) error {
 	})
 }
 
+// Context is the context WithLive was called with.
+func (tx LiveTx) Context() context.Context { return tx.ctx }
+
 func (tx LiveTx) Read() (Live, error) { return readLive(tx.store.Paths) }
 
 // Replace makes l and a the login of every Claude Code on the box: each
@@ -66,6 +69,11 @@ func (tx LiveTx) ReplaceAccount(a Account) error {
 // use, refreshing and saving it first if needed, as Claude Code would.
 func (tx LiveTx) Fresh(l Login) (Login, error) {
 	return tx.store.Fresh(tx.ctx, l, func(next Login) error { return writeLogin(tx.store.Paths, next) })
+}
+
+// Refresh trades the live login l's refresh token for new tokens and saves them.
+func (tx LiveTx) Refresh(l Login) (Login, error) {
+	return tx.store.Refresh(tx.ctx, l, func(next Login) error { return writeLogin(tx.store.Paths, next) })
 }
 
 // Fresh is l with an access token Claude Code would still use. When it
