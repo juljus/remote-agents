@@ -65,7 +65,8 @@ func refresh(ctx context.Context, client *http.Client, ep Endpoints, l Login, no
 	if err != nil {
 		return Login{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
+	// Cancelled midway, a refresh could lose the token the server just rotated.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep.TokenURL, bytes.NewReader(body))
 	if err != nil {
