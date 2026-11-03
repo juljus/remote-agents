@@ -128,7 +128,7 @@ func setup(m *testing.M) (int, error) {
 	if _, err := onBox(fmt.Sprintf(`printf 'memory_max = "2G"\n' > %q`, box.SessionConfig())); err != nil {
 		return 0, err
 	}
-	for _, fake := range []string{"fake-claude", "fake-codex"} {
+	for _, fake := range []string{"fake-claude", "fake-codex", "fake-anthropic"} {
 		if _, err := sh("scp", "-q", "-p", filepath.Join(root, "testdata", fake), host+":"+boxTestDir+"/"+fake); err != nil {
 			return 0, err
 		}
@@ -146,8 +146,10 @@ chmod +x %[1]s/claude-isolated`, boxTestDir, boxHome)); err != nil {
 		return 0, err
 	}
 	writeExec := func(path, body string) error { return os.WriteFile(path, []byte("#!/bin/bash\n"+body+"\n"), 0o755) }
-	// The block file simulates an outage: every new connection fails like an unreachable network.
+	// The block file simulates an outage: every new connection fails like an
+	// unreachable network. RA_E2E_REMOTE_ENV exports variables for the remote command.
 	if err := writeExec(filepath.Join(sshDir, "ssh"), fmt.Sprintf(`if [ -e %q ]; then sleep 0.5; echo "ssh: connect to host %s port 22: Network is unreachable" >&2; exit 255; fi
+if [ -n "$RA_E2E_REMOTE_ENV" ]; then set -- "${@:1:$#-1}" "export $RA_E2E_REMOTE_ENV; ${!#}"; fi
 exec %q "$@"`, blockFile, host, realSSH)); err != nil {
 		return 0, err
 	}
@@ -1464,4 +1466,87 @@ func TestReapedSessionResumesByNameAndByID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Account commands run against a Claude config dir of their own and a
+// stand-in for Anthropic's token and usage endpoints on the box.
+func TestAccountsAddListAndSwitchTheBoxLogin(t *testing.T) {
+	cfg := boxHome + "/" + boxTestDir + "/accounts-claude"
+	vault := box.AccountsDir("claude")
+	portFile := boxHome + "/" + boxTestDir + "/fake-anthropic.port"
+	pidFile := boxHome + "/" + boxTestDir + "/fake-anthropic.pid"
+	if _, err := onBox(fmt.Sprintf(`set -e
+rm -rf %[1]q %[2]q %[3]q && mkdir -p %[1]q
+printf '{"numStartups":1}' > %[1]q/.claude.json
+expires=$(( $(date +%%s) * 1000 + 3600000 ))
+printf '{"claudeAiOauth":{"accessToken":"fake-access-work-1","refreshToken":"fake-refresh-work-1","expiresAt":%%s}}' "$expires" > %[1]q/.credentials.json
+printf '{"numStartups":1,"oauthAccount":{"accountUuid":"acc-work","organizationUuid":"org-work","emailAddress":"work@example.com"}}' > %[1]q/.claude.json
+echo home > %[4]q/next-login
+nohup %[4]q/fake-anthropic %[3]q >/dev/null 2>&1 &
+echo $! > %[5]q
+for i in $(seq 50); do [ -s %[3]q ] && break; sleep 0.1; done
+[ -s %[3]q ]`, cfg, vault, portFile, boxHome+"/"+boxTestDir, pidFile)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if out, err := onBox(fmt.Sprintf(`kill "$(cat %q)"; rm -rf %q %q %q`, pidFile, cfg, vault, portFile)); err != nil {
+			t.Logf("cleanup: %v %s", err, out)
+		}
+	})
+	port, err := onBox("cat " + portFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := "http://127.0.0.1:" + strings.TrimSpace(port)
+	extra := []string{fmt.Sprintf("RA_E2E_REMOTE_ENV=CLAUDE_CONFIG_DIR=%s REMOTE_AGENTS_CLAUDE_API_URL=%s REMOTE_AGENTS_CLAUDE_TOKEN_URL=%s/token", cfg, api, api)}
+	run := func(args ...string) *term {
+		t.Helper()
+		tm := startEnv(t, extra, "rfakeclaude", append([]string{"account"}, args...)...)
+		return tm
+	}
+	waitOK := func(tm *term) {
+		t.Helper()
+		if code := tm.wait(30 * time.Second); code != 0 {
+			t.Fatalf("exit %d:\n%s", code, tm.text())
+		}
+	}
+
+	save := run("save", "work")
+	save.expect(`saved the box's login as work`, 20*time.Second)
+	waitOK(save)
+
+	before := len(openedURLs(t))
+	add := run("add", "home")
+	add.expect(`saved the new login as home`, 30*time.Second)
+	waitOK(add)
+	if !strings.Contains(openedURLs(t)[before:], "https://claude.com/cai/oauth/authorize?account=home") {
+		t.Fatalf("sign-in url not opened on the laptop:\n%s", openedURLs(t)[before:])
+	}
+
+	list := run("list")
+	list.expect(`(?s)1\s+home\s+home@example.com\s+40% until \S+.*2\*\s+work\s+work@example.com\s+40% until`, 20*time.Second)
+	waitOK(list)
+
+	pick := run()
+	pick.expect(`Switch to \(1-2 or a name, Enter keeps work\): `, 20*time.Second)
+	pick.send("1\r")
+	pick.expect(`switched the box to home; running sessions use it from their next request`, 20*time.Second)
+	waitOK(pick)
+
+	out, err := onBox(fmt.Sprintf(`set -e
+grep -o 'fake-refresh-[a-z]*-[0-9]*' %[1]q/.credentials.json
+grep -o '"emailAddress": "[^"]*"' %[1]q/.claude.json
+stat -c '%%a %%n' %[2]q %[2]q/work.json %[2]q/home.json | sed 's|%[2]s|VAULT|'
+systemctl --user is-enabled %[3]s-accounts-refresh.timer`, cfg, vault, boxInstall))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "fake-refresh-home-1\n\"emailAddress\": \"home@example.com\"\n700 VAULT\n600 VAULT/work.json\n600 VAULT/home.json\nenabled\n"
+	if out != want {
+		t.Fatalf("box state:\n%s\nwant\n%s", out, want)
+	}
+
+	js := run("list", "--json")
+	js.expect(`"name":"home","email":"home@example.com","active":true`, 20*time.Second)
+	waitOK(js)
 }

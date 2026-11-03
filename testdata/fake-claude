@@ -7,7 +7,18 @@
 # and busy <s> and leave <s> leave a CPU-busy loop or a sleep behind its
 # shell; daemon <s> starts a sleep that detaches into its own session; hog
 # allocates memory until it is killed; lines <n> prints n numbered lines.
+# auth login signs in as the account named in ~/remote-agents-test/next-login,
+# opening a URL like Claude does.
 echo "fake-claude args=$*"
+if [ "$1 $2" = "auth login" ]; then
+  tag="$(cat "$HOME/remote-agents-test/next-login")"
+  "$BROWSER" "https://claude.com/cai/oauth/authorize?account=$tag" || exit 1
+  expires=$(( $(date +%s) * 1000 + 3600000 ))
+  printf '{"claudeAiOauth":{"accessToken":"fake-access-%s-1","refreshToken":"fake-refresh-%s-1","expiresAt":%s,"scopes":["user:inference"]}}' "$tag" "$tag" "$expires" > "$CLAUDE_CONFIG_DIR/.credentials.json"
+  printf '{"oauthAccount":{"accountUuid":"acc-%s","organizationUuid":"org-%s","emailAddress":"%s@example.com"}}' "$tag" "$tag" "$tag" > "$CLAUDE_CONFIG_DIR/.claude.json"
+  echo "Login successful."
+  exit 0
+fi
 id=""
 act=""
 while [ $# -gt 0 ]; do
