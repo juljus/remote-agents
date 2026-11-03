@@ -25,10 +25,9 @@ const pastedTTL = 7 * 24 * time.Hour
 // sends as pasted/<content hash>/<name>, and once the laptop's side ends
 // writes the path of each. Then pastes made more than pastedTTL ago go; the
 // laptop has all it needs by then. Pasting the same content again keeps its
-// dir. The prune and each file's
-// store hold the pasted lock, so a prune never removes a file another store
-// just kept; receiving the laptop's upload does not, so a stalled upload
-// holds up no other.
+// dir. The prune and each file's store hold the pasted lock, so a prune never
+// removes a file another store just kept; receiving the laptop's upload does
+// not, so a stalled upload holds up no other.
 func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) error {
 	if err := createPastedDir(l); err != nil {
 		return err
