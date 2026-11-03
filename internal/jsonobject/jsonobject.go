@@ -1,4 +1,7 @@
-package claudeauth
+// Package jsonobject keeps a JSON object in its key order with each value as
+// read, so a program rewrites only the keys it sets in a file another
+// program owns.
+package jsonobject
 
 import (
 	"bytes"
@@ -8,16 +11,16 @@ import (
 	"io"
 )
 
-// object is a JSON object kept in its key order with each value as read, so
-// a rewrite changes only the keys this package sets.
-type object []member
+// Object is a JSON object in its key order.
+type Object []member
 
 type member struct {
 	key   string
 	value json.RawMessage
 }
 
-func parseObject(data []byte) (object, error) {
+// Parse reads exactly one JSON object; duplicate keys and data after it are errors.
+func Parse(data []byte) (Object, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	tok, err := dec.Token()
 	if err != nil {
@@ -26,7 +29,7 @@ func parseObject(data []byte) (object, error) {
 	if tok != json.Delim('{') {
 		return nil, errors.New("not a JSON object")
 	}
-	var o object
+	var o Object
 	for dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
@@ -40,7 +43,7 @@ func parseObject(data []byte) (object, error) {
 		if err := dec.Decode(&v); err != nil {
 			return nil, fmt.Errorf("%s: %w", key, err)
 		}
-		if _, dup := o.get(key); dup {
+		if _, dup := o.Get(key); dup {
 			return nil, fmt.Errorf("duplicate key %s", key)
 		}
 		o = append(o, member{key, v})
@@ -54,7 +57,7 @@ func parseObject(data []byte) (object, error) {
 	return o, nil
 }
 
-func (o object) get(key string) (json.RawMessage, bool) {
+func (o Object) Get(key string) (json.RawMessage, bool) {
 	for _, m := range o {
 		if m.key == key {
 			return m.value, true
@@ -63,9 +66,9 @@ func (o object) get(key string) (json.RawMessage, bool) {
 	return nil, false
 }
 
-// with is o with key set to value, in place if present, else last.
-func (o object) with(key string, value json.RawMessage) object {
-	out := make(object, 0, len(o)+1)
+// With is o with key set to value, in place if present, else last.
+func (o Object) With(key string, value json.RawMessage) Object {
+	out := make(Object, 0, len(o)+1)
 	set := false
 	for _, m := range o {
 		if m.key == key {
@@ -79,8 +82,8 @@ func (o object) with(key string, value json.RawMessage) object {
 	return out
 }
 
-// marshal writes o compactly, or indented by indent when it is not empty.
-func (o object) marshal(indent string) ([]byte, error) {
+// Marshal writes o compactly, or indented by indent when it is not empty.
+func (o Object) Marshal(indent string) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	for i, m := range o {

@@ -185,9 +185,9 @@ func (l Login) refreshed(reply tokenReply, asked []string, issuedAt time.Time) (
 		if err != nil {
 			return Login{}, false, err
 		}
-		o = o.with(u.key, raw)
+		o = o.With(u.key, raw)
 	}
-	raw, err := o.marshal("")
+	raw, err := o.Marshal("")
 	if err != nil {
 		return Login{}, false, err
 	}

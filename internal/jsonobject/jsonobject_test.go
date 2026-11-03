@@ -1,4 +1,4 @@
-package claudeauth
+package jsonobject
 
 import (
 	"encoding/json"
@@ -20,18 +20,18 @@ const indented = `{
 }`
 
 func TestObjectRewritesOnlyTheKeySet(t *testing.T) {
-	o, err := parseObject([]byte(indented))
+	o, err := Parse([]byte(indented))
 	if err != nil {
 		t.Fatal(err)
 	}
-	same, err := o.marshal("  ")
+	same, err := o.Marshal("  ")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(same) != indented {
 		t.Fatalf("round trip changed the file:\n%s", same)
 	}
-	changed, err := o.with("oauthAccount", json.RawMessage(`{"accountUuid":"new"}`)).marshal("  ")
+	changed, err := o.With("oauthAccount", json.RawMessage(`{"accountUuid":"new"}`)).Marshal("  ")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestObjectRewritesOnlyTheKeySet(t *testing.T) {
 	if string(changed) != want {
 		t.Fatalf("got:\n%s", changed)
 	}
-	compact, err := o.with("added", json.RawMessage(`true`)).marshal("")
+	compact, err := o.With("added", json.RawMessage(`true`)).Marshal("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestObjectRewritesOnlyTheKeySet(t *testing.T) {
 
 func TestParseObjectRefusesWhatIsNotOneObject(t *testing.T) {
 	for _, bad := range []string{`[]`, `{"a":1}{}`, `{"a":1} x`, `{"a":1}}`, `{"a":1,"a":2}`, `{"a":}`, ``} {
-		if _, err := parseObject([]byte(bad)); err == nil {
+		if _, err := Parse([]byte(bad)); err == nil {
 			t.Errorf("%q parsed", bad)
 		}
 	}

@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"remote-agents/internal/jsonobject"
 )
 
 // Login is one claudeAiOauth object of .credentials.json, kept whole so the
 // fields this package does not read survive a rewrite. It never prints its tokens.
 type Login struct {
-	fields object
+	fields jsonobject.Object
 	tokens tokens
 }
 
@@ -27,12 +29,12 @@ type tokens struct {
 }
 
 func parseLogin(raw []byte) (Login, error) {
-	o, err := parseObject(raw)
+	o, err := jsonobject.Parse(raw)
 	if err != nil {
 		return Login{}, fmt.Errorf("claudeAiOauth: %w", err)
 	}
 	for _, key := range []string{"accessToken", "refreshToken", "expiresAt"} {
-		if v, ok := o.get(key); !ok || string(v) == "null" {
+		if v, ok := o.Get(key); !ok || string(v) == "null" {
 			return Login{}, fmt.Errorf("claudeAiOauth lacks %s", key)
 		}
 	}
@@ -76,7 +78,7 @@ func (l Login) RefreshExpiresAt() (time.Time, bool) {
 	return time.UnixMilli(*l.tokens.RefreshTokenExpiresAt), true
 }
 
-func (l Login) MarshalJSON() ([]byte, error) { return l.fields.marshal("") }
+func (l Login) MarshalJSON() ([]byte, error) { return l.fields.Marshal("") }
 
 func (l *Login) UnmarshalJSON(data []byte) error {
 	parsed, err := parseLogin(data)
@@ -93,7 +95,7 @@ func (Login) GoString() string { return "claudeauth.Login{redacted}" }
 
 // Account is one oauthAccount object of Claude Code's global config, kept whole.
 type Account struct {
-	fields object
+	fields jsonobject.Object
 	view   accountView
 }
 
@@ -110,7 +112,7 @@ type Identity struct {
 }
 
 func parseAccount(raw []byte) (Account, error) {
-	o, err := parseObject(raw)
+	o, err := jsonobject.Parse(raw)
 	if err != nil {
 		return Account{}, fmt.Errorf("oauthAccount: %w", err)
 	}
@@ -130,7 +132,7 @@ func (a Account) Identity() Identity {
 
 func (a Account) Email() string { return a.view.EmailAddress }
 
-func (a Account) MarshalJSON() ([]byte, error) { return a.fields.marshal("") }
+func (a Account) MarshalJSON() ([]byte, error) { return a.fields.Marshal("") }
 
 func (a *Account) UnmarshalJSON(data []byte) error {
 	parsed, err := parseAccount(data)
