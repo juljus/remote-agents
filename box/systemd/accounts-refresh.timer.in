@@ -1,5 +1,5 @@
 [Unit]
-Description=@NAME@: keep the saved Claude logins signed in
+Description=@NAME@: keep the saved Claude and Codex logins signed in
 
 [Timer]
 OnCalendar=daily

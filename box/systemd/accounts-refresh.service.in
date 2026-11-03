@@ -1,6 +1,6 @@
 [Unit]
-Description=@NAME@: refresh the saved Claude logins nobody uses
+Description=@NAME@: refresh the saved Claude and Codex logins nobody uses
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/share/@NAME@/bin/remote-agents-box account claude keep-fresh
+ExecStart=%h/.local/share/@NAME@/bin/remote-agents-box account keep-fresh

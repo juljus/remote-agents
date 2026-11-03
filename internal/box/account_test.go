@@ -341,7 +341,25 @@ func TestKeepFreshRunsOnlyInTheProductionInstall(t *testing.T) {
 	}
 	writeAccountsConfig(t, l, fmt.Sprintf("[claude]\nconfig_dir = %q\n", filepath.Join(l.Home, "cfg")))
 	lookup := func(string) (string, bool) { return "", false }
-	if err := Account(context.Background(), l, []string{"claude", "keep-fresh"}, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), "runs in only the remote-agents install") {
+	for _, args := range [][]string{{"claude", "keep-fresh"}, {"codex", "keep-fresh"}, {"keep-fresh"}} {
+		if err := Account(context.Background(), l, args, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), "runs in only the remote-agents install") {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+}
+
+func TestKeepFreshOfEveryAgentRunsEachDespiteTheOthers(t *testing.T) {
+	l := testLayout(t)
+	for _, kind := range []string{"claude", "codex"} {
+		if err := os.MkdirAll(l.AccountsDir(kind), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(l.AccountsDir(kind), "broken.json"), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := Account(context.Background(), l, []string{"keep-fresh"}, IO{Stdout: &bytes.Buffer{}}, nil, func(string) (string, bool) { return "", false })
+	if err == nil || !strings.Contains(err.Error(), "claude: account broken") || !strings.Contains(err.Error(), "codex: account broken") {
 		t.Fatalf("err = %v", err)
 	}
 }

@@ -77,9 +77,9 @@ ln -sfn ../bin/remote-agents-box "$SHARE/hookbin/cmux"
 changed="$(install_file "$STAGE/shpool.toml" "$CONFIG/shpool.toml" 0644)"
 [[ -z "$changed" ]] || echo "installed shpool.toml (the daemon reloads it)"
 
-# Only the production install (boxlayout.DefaultName) keeps saved Claude
-# logins fresh: a test install's account commands never touch the real
-# login, and it runs no timer.
+# Only the production install (boxlayout.DefaultName) keeps saved Claude and
+# Codex logins fresh: a test install's account commands never touch the real
+# logins, and it runs no timer.
 units=(shpool.socket shpool.service)
 if [[ "$NAME" == remote-agents ]]; then
   units+=(accounts-refresh.service accounts-refresh.timer)

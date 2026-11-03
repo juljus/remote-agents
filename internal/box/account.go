@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,7 +23,7 @@ import (
 	"remote-agents/internal/spec"
 )
 
-const AccountUsage = "usage: remote-agents-box account claude|codex list | use <name> | save <name> | remove <name> | add <name> <exec spec> | keep-fresh"
+const AccountUsage = "usage: remote-agents-box account [claude|codex] keep-fresh | claude|codex list | use <name> | save <name> | remove <name> | add <name> <exec spec>"
 
 // vault is one agent's saved accounts, as account commands use them.
 type vault interface {
@@ -53,6 +55,9 @@ var accountAgents = map[string]accountAgent{
 // SIGINT, SIGTERM and SIGHUP into ctx: a token refresh, once sent, must live
 // to save what the server answers.
 func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, base []string, lookupEnv func(string) (string, bool)) error {
+	if len(args) == 1 && args[0] == "keep-fresh" {
+		return keepEveryAgentFresh(ctx, l, stdio, base, lookupEnv)
+	}
 	if len(args) < 2 {
 		return errors.New(AccountUsage)
 	}
@@ -133,6 +138,18 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 		return nil
 	}
 	return v.KeepFresh(ctx, stdio.Stdout)
+}
+
+// keepEveryAgentFresh runs each agent's keep-fresh, every one whatever the
+// others' errors, which it reports together.
+func keepEveryAgentFresh(ctx context.Context, l boxlayout.Layout, stdio IO, base []string, lookupEnv func(string) (string, bool)) error {
+	var failed []error
+	for _, kind := range slices.Sorted(maps.Keys(accountAgents)) {
+		if err := Account(ctx, l, []string{kind, "keep-fresh"}, stdio, base, lookupEnv); err != nil {
+			failed = append(failed, fmt.Errorf("%s: %w", kind, err))
+		}
+	}
+	return errors.Join(failed...)
 }
 
 func openClaudeVault(l boxlayout.Layout) (vault, error) {
