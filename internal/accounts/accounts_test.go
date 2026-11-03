@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -444,6 +445,14 @@ func TestKeepFreshRefreshesOnlyLoginsNearTheirExpiry(t *testing.T) {
 	}
 	if log.String() != "refreshed the live login\nrefreshed account idle\n" {
 		t.Fatalf("log %q", log.String())
+	}
+}
+
+func TestKeepFreshLeavesAnUnnamedLiveLoginAlone(t *testing.T) {
+	f := newFixture(t)
+	f.setLive(f.login("stray", 1, time.Hour, 24*time.Hour), account("stray"))
+	if err := f.vault.KeepFresh(ctx, io.Discard); err != nil || len(f.api.refreshes) != 0 {
+		t.Fatalf("KeepFresh = %v, refreshed %v", err, f.api.refreshes)
 	}
 }
 

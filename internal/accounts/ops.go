@@ -257,8 +257,8 @@ func (v Vault) Add(ctx context.Context, name string, signIn func(configDir strin
 	})
 }
 
-// KeepFresh refreshes every login whose refresh token would expire within
-// RefreshAhead, so an account nobody uses stays signed in. It reports each
+// KeepFresh refreshes every saved login whose refresh token would expire
+// within RefreshAhead, so an account nobody uses stays signed in. It reports each
 // account it could not refresh and carries on with the others.
 func (v Vault) KeepFresh(ctx context.Context, log io.Writer) error {
 	var failed []error
@@ -268,7 +268,8 @@ func (v Vault) KeepFresh(ctx context.Context, log io.Writer) error {
 			at, known := l.RefreshExpiresAt()
 			return !known || at.Sub(now) < RefreshAhead
 		}
-		if s.live.Login != nil && !s.live.Login.SignedOut() && due(*s.live.Login) {
+		// Only a live login the vault names is the vault's to keep.
+		if s.active != "" && s.live.Login != nil && !s.live.Login.SignedOut() && due(*s.live.Login) {
 			login, err := s.tx.Refresh(*s.live.Login)
 			if err != nil {
 				failed = append(failed, fmt.Errorf("live login: %w", err))
