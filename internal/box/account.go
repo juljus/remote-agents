@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os/exec"
 	"slices"
 	"strings"
@@ -17,7 +19,7 @@ import (
 	"remote-agents/internal/spec"
 )
 
-// Endpoint overrides, for tests against stand-in servers.
+// Endpoint overrides, for tests against stand-in servers on the box.
 const (
 	TokenURLEnvVar = "REMOTE_AGENTS_CLAUDE_TOKEN_URL"
 	APIURLEnvVar   = "REMOTE_AGENTS_CLAUDE_API_URL"
@@ -80,7 +82,12 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 			return fmt.Errorf("add needs an exec spec, got mode %q", s.Mode)
 		}
 		signIn := func(dir string) error { return signInClaude(l, s, base, dir, stdio) }
-		if err := vault.Add(ctx, rest[0], signIn); err != nil {
+		err = vault.Add(ctx, rest[0], signIn)
+		if errors.Is(err, accounts.ErrAddedLive) {
+			fmt.Fprintf(stdio.Stdout, "%s is the box's login already; it stays as it is\n", rest[0])
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 		fmt.Fprintf(stdio.Stdout, "saved the new login as %s; switch to it with: rclaude account use %s\n", rest[0], rest[0])
@@ -95,14 +102,32 @@ func claudeVault(l boxlayout.Layout, lookupEnv func(string) (string, bool)) (acc
 		return accounts.Vault{}, err
 	}
 	ep := claudeauth.DefaultEndpoints
-	if u, ok := lookupEnv(TokenURLEnvVar); ok {
-		ep.TokenURL = u
-	}
-	if u, ok := lookupEnv(APIURLEnvVar); ok {
-		ep.APIBase = u
+	for key, field := range map[string]*string{TokenURLEnvVar: &ep.TokenURL, APIURLEnvVar: &ep.APIBase} {
+		u, ok := lookupEnv(key)
+		if !ok {
+			continue
+		}
+		if err := loopbackURL(u); err != nil {
+			return accounts.Vault{}, fmt.Errorf("%s: %w", key, err)
+		}
+		*field = u
 	}
 	store := claudeauth.Store{Paths: paths, Endpoints: ep, Client: &http.Client{}, Now: time.Now}
 	return accounts.Vault{Dir: l.AccountsDir("claude"), Store: store}, nil
+}
+
+// loopbackURL admits only a test server on the box itself, so no setting
+// can send a login's tokens anywhere else.
+func loopbackURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	ip, err := netip.ParseAddr(u.Hostname())
+	if u.Scheme != "http" || (u.Hostname() != "localhost" && (err != nil || !ip.IsLoopback())) {
+		return fmt.Errorf("%q is not an http URL on a loopback address", raw)
+	}
+	return nil
 }
 
 // signInClaude runs the spec's sign-in command, Claude Code's `auth login`,

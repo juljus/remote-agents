@@ -32,11 +32,18 @@ func TestAccountAddsASignInAndListsItsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/oauth/usage" || r.Header.Get("Authorization") != "Bearer fake-access" {
+		if r.Header.Get("Authorization") != "Bearer fake-access" {
 			http.Error(w, "no", http.StatusUnauthorized)
 			return
 		}
-		fmt.Fprint(w, `{"five_hour":null,"seven_day":{"utilization":7,"resets_at":null}}`)
+		switch r.URL.Path {
+		case "/api/oauth/profile":
+			fmt.Fprint(w, `{"account":{"uuid":"acc-home"},"organization":{"uuid":"org-home"}}`)
+		case "/api/oauth/usage":
+			fmt.Fprint(w, `{"five_hour":null,"seven_day":{"utilization":7,"resets_at":null}}`)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer api.Close()
 	env := map[string]string{"CLAUDE_CONFIG_DIR": filepath.Join(l.Home, "cfg"), "CLAUDE_SECURESTORAGE_CONFIG_DIR": filepath.Join(l.Home, "cfg"), APIURLEnvVar: api.URL}
@@ -67,6 +74,21 @@ func TestAccountAddsASignInAndListsItsUsage(t *testing.T) {
 	}
 	if len(listing.Accounts) != 1 || listing.Accounts[0].Name != "home" || listing.Accounts[0].SevenDay == nil || listing.Accounts[0].SevenDay.Utilization != 7 || listing.Accounts[0].Error != "" {
 		t.Fatalf("listing %s", out.String())
+	}
+}
+
+func TestAccountEndpointsOnlyPointAtTheBoxItself(t *testing.T) {
+	l := testLayout(t)
+	for _, u := range []string{"https://127.0.0.1:1", "http://example.com", "http://10.0.0.1:80"} {
+		lookup := func(k string) (string, bool) { return u, k == TokenURLEnvVar }
+		if err := Account(context.Background(), l, []string{"claude", "list"}, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), "loopback") {
+			t.Errorf("%s: %v", u, err)
+		}
+	}
+	for _, u := range []string{"http://127.0.0.1:8080/token", "http://localhost:1", "http://[::1]:2"} {
+		if err := loopbackURL(u); err != nil {
+			t.Errorf("%s: %v", u, err)
+		}
 	}
 }
 
