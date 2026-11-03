@@ -22,11 +22,11 @@ import (
 // holds the session a launch resumes.
 const releaseWait = 10 * time.Second
 
-// runRecord is the Claude session a live run's agent was last seen running,
-// with the transcript Claude writes it to.
+// runRecord is the session a live run's agent was last seen running,
+// with the transcript the agent writes it to.
 type runRecord struct {
-	ClaudeSession string `json:"claude_session,omitempty"`
-	Transcript    string `json:"transcript,omitempty"`
+	AgentSession string `json:"claude_session,omitempty"`
+	Transcript   string `json:"transcript,omitempty"`
 }
 
 func writeRunRecord(l boxlayout.Layout, runID string, rec runRecord) error {
@@ -92,29 +92,29 @@ func resumeLostLaunch(l boxlayout.Layout, s *spec.Spec, logf func(string, ...any
 	if err != nil {
 		return runRecord{}, false, err
 	}
-	if hooks.ClaudeSession != "" {
-		rec = runRecord{ClaudeSession: hooks.ClaudeSession, Transcript: hooks.Transcript}
+	if hooks.AgentSession != "" {
+		rec = runRecord{AgentSession: hooks.AgentSession, Transcript: hooks.Transcript}
 	}
-	if rec.ClaudeSession == "" {
-		logf("run %s lost its launcher before its agent reported a Claude session", s.RunID)
+	if rec.AgentSession == "" {
+		logf("run %s lost its launcher before its agent reported a session", s.RunID)
 		return rec, false, nil
 	}
 	_, err = os.Stat(rec.Transcript)
 	switch {
 	case err == nil:
-		s.Argv = slices.Concat(s.Claude.Resume, []string{"--resume", rec.ClaudeSession})
-		logf("run %s lost its launcher; resuming Claude session %s", s.RunID, rec.ClaudeSession)
+		s.Argv = slices.Concat(s.Claude.Resume, []string{"--resume", rec.AgentSession})
+		logf("run %s lost its launcher; resuming Claude session %s", s.RunID, rec.AgentSession)
 	case errors.Is(err, fs.ErrNotExist):
-		s.Argv = slices.Concat(s.Claude.Resume, []string{"--session-id", rec.ClaudeSession})
-		logf("run %s lost its launcher; starting Claude session %s, which has no transcript yet", s.RunID, rec.ClaudeSession)
+		s.Argv = slices.Concat(s.Claude.Resume, []string{"--session-id", rec.AgentSession})
+		logf("run %s lost its launcher; starting Claude session %s, which has no transcript yet", s.RunID, rec.AgentSession)
 	default:
-		return runRecord{}, false, fmt.Errorf("checking the transcript of Claude session %s: %w", rec.ClaudeSession, err)
+		return runRecord{}, false, fmt.Errorf("checking the transcript of Claude session %s: %w", rec.AgentSession, err)
 	}
 	return rec, true, nil
 }
 
-// claudeSessionsDir is where each running Claude registers itself as <pid>.json.
-func claudeSessionsDir(l boxlayout.Layout, env []string) string {
+// agentSessionsDir is where each running Claude registers itself as <pid>.json.
+func agentSessionsDir(l boxlayout.Layout, env []string) string {
 	if dir := envValue(env, "CLAUDE_CONFIG_DIR"); dir != "" {
 		return filepath.Join(dir, "sessions")
 	}
@@ -129,11 +129,11 @@ type claudeRegistration struct {
 	ProcStart string `json:"procStart"`
 }
 
-// claudeHolder finds a running Claude registered in dir under claudeSession.
+// claudeHolder finds a running Claude registered in dir under agentSession.
 // A registration Claude is rewriting in place may not parse; unless its pid,
 // the file's name, has exited, unreadable is then the error of the last such
 // file, and a later look may read it.
-func claudeHolder(dir string, proc fs.FS, claudeSession string) (pid int, unreadable, err error) {
+func claudeHolder(dir string, proc fs.FS, agentSession string) (pid int, unreadable, err error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil, nil
@@ -168,7 +168,7 @@ func claudeHolder(dir string, proc fs.FS, claudeSession string) (pid int, unread
 			}
 			continue
 		}
-		if r.SessionID != claudeSession {
+		if r.SessionID != agentSession {
 			continue
 		}
 		start, err := strconv.ParseUint(r.ProcStart, 10, 64)
@@ -186,31 +186,31 @@ func claudeHolder(dir string, proc fs.FS, claudeSession string) (pid int, unread
 	return 0, unreadable, nil
 }
 
-// awaitRelease waits up to wait for no running Claude to hold claudeSession:
+// awaitRelease waits up to wait for no running Claude to hold agentSession:
 // two would write one transcript.
-func awaitRelease(dir string, proc fs.FS, claudeSession string, wait time.Duration, logf func(string, ...any)) error {
+func awaitRelease(dir string, proc fs.FS, agentSession string, wait time.Duration, logf func(string, ...any)) error {
 	deadline := time.Now().Add(wait)
 	held := 0
 	for {
-		pid, unreadable, err := claudeHolder(dir, proc, claudeSession)
+		pid, unreadable, err := claudeHolder(dir, proc, agentSession)
 		if err != nil {
 			return err
 		}
 		if pid == 0 && unreadable == nil {
 			if held != 0 {
-				logf("Claude session %s is free again", claudeSession)
+				logf("Claude session %s is free again", agentSession)
 			}
 			return nil
 		}
 		if pid != 0 && pid != held {
-			logf("Claude session %s is still held by pid %d; waiting up to %s for it to exit", claudeSession, pid, wait)
+			logf("Claude session %s is still held by pid %d; waiting up to %s for it to exit", agentSession, pid, wait)
 			held = pid
 		}
 		if time.Now().After(deadline) {
 			if pid == 0 {
-				err = fmt.Errorf("telling whether a running Claude holds session %s: %w", claudeSession, unreadable)
+				err = fmt.Errorf("telling whether a running Claude holds session %s: %w", agentSession, unreadable)
 			} else {
-				err = fmt.Errorf("pid %d still holds Claude session %s after %s; end it, then reconnect", pid, claudeSession, wait)
+				err = fmt.Errorf("pid %d still holds Claude session %s after %s; end it, then reconnect", pid, agentSession, wait)
 			}
 			logf("not starting the agent: %v", err)
 			return err

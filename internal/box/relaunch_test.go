@@ -65,8 +65,8 @@ func TestARelaunchResumesTheSessionTheHooksLastReported(t *testing.T) {
 	s := claudeSpec("/w")
 	dir := t.TempDir()
 	// /clear had moved the agent on to another session, which has had a turn since.
-	hooks := reaper.HookState{ClaudeSession: cleared, Transcript: transcriptIn(t, dir, cleared)}
-	lostLaunch(t, l, s, runRecord{ClaudeSession: commandSession, Transcript: transcriptIn(t, dir, commandSession)}, hooks)
+	hooks := reaper.HookState{AgentSession: cleared, Transcript: transcriptIn(t, dir, cleared)}
+	lostLaunch(t, l, s, runRecord{AgentSession: commandSession, Transcript: transcriptIn(t, dir, commandSession)}, hooks)
 	var logged []string
 	rec, lost, err := resumeLostLaunch(l, &s, recordLog(&logged))
 	if err != nil || !lost {
@@ -75,7 +75,7 @@ func TestARelaunchResumesTheSessionTheHooksLastReported(t *testing.T) {
 	if !slices.Equal(s.Argv, []string{"claude", "--dangerously-skip-permissions", "--resume", cleared}) {
 		t.Fatalf("argv = %q", s.Argv)
 	}
-	if rec != (runRecord{ClaudeSession: cleared, Transcript: hooks.Transcript}) {
+	if rec != (runRecord{AgentSession: cleared, Transcript: hooks.Transcript}) {
 		t.Fatalf("record = %+v", rec)
 	}
 	if len(logged) != 1 || !strings.Contains(logged[0], cleared) {
@@ -88,7 +88,7 @@ func TestARelaunchStartsAReportedSessionWithoutATranscriptAfresh(t *testing.T) {
 	s := claudeSpec("/w")
 	// Claude writes a transcript only once a turn starts.
 	missing := filepath.Join(t.TempDir(), cleared+".jsonl")
-	lostLaunch(t, l, s, runRecord{}, reaper.HookState{ClaudeSession: cleared, Transcript: missing})
+	lostLaunch(t, l, s, runRecord{}, reaper.HookState{AgentSession: cleared, Transcript: missing})
 	if _, lost, err := resumeLostLaunch(l, &s, noLog); err != nil || !lost {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestARelaunchWithoutHookStateFollowsTheRunRecord(t *testing.T) {
 	l := testLayout(t)
 	s := claudeSpec("/w")
 	// The previous relaunch died too, before its agent reported a session.
-	want := runRecord{ClaudeSession: cleared, Transcript: transcriptIn(t, t.TempDir(), cleared)}
+	want := runRecord{AgentSession: cleared, Transcript: transcriptIn(t, t.TempDir(), cleared)}
 	lostLaunch(t, l, s, want, reaper.HookState{})
 	rec, lost, err := resumeLostLaunch(l, &s, noLog)
 	if err != nil || !lost {
@@ -136,13 +136,13 @@ func TestTheWatcherRecordsTheLastReportedSessionWhenItFinishes(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reported after the last check: a stopped launch's relaunch must still resume it.
-	hooks := reaper.HookState{ClaudeSession: cleared, Transcript: "/t/" + cleared + ".jsonl"}
+	hooks := reaper.HookState{AgentSession: cleared, Transcript: "/t/" + cleared + ".jsonl"}
 	if err := jsonfile.Write(l.HookState(w.session), hooks); err != nil {
 		t.Fatal(err)
 	}
 	w.finish()
 	rec, found, err := readRunRecord(l, runID)
-	if err != nil || !found || rec != (runRecord{ClaudeSession: cleared, Transcript: hooks.Transcript}) {
+	if err != nil || !found || rec != (runRecord{AgentSession: cleared, Transcript: hooks.Transcript}) {
 		t.Fatalf("record %+v, %v, %v", rec, found, err)
 	}
 	if _, err := os.Stat(l.HookState(w.session)); !os.IsNotExist(err) {
@@ -164,8 +164,8 @@ func TestTheWatcherKeepsTheRunRecordCurrent(t *testing.T) {
 	if err := w.keepRecord(reaper.HookState{}); err != nil || read() != (runRecord{}) {
 		t.Fatalf("before any report: %+v, %v", read(), err)
 	}
-	reported := runRecord{ClaudeSession: cleared, Transcript: "/t/" + cleared + ".jsonl"}
-	if err := w.keepRecord(reaper.HookState{ClaudeSession: reported.ClaudeSession, Transcript: reported.Transcript}); err != nil || read() != reported {
+	reported := runRecord{AgentSession: cleared, Transcript: "/t/" + cleared + ".jsonl"}
+	if err := w.keepRecord(reaper.HookState{AgentSession: reported.AgentSession, Transcript: reported.Transcript}); err != nil || read() != reported {
 		t.Fatalf("after a report: %+v, %v", read(), err)
 	}
 	old := time.Now().Add(-markerTTL - time.Hour)
@@ -180,12 +180,12 @@ func TestTheWatcherKeepsTheRunRecordCurrent(t *testing.T) {
 	}
 }
 
-func TestClaudeSessionsDirFollowsClaudeConfigDir(t *testing.T) {
+func TestAgentSessionsDirFollowsClaudeConfigDir(t *testing.T) {
 	l := boxlayout.Layout{Home: "/home/agent", Name: boxlayout.DefaultName}
-	if got := claudeSessionsDir(l, []string{"HOME=/home/agent"}); got != "/home/agent/.claude/sessions" {
+	if got := agentSessionsDir(l, []string{"HOME=/home/agent"}); got != "/home/agent/.claude/sessions" {
 		t.Fatalf("default = %q", got)
 	}
-	if got := claudeSessionsDir(l, []string{"CLAUDE_CONFIG_DIR=/cfg"}); got != "/cfg/sessions" {
+	if got := agentSessionsDir(l, []string{"CLAUDE_CONFIG_DIR=/cfg"}); got != "/cfg/sessions" {
 		t.Fatalf("with CLAUDE_CONFIG_DIR = %q", got)
 	}
 }

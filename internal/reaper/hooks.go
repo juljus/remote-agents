@@ -21,8 +21,8 @@ var waitingNotifications = []string{"permission_prompt", "elicitation_dialog"}
 
 // HookState is what the agent's hooks have reported about its session.
 type HookState struct {
-	ClaudeSession string `json:"claude_session,omitempty"`
-	Transcript    string `json:"transcript,omitempty"`
+	AgentSession string `json:"claude_session,omitempty"`
+	Transcript   string `json:"transcript,omitempty"`
 	// A turn is open while TurnStarted is after TurnEnded.
 	TurnStarted int64 `json:"turn_started_ms,omitempty"`
 	TurnEnded   int64 `json:"turn_ended_ms,omitempty"`
@@ -62,7 +62,7 @@ func (h HookState) Apply(raw []byte, now time.Time) (HookState, error) {
 		return h, fmt.Errorf("unexpected hook event %q", p.Event)
 	}
 	if p.SessionID != "" {
-		h.ClaudeSession = p.SessionID
+		h.AgentSession = p.SessionID
 	}
 	if p.Transcript != "" {
 		h.Transcript = p.Transcript

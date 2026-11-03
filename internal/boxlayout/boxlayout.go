@@ -70,7 +70,7 @@ func (l Layout) EndedDir() string                { return l.state("ended") }
 func (l Layout) ClaudeBin() string               { return filepath.Join(l.Home, ClaudeBinDir) }
 func (l Layout) EndedMarker(runID string) string { return filepath.Join(l.EndedDir(), runID+".json") }
 
-// The Claude session each live run's agent was last seen running.
+// The agent session each live run's agent was last seen running.
 func (l Layout) RunsDir() string               { return l.state("runs") }
 func (l Layout) RunRecord(runID string) string { return filepath.Join(l.RunsDir(), runID+".json") }
 
@@ -92,7 +92,7 @@ func (l Layout) PastedDir() string  { return l.state("pasted") }
 func (l Layout) PastedLock() string { return l.state("pasted.lock") }
 
 // The reaper's files: hook reports and the launcher's status per shpool
-// session, records of reaped Claude sessions, its log and its config.
+// session, records of reaped agent sessions, its log and its config.
 func (l Layout) ActivityDir() string { return l.state("activity") }
 func (l Layout) HookState(session string) string {
 	return filepath.Join(l.ActivityDir(), session+".hooks.json")
@@ -101,8 +101,8 @@ func (l Layout) Status(session string) string {
 	return filepath.Join(l.ActivityDir(), session+".status.json")
 }
 func (l Layout) ReapedDir() string { return l.state("reaped") }
-func (l Layout) Reaped(claudeSession string) string {
-	return filepath.Join(l.ReapedDir(), claudeSession+".json")
+func (l Layout) Reaped(agentSession string) string {
+	return filepath.Join(l.ReapedDir(), agentSession+".json")
 }
 func (l Layout) ReapedSessionsDir() string { return l.state("reaped-sessions") }
 func (l Layout) ReapedSession(session string) string {

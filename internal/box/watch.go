@@ -26,12 +26,12 @@ const (
 const transcriptTail = 256 << 10
 
 type reapRequest struct {
-	reason        reaper.Reason
-	claudeSession string
+	reason       reaper.Reason
+	agentSession string
 }
 
-// watcher runs in the launcher beside a Claude agent and asks for the agent
-// to be ended once the reaper's policy says so.
+// watcher runs in the launcher beside an agent whose session it follows,
+// and asks for the agent to be ended once the reaper's policy says so.
 type watcher struct {
 	l       boxlayout.Layout
 	cfg     reaper.Config
@@ -122,7 +122,7 @@ func (w *watcher) finish() {
 		err = w.keepRecord(hooks)
 	}
 	if err != nil {
-		w.log("recording the run's Claude session: %v", err)
+		w.log("recording the run's agent session: %v", err)
 	}
 	for _, path := range []string{w.l.HookState(w.session), w.l.HookState(w.session) + ".lock", w.l.Status(w.session)} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -173,9 +173,9 @@ func (w *watcher) check(now time.Time, agent int) (reapRequest, error) {
 	if d.Reap == "" {
 		return reapRequest{}, nil
 	}
-	if obs.Hooks.ClaudeSession == "" {
+	if obs.Hooks.AgentSession == "" {
 		if !w.unknownID {
-			w.log("not ending the session (%s): its Claude session id is unknown, so it could not be resumed", d.Reap)
+			w.log("not ending the session (%s): its agent session id is unknown, so it could not be resumed", d.Reap)
 		}
 		w.unknownID = true
 		return reapRequest{}, nil
@@ -184,15 +184,15 @@ func (w *watcher) check(now time.Time, agent int) (reapRequest, error) {
 	if d.Reap == reaper.ReapedIdle {
 		why += ", idle since " + d.IdleSince.UTC().Format(time.RFC3339)
 	}
-	w.log("ending Claude session %s (%s): %s", obs.Hooks.ClaudeSession, d.Reap, why)
-	return reapRequest{reason: d.Reap, claudeSession: obs.Hooks.ClaudeSession}, nil
+	w.log("ending agent session %s (%s): %s", obs.Hooks.AgentSession, d.Reap, why)
+	return reapRequest{reason: d.Reap, agentSession: obs.Hooks.AgentSession}, nil
 }
 
-// keepRecord notes the Claude session the hooks report in the run's record,
+// keepRecord notes the agent session the hooks report in the run's record,
 // whose rewrite also keeps a long-running run's record from being pruned.
 func (w *watcher) keepRecord(hooks reaper.HookState) error {
-	if hooks.ClaudeSession != "" {
-		w.record = runRecord{ClaudeSession: hooks.ClaudeSession, Transcript: hooks.Transcript}
+	if hooks.AgentSession != "" {
+		w.record = runRecord{AgentSession: hooks.AgentSession, Transcript: hooks.Transcript}
 	}
 	return writeRunRecord(w.l, w.runID, w.record)
 }

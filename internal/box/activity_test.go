@@ -168,7 +168,7 @@ func TestRecordActivity(t *testing.T) {
 		t.Fatal(err)
 	}
 	h, err := reaper.ReadHookState(l.HookState("claude-abc"))
-	if err != nil || h.ClaudeSession != "s1" || h.TurnStarted != 5 {
+	if err != nil || h.AgentSession != "s1" || h.TurnStarted != 5 {
 		t.Fatalf("hook state %+v, %v", h, err)
 	}
 	// A broken hook fails and leaves a line in the reaper log.
@@ -214,7 +214,7 @@ func TestResumeAfterReapRunsTheReapedSession(t *testing.T) {
 	if err := writeReaped(l, s, id, reaper.ReapedIdle, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	r, err := resumeAfterReap(l, &s, marker{Reason: reaper.ReapedIdle, ClaudeSession: id}, true)
+	r, err := resumeAfterReap(l, &s, marker{Reason: reaper.ReapedIdle, AgentSession: id}, true)
 	if err != nil || r != reaper.ReapedIdle {
 		t.Fatalf("resume: %q, %v", r, err)
 	}
@@ -258,7 +258,7 @@ func TestAnnounceResume(t *testing.T) {
 
 func TestLaunchReportsAReapedRunWithoutClaudeAsEnded(t *testing.T) {
 	l := testLayout(t)
-	if err := writeMarker(l, runID, marker{ExitCode: 0, Reason: reaper.ReapedIdle, ClaudeSession: "s1"}); err != nil {
+	if err := writeMarker(l, runID, marker{ExitCode: 0, Reason: reaper.ReapedIdle, AgentSession: "s1"}); err != nil {
 		t.Fatal(err)
 	}
 	code, out := launch(t, l, sessionSpec(t.TempDir(), "/bin/sh", "-c", "echo SHOULD-NOT-RUN"))
@@ -314,7 +314,7 @@ func TestReattachTargetResumesTheReapedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec, found, err := readReapedSession(l, s.Session)
-	if err != nil || !found || rec.ClaudeSession != id || rec.At != 7 {
+	if err != nil || !found || rec.AgentSession != id || rec.At != 7 {
 		t.Fatalf("record %+v, %v, %v", rec, found, err)
 	}
 	target, err := reattachTarget(rec)
@@ -347,7 +347,7 @@ func TestReapedSessionsNewestFirst(t *testing.T) {
 		}
 	}
 	recs, err := reapedSessions(l)
-	if err != nil || len(recs) != 2 || recs[0].ClaudeSession != "c1" || recs[1].ClaudeSession != "c0" {
+	if err != nil || len(recs) != 2 || recs[0].AgentSession != "c1" || recs[1].AgentSession != "c0" {
 		t.Fatalf("reaped = %+v, %v", recs, err)
 	}
 }
@@ -364,7 +364,7 @@ func TestTakeReapedKeepsANewerReapOfTheSameName(t *testing.T) {
 	if _, err := takeReaped(l, "old"); err != nil {
 		t.Fatal(err)
 	}
-	if rec, found, err := readReapedSession(l, s.Session); !found || err != nil || rec.ClaudeSession != "new" {
+	if rec, found, err := readReapedSession(l, s.Session); !found || err != nil || rec.AgentSession != "new" {
 		t.Fatalf("newer record lost: %+v, %v, %v", rec, found, err)
 	}
 }

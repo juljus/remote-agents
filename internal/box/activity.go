@@ -129,7 +129,7 @@ func withActivityHooks(l boxlayout.Layout, argv []string, workdir string) ([]str
 	return out, nil
 }
 
-// A reap is recorded twice: by Claude session, so the next run resuming it
+// A reap is recorded twice: by agent session, so the next run resuming it
 // can say so, and by shpool session, so an attach by name can resume it and
 // listings can show it.
 type reapedRecord struct {
@@ -138,23 +138,23 @@ type reapedRecord struct {
 }
 
 type reapedSessionRecord struct {
-	Reason        reaper.Reason `json:"reason"`
-	ClaudeSession string        `json:"claude_session"`
-	At            int64         `json:"at_ms"`
+	Reason       reaper.Reason `json:"reason"`
+	AgentSession string        `json:"claude_session"`
+	At           int64         `json:"at_ms"`
 	// Spec is the reaped run's, which an attach by name resumes.
 	Spec spec.Spec `json:"spec"`
 }
 
-func writeReaped(l boxlayout.Layout, s spec.Spec, claudeSession string, r reaper.Reason, now time.Time) error {
+func writeReaped(l boxlayout.Layout, s spec.Spec, agentSession string, r reaper.Reason, now time.Time) error {
 	for _, dir := range []string{l.ReapedDir(), l.ReapedSessionsDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("creating %s: %w", filepath.Base(dir), err)
 		}
 	}
-	if err := jsonfile.Write(l.Reaped(claudeSession), reapedRecord{Reason: r, Session: s.Session}); err != nil {
+	if err := jsonfile.Write(l.Reaped(agentSession), reapedRecord{Reason: r, Session: s.Session}); err != nil {
 		return err
 	}
-	return jsonfile.Write(l.ReapedSession(s.Session), reapedSessionRecord{Reason: r, ClaudeSession: claudeSession, At: now.UnixMilli(), Spec: s})
+	return jsonfile.Write(l.ReapedSession(s.Session), reapedSessionRecord{Reason: r, AgentSession: agentSession, At: now.UnixMilli(), Spec: s})
 }
 
 func readReapedSession(l boxlayout.Layout, session string) (reapedSessionRecord, bool, error) {
@@ -190,23 +190,23 @@ func reapedSessions(l boxlayout.Layout) ([]reapedSessionRecord, error) {
 	return out, nil
 }
 
-// takeReaped returns and removes the records of a reap of claudeSession, if any.
-func takeReaped(l boxlayout.Layout, claudeSession string) (reaper.Reason, error) {
+// takeReaped returns and removes the records of a reap of agentSession, if any.
+func takeReaped(l boxlayout.Layout, agentSession string) (reaper.Reason, error) {
 	var rec reapedRecord
-	if found, err := jsonfile.Read(l.Reaped(claudeSession), &rec); err != nil || !found {
+	if found, err := jsonfile.Read(l.Reaped(agentSession), &rec); err != nil || !found {
 		return "", err
 	}
 	byName, found, err := readReapedSession(l, rec.Session)
 	if err != nil {
 		return "", err
 	}
-	// The name may since have been reaped again with another Claude session.
-	if found && byName.ClaudeSession == claudeSession {
+	// The name may since have been reaped again with another agent session.
+	if found && byName.AgentSession == agentSession {
 		if err := os.Remove(l.ReapedSession(rec.Session)); err != nil {
 			return "", fmt.Errorf("removing reaped session record: %w", err)
 		}
 	}
-	if err := os.Remove(l.Reaped(claudeSession)); err != nil {
+	if err := os.Remove(l.Reaped(agentSession)); err != nil {
 		return "", fmt.Errorf("removing reaped record: %w", err)
 	}
 	return rec.Reason, nil
@@ -218,8 +218,8 @@ func reattachTarget(rec reapedSessionRecord) (spec.Spec, error) {
 	if s.Claude == nil {
 		return spec.Spec{}, fmt.Errorf("reaped session %s has no resume command", s.Session)
 	}
-	s.Argv = slices.Concat(s.Claude.Resume, []string{"--resume", rec.ClaudeSession})
-	s.Claude.Resumes = rec.ClaudeSession
+	s.Argv = slices.Concat(s.Claude.Resume, []string{"--resume", rec.AgentSession})
+	s.Claude.Resumes = rec.AgentSession
 	return s, s.Validate()
 }
 
@@ -229,7 +229,7 @@ func resumeCommand(rec reapedSessionRecord) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return entrypoint.Name(agent) + " --resume " + rec.ClaudeSession, nil
+	return entrypoint.Name(agent) + " --resume " + rec.AgentSession, nil
 }
 
 func endedWhy(r reaper.Reason) string {

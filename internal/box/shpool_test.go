@@ -75,7 +75,7 @@ func TestFormatSessions(t *testing.T) {
 func TestFormatReapedShowsRecentReapsWithTheirResumeCommand(t *testing.T) {
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	rec := func(name, id string, r reaper.Reason, ago time.Duration) reapedSessionRecord {
-		return reapedSessionRecord{Reason: r, ClaudeSession: id, At: now.Add(-ago).UnixMilli(), Spec: spec.Spec{Session: name}}
+		return reapedSessionRecord{Reason: r, AgentSession: id, At: now.Add(-ago).UnixMilli(), Spec: spec.Spec{Session: name}}
 	}
 	var out bytes.Buffer
 	err := formatReaped(&out, []reapedSessionRecord{

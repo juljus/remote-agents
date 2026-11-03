@@ -105,9 +105,9 @@ func prepareAgent(l boxlayout.Layout, s spec.Spec, base []string) (string, []str
 
 type marker struct {
 	ExitCode int `json:"exit_code"`
-	// Reason is set when the reaper ended the agent; ClaudeSession is then the session to resume.
-	Reason        reaper.Reason `json:"reason,omitempty"`
-	ClaudeSession string        `json:"claude_session,omitempty"`
+	// Reason is set when the reaper ended the agent; AgentSession is then the session to resume.
+	Reason       reaper.Reason `json:"reason,omitempty"`
+	AgentSession string        `json:"claude_session,omitempty"`
 }
 
 // Launch runs inside the shpool session. It returns the exit code for the session.
@@ -171,7 +171,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 	var w *watcher
 	if s.Claude != nil {
 		if id, _ := claudeargs.SessionOf(s.Argv[1:]); id != "" {
-			if err := awaitRelease(claudeSessionsDir(l, env), os.DirFS("/proc"), id, releaseWait, logf); err != nil {
+			if err := awaitRelease(agentSessionsDir(l, env), os.DirFS("/proc"), id, releaseWait, logf); err != nil {
 				return fail(err)
 			}
 		}
@@ -198,14 +198,14 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		}
 		return code
 	}
-	if err := writeMarker(l, s.RunID, marker{ExitCode: code, Reason: reaped.reason, ClaudeSession: reaped.claudeSession}); err != nil {
+	if err := writeMarker(l, s.RunID, marker{ExitCode: code, Reason: reaped.reason, AgentSession: reaped.agentSession}); err != nil {
 		return fail(err)
 	}
 	if err := removeRunRecord(l, s.RunID); err != nil {
 		return fail(err)
 	}
 	if reaped.reason != "" {
-		if err := writeReaped(l, s, reaped.claudeSession, reaped.reason, time.Now()); err != nil {
+		if err := writeReaped(l, s, reaped.agentSession, reaped.reason, time.Now()); err != nil {
 			return fail(err)
 		}
 		if err := forgetAfterExit(l, s.Session); err != nil {
@@ -215,12 +215,12 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 	return code
 }
 
-// resumeAfterReap points s at the Claude session the reaper ended, when the
+// resumeAfterReap points s at the agent session the reaper ended, when the
 // run's marker says so, and reports the reap a resume of it follows.
 func resumeAfterReap(l boxlayout.Layout, s *spec.Spec, m marker, ended bool) (reaper.Reason, error) {
 	if ended {
-		s.Argv = slices.Concat(s.Claude.Resume, []string{"--resume", m.ClaudeSession})
-		if _, err := takeReaped(l, m.ClaudeSession); err != nil {
+		s.Argv = slices.Concat(s.Claude.Resume, []string{"--resume", m.AgentSession})
+		if _, err := takeReaped(l, m.AgentSession); err != nil {
 			return "", err
 		}
 		return m.Reason, nil

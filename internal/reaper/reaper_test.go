@@ -53,7 +53,7 @@ func apply(t *testing.T, h HookState, at time.Time, payload string) HookState {
 func TestHookStateFollowsTurnsTasksAndCrons(t *testing.T) {
 	var h HookState
 	h = apply(t, h, t0, `{"hook_event_name":"SessionStart","session_id":"s1","transcript_path":"/p/s1.jsonl","source":"startup"}`)
-	if h.ClaudeSession != "s1" || h.Transcript != "/p/s1.jsonl" || h.TurnOpen() {
+	if h.AgentSession != "s1" || h.Transcript != "/p/s1.jsonl" || h.TurnOpen() {
 		t.Fatalf("after start: %+v", h)
 	}
 	h = apply(t, h, t0.Add(time.Second), `{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"go"}`)
@@ -78,7 +78,7 @@ func TestHookStateFollowsTurnsTasksAndCrons(t *testing.T) {
 	}
 	// /clear starts a new Claude session in the same process.
 	h = apply(t, h, t0.Add(6*time.Second), `{"hook_event_name":"SessionStart","session_id":"s2","transcript_path":"/p/s2.jsonl","source":"clear"}`)
-	if h.ClaudeSession != "s2" || h.Transcript != "/p/s2.jsonl" {
+	if h.AgentSession != "s2" || h.Transcript != "/p/s2.jsonl" {
 		t.Fatalf("after clear: %+v", h)
 	}
 }
@@ -124,7 +124,7 @@ func TestRecordHookSerializesConcurrentHooks(t *testing.T) {
 	}
 	wg.Wait()
 	h, err := ReadHookState(path)
-	if err != nil || h.ClaudeSession != "s" || h.TurnEnded != t0.UnixMilli() {
+	if err != nil || h.AgentSession != "s" || h.TurnEnded != t0.UnixMilli() {
 		t.Fatalf("state %+v, %v", h, err)
 	}
 }

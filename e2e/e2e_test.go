@@ -1211,7 +1211,7 @@ func TestIdleDetachedSessionIsReapedThenResumedOnReconnect(t *testing.T) {
 	defer block(t, false)
 	waitGone(t, "fakeclaude-"+id, 20*time.Second)
 	log, err := onBox("cat " + box.ReaperLog())
-	if err != nil || !strings.Contains(log, "ending Claude session "+id+" (reaped-idle)") || !regexp.MustCompile(`left-behind processes: \d+ sleep`).MatchString(log) {
+	if err != nil || !strings.Contains(log, "ending agent session "+id+" (reaped-idle)") || !regexp.MustCompile(`left-behind processes: \d+ sleep`).MatchString(log) {
 		t.Fatalf("reaper log: %v\n%s", err, log)
 	}
 	if left, _ := onBox("pgrep -a -x sleep | grep -c ' 4242$'"); strings.TrimSpace(left) != "0" {
