@@ -5,6 +5,7 @@
 package accounts
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -118,13 +119,31 @@ func (v Vault) read() (*state, error) {
 		if err != nil {
 			return nil, err
 		}
-		var e entry
-		if err := json.Unmarshal(data, &e); err != nil {
+		e, err := parseEntry(data)
+		if err != nil {
 			return nil, fmt.Errorf("account %s: %w", name, err)
 		}
 		s.entries[name] = e
 	}
 	return s, nil
+}
+
+// parseEntry reads an entry file, which must hold the login and its
+// account record and nothing else.
+func parseEntry(data []byte) (entry, error) {
+	var raw struct {
+		Login   *claudeauth.Login   `json:"claudeAiOauth"`
+		Account *claudeauth.Account `json:"oauthAccount"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&raw); err != nil {
+		return entry{}, err
+	}
+	if raw.Login == nil || raw.Account == nil {
+		return entry{}, errors.New("lacks claudeAiOauth or oauthAccount")
+	}
+	return entry{Login: *raw.Login, Account: *raw.Account}, nil
 }
 
 func (v Vault) writeEntry(s *state, name string, e entry) error {
@@ -168,6 +187,8 @@ type live struct {
 	active string
 	// unverified says why the server could not name the login's account.
 	unverified string
+	// copies are the entries that hold the login's refresh token.
+	copies []string
 }
 
 // possiblyLive reports whether name's saved login may be a copy of the
@@ -180,7 +201,7 @@ func (l *live) possiblyLive(name string) bool {
 	case liveUnknown:
 		return true
 	}
-	return name == l.active
+	return name == l.active || slices.Contains(l.copies, name)
 }
 
 // email labels the live login, from an account record that matches it.
@@ -207,6 +228,11 @@ func (v Vault) live(ctx context.Context, s *state) (*live, error) {
 	if read.Login == nil || read.Login.SignedOut() {
 		return l, nil
 	}
+	for _, name := range s.names() {
+		if s.entries[name].Login.SameRefreshToken(*read.Login) {
+			l.copies = append(l.copies, name)
+		}
+	}
 	if read.Login.AccessExpired(v.Store.Now()) {
 		l.unverified = "its access token expired"
 	} else {
@@ -221,11 +247,9 @@ func (v Vault) live(ctx context.Context, s *state) (*live, error) {
 			return l, v.saveLive(ctx, s, l)
 		}
 	}
-	for _, name := range s.names() {
-		if s.entries[name].Login.SameRefreshToken(*read.Login) {
-			l.state, l.active = liveProven, name
-			return l, nil
-		}
+	if len(l.copies) > 0 {
+		l.state, l.active = liveProven, l.copies[0]
+		return l, nil
 	}
 	l.state = liveUnknown
 	if read.Account == nil {

@@ -450,8 +450,9 @@ func TestAnUnverifiedBoxLoginIsNeverRefreshed(t *testing.T) {
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
-			f.seed("work", f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
-			f.seed("home", f.login("home", 1, -time.Minute, 20*24*time.Hour), account("home"))
+			// Both are due for KeepFresh, which refreshes only those that cannot be the box's.
+			f.seed("work", f.login("work", 1, time.Hour, 3*24*time.Hour), account("work"))
+			f.seed("home", f.login("home", 1, -time.Minute, 3*24*time.Hour), account("home"))
 			taken := c.prepare(f)
 			l, err := f.vault.Usage(ctx)
 			if err != nil {
@@ -464,10 +465,49 @@ func TestAnUnverifiedBoxLoginIsNeverRefreshed(t *testing.T) {
 				t.Fatalf("active %q, want %q", l.Active(), taken)
 			}
 			var log bytes.Buffer
-			if err := f.vault.KeepFresh(ctx, &log); err != nil {
-				t.Fatal(err)
+			err = f.vault.KeepFresh(ctx, &log)
+			if unknown := taken == ""; unknown != (err != nil) {
+				t.Fatalf("KeepFresh = %v", err)
 			}
 		})
+	}
+}
+
+func TestAnEntryHoldingTheBoxsLoginIsNeverRefreshed(t *testing.T) {
+	f := newFixture(t)
+	// A guessed save went to the wrong entry, and the switch after it failed.
+	box := f.login("box", 1, time.Hour, 3*24*time.Hour)
+	f.seed("work", box, account("work"))
+	f.setLive(box, account("box"))
+	var log bytes.Buffer
+	if err := f.vault.KeepFresh(ctx, &log); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.vault.Use(ctx, "work"); err == nil || !strings.Contains(err.Error(), "account work holds a copy of the box's login") {
+		t.Fatalf("Use = %v", err)
+	}
+	if _, err := f.vault.Add(ctx, "work", signInAs("work", f.login("work", 2, time.Hour, 20*24*time.Hour))); err == nil || !strings.Contains(err.Error(), "account work holds a copy of the box's login") {
+		t.Fatalf("Add = %v", err)
+	}
+}
+
+func TestAnIncompleteEntryIsRefused(t *testing.T) {
+	f := newFixture(t)
+	f.setLive(f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+	if err := f.vault.ensureDir(); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		`{"claudeAiOauth":` + f.login("home", 1, time.Hour, 20*24*time.Hour) + `}`,
+		`{"oauthAccount":` + account("home") + `,"claudeAiOauth":null}`,
+		`{"claudeAiOauth":` + f.login("home", 2, time.Hour, 20*24*time.Hour) + `,"oauthAccount":` + account("home") + `,"x":1}`,
+	} {
+		if err := os.WriteFile(f.vault.entryPath("home"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.vault.Usage(ctx); err == nil || !strings.Contains(err.Error(), "account home") {
+			t.Errorf("%.40s...: %v", body, err)
+		}
 	}
 }
 

@@ -125,6 +125,8 @@ func (v Vault) Use(ctx context.Context, name string) (switched bool, err error) 
 			return fmt.Errorf("the box's login is unverified (%s) and no saved account is known to be it, so switching could lose it; %s, then switch", l.unverified, unverifiedHint)
 		case l.state != liveNone && l.active == name:
 			return nil
+		case l.possiblyLive(name):
+			return copyError(name)
 		case l.unnamed():
 			return unnamedError(l)
 		case l.state == liveGuessed && s.entries[l.active].Login.NewerThan(*l.read.Login):
@@ -154,6 +156,13 @@ func (v Vault) Use(ctx context.Context, name string) (switched bool, err error) 
 		})
 	})
 	return switched, err
+}
+
+// copyError refuses to act on an entry that holds the box's login under
+// another account's name, as a guessed save that a failed switch followed
+// leaves; switching away makes its copy the only one again.
+func copyError(name string) error {
+	return fmt.Errorf("account %s holds a copy of the box's login; switch to another account first", name)
 }
 
 func unnamedError(l *live) error {
@@ -289,6 +298,8 @@ func (v Vault) Add(ctx context.Context, name string, signIn func(configDir strin
 		case l.state == liveVerified && *l.id == id:
 			added = AddedLive
 			return v.nameLive(s, l, name, *made.Account)
+		case ok && l.state == liveVerified && l.possiblyLive(name):
+			return copyError(name)
 		case ok && l.possiblyLive(name):
 			return fmt.Errorf("account %s may be the box's login, which is unverified (%s); %s, or sign in again with /login inside a session", name, l.unverified, unverifiedHint)
 		}
@@ -360,9 +371,9 @@ func (v Vault) KeepFresh(ctx context.Context, log io.Writer) error {
 		if err != nil {
 			return err
 		}
+		// An error, so the timer shows that saved logins are left to expire.
 		if l.state == liveUnknown {
-			fmt.Fprintf(log, "the box's login is unverified (%s) and no saved account is known to be it; refreshed none\n", l.unverified)
-			return nil
+			return fmt.Errorf("the box's login is unverified (%s) and no saved account is known to be it, so none was refreshed; %s", l.unverified, unverifiedHint)
 		}
 		now := v.Store.Now()
 		for _, name := range s.names() {

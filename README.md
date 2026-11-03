@@ -109,7 +109,8 @@ refused), the login is unverified: its account is the one whose saved copy holds
 token, or the one Claude Code's record and the last switch agree on; a switch then keeps it
 there, unless that copy is newer. When nothing says whose it is, no account switches or refreshes
 until a session has refreshed the login. A daily timer (`remote-agents-accounts-refresh.timer`)
-refreshes the inactive logins a week before they would expire. Usage comes from
+refreshes the inactive logins a week before they would expire, and each day those whose expiry is
+unknown; it fails, refreshing none, while nothing says whose the box's login is. Usage comes from
 `api.anthropic.com/api/oauth/usage`, the endpoint Claude Code's `/usage` reads, and the live
 login's account from `/api/oauth/profile`; both are undocumented, so a change in their shape
 shows as an error.
