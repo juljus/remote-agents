@@ -626,8 +626,9 @@ func TestTheCornerMarksTheRemoteSession(t *testing.T) {
 	tm.expectMarks(nil, time.Second)
 }
 
-// Claude redraws its whole screen on a resize, which erases the mark where
-// the old size had it, and the mark comes back in the new corner.
+// Claude redraws its whole screen on a resize, and the mark comes back in
+// the new corner. The emulator does not reflow as Ghostty does, so this
+// shows the redraw, not that Ghostty's moved copy is erased.
 func TestRealClaudeGetsTheMarkInTheCornerAfterAResize(t *testing.T) {
 	tm := start(t, "risolatedclaude")
 	tm.expectCompact(0, "Not logged in", 30*time.Second)
