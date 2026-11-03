@@ -239,3 +239,4 @@ func (CLI) Analyze(args []string, _ func() string) (agentcli.Plan, error) { retu
 func (CLI) CheckDefaults(args []string) error                             { return CheckDefaults(args) }
 func (CLI) ResumeBase(args []string) []string                             { return ResumeBase(args) }
 func (CLI) ResumeArgs(id string) []string                                 { return ResumeArgs(id) }
+func (CLI) SignInArgs() []string                                          { return []string{"login"} }

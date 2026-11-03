@@ -174,3 +174,9 @@ func TestCLINeedsNoInjectedID(t *testing.T) {
 		t.Fatalf("plan = %+v, %v", plan, err)
 	}
 }
+
+func TestSignInArgs(t *testing.T) {
+	if got := (CLI{}).SignInArgs(); !slices.Equal(got, []string{"login"}) {
+		t.Fatalf("got %q", got)
+	}
+}

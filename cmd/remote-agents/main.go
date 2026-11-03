@@ -165,7 +165,7 @@ func runAgent(agentName string, args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	if agent.Kind == config.KindClaude && len(args) > 0 && args[0] == "account" {
+	if len(args) > 0 && args[0] == "account" {
 		return account(e, agent, args[1:])
 	}
 	cli := agent.CLI()
@@ -376,8 +376,6 @@ func runCommand(e env, agent config.Agent, args []string) (int, error) {
 	return passthrough(sshrun.ExecArgv(e.ssh, e.box(), token, tty))
 }
 
-const accountUsage = "usage: rclaude account [list [--json] | use <name> | add <name> | save <name> | remove <name>]"
-
 // account runs the box's account commands; without arguments it lists the
 // accounts and switches to the one picked.
 func account(e env, agent config.Agent, args []string) (int, error) {
@@ -403,14 +401,14 @@ func account(e env, agent config.Agent, args []string) (int, error) {
 		if err := accounts.ValidName(args[1]); err != nil {
 			return 2, err
 		}
-		s := spec.Spec{Mode: spec.ModeExec, Workdir: e.cfg.Workdir, Argv: []string{agent.Command, "auth", "login"}, Env: terminalEnv()}
+		s := spec.Spec{Mode: spec.ModeExec, Workdir: e.cfg.Workdir, Argv: append([]string{agent.Command}, agent.CLI().SignInArgs()...), Env: terminalEnv()}
 		token, err := s.Encode()
 		if err != nil {
 			return 1, err
 		}
 		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), true, kind, "add", args[1], token))
 	}
-	return 2, errors.New(accountUsage)
+	return 2, fmt.Errorf("usage: r%s account [list [--json] | use <name> | add <name> | save <name> | remove <name>]", kind)
 }
 
 func accountListing(e env, kind string) (accounts.Listing, int, error) {

@@ -201,3 +201,9 @@ func TestSessionOf(t *testing.T) {
 		}
 	}
 }
+
+func TestSignInArgs(t *testing.T) {
+	if got := (CLI{}).SignInArgs(); !slices.Equal(got, []string{"auth", "login"}) {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -56,4 +56,7 @@ type CLI interface {
 	ResumeBase(args []string) []string
 	// ResumeArgs follow the agent command and ResumeBase to resume session id.
 	ResumeArgs(id string) []string
+	// SignInArgs follow the agent command to sign it in to an account,
+	// opening the account's login page in a browser.
+	SignInArgs() []string
 }
