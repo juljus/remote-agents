@@ -3,6 +3,7 @@ package accounts
 import (
 	"fmt"
 	"io"
+	"sync"
 	"text/tabwriter"
 	"time"
 )
@@ -26,6 +27,46 @@ type Row struct {
 type Window struct {
 	Utilization float64    `json:"utilization"`
 	ResetsAt    *time.Time `json:"resets_at"`
+}
+
+// newWindow is a window that resets at resetsAt, or names no reset when that is zero.
+func newWindow(utilization float64, resetsAt time.Time) *Window {
+	w := &Window{Utilization: utilization}
+	if !resetsAt.IsZero() {
+		w.ResetsAt = &resetsAt
+	}
+	return w
+}
+
+// pendingRow is a row whose usage is still to be read with login, if set.
+type pendingRow[L any] struct {
+	row   Row
+	login *L
+}
+
+// readUsage reads each pending row's usage at once, and lists the rows;
+// a read that fails becomes its row's error.
+func readUsage[L any](rows []pendingRow[L], read func(L) (fiveHour, sevenDay *Window, err error)) Listing {
+	var wg sync.WaitGroup
+	for i := range rows {
+		if rows[i].login == nil {
+			continue
+		}
+		wg.Go(func() {
+			five, seven, err := read(*rows[i].login)
+			if err != nil {
+				rows[i].row.Error = err.Error()
+				return
+			}
+			rows[i].row.FiveHour, rows[i].row.SevenDay = five, seven
+		})
+	}
+	wg.Wait()
+	out := Listing{Accounts: make([]Row, len(rows))}
+	for i, r := range rows {
+		out.Accounts[i] = r.row
+	}
+	return out
 }
 
 // Active is the name of the active account, or "" when there is none or it has no name.

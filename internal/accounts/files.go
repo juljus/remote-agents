@@ -132,6 +132,19 @@ func removeEntry[E any](f files, s *state[E], name string) error {
 	return atomicfile.Remove(f.entryPath(name))
 }
 
+// sameJSON reports whether two entries marshal alike.
+func sameJSON[E any](a, b E) (bool, error) {
+	x, err := json.Marshal(a)
+	if err != nil {
+		return false, err
+	}
+	y, err := json.Marshal(b)
+	if err != nil {
+		return false, err
+	}
+	return string(x) == string(y), nil
+}
+
 // signIn runs fn in a new empty dir of the vault, which it removes after.
 func (f files) signIn(fn func(dir string) error) (err error) {
 	if err := f.ensureDir(); err != nil {

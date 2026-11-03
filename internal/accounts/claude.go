@@ -197,7 +197,7 @@ func (v ClaudeVault) saveLive(ctx context.Context, s *claudeState, l *live) erro
 		return fmt.Errorf("restoring the box's account record: %w", err)
 	}
 	e := claudeEntry{Login: *l.read.Login, Account: account}
-	same, err := sameEntry(saved, e)
+	same, err := sameJSON(saved, e)
 	if err != nil {
 		return err
 	}
@@ -240,18 +240,6 @@ func (v ClaudeVault) markSwitched(name string) error {
 // switched records the entry the vault last saw live.
 type switched struct {
 	Name string `json:"name"`
-}
-
-func sameEntry(a, b claudeEntry) (bool, error) {
-	x, err := json.Marshal(a)
-	if err != nil {
-		return false, err
-	}
-	y, err := json.Marshal(b)
-	if err != nil {
-		return false, err
-	}
-	return string(x) == string(y), nil
 }
 
 // fresh is an inactive entry's login with a usable access token, refreshed

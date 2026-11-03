@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
 	"time"
 
 	"remote-agents/internal/claudeauth"
@@ -21,10 +20,7 @@ const unverifiedHint = "a running session refreshes it on its next request"
 // even when no entry names it. Only inactive accounts are refreshed first:
 // the live login's usage reads with its own access token or not at all.
 func (v ClaudeVault) Usage(ctx context.Context) (Listing, error) {
-	type pending struct {
-		row   Row
-		login *claudeauth.Login
-	}
+	type pending = pendingRow[claudeauth.Login]
 	var rows []pending
 	err := v.locked(func(s *claudeState) error {
 		l, err := v.live(ctx, s)
@@ -68,38 +64,20 @@ func (v ClaudeVault) Usage(ctx context.Context) (Listing, error) {
 	if err != nil {
 		return Listing{}, err
 	}
-	var wg sync.WaitGroup
-	for i := range rows {
-		if rows[i].login == nil {
-			continue
+	return readUsage(rows, func(login claudeauth.Login) (*Window, *Window, error) {
+		u, err := v.Store.Usage(ctx, login)
+		if err != nil {
+			return nil, nil, err
 		}
-		wg.Go(func() {
-			u, err := v.Store.Usage(ctx, *rows[i].login)
-			if err != nil {
-				rows[i].row.Error = err.Error()
-				return
-			}
-			rows[i].row.FiveHour, rows[i].row.SevenDay = window(u.FiveHour), window(u.SevenDay)
-		})
-	}
-	wg.Wait()
-	out := Listing{Accounts: make([]Row, len(rows))}
-	for i, r := range rows {
-		out.Accounts[i] = r.row
-	}
-	return out, nil
+		return claudeWindow(u.FiveHour), claudeWindow(u.SevenDay), nil
+	}), nil
 }
 
-func window(w *claudeauth.Window) *Window {
+func claudeWindow(w *claudeauth.Window) *Window {
 	if w == nil {
 		return nil
 	}
-	out := &Window{Utilization: w.Utilization}
-	if !w.ResetsAt.IsZero() {
-		t := w.ResetsAt
-		out.ResetsAt = &t
-	}
-	return out
+	return newWindow(w.Utilization, w.ResetsAt)
 }
 
 // Use switches every Claude Code on the box to the named account, keeping
