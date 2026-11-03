@@ -126,6 +126,22 @@ func TestAccountsConfigKeepsTestInstallsOffTheRealLogin(t *testing.T) {
 	if err := os.Symlink(filepath.Join(home, ".claude"), filepath.Join(home, "link")); err != nil {
 		t.Fatal(err)
 	}
+	// A test dir whose files point at the real login's.
+	for file, target := range map[string]string{".claude.json": filepath.Join(home, ".claude.json"), ".credentials.json": filepath.Join(home, ".claude", ".credentials.json")} {
+		linked := filepath.Join(home, "linked"+file)
+		if err := os.Mkdir(linked, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(linked, file)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseAccountsConfig(fmt.Appendf(nil, "claude_config_dir = %q", linked), test); err == nil || !strings.Contains(err.Error(), "is a symlink") {
+			t.Errorf("%s linked to the real one: %v", file, err)
+		}
+	}
 	for _, bad := range []string{
 		`claude_config_dir = "rel"`,
 		fmt.Sprintf(`claude_config_dir = %q`, filepath.Join(home, "missing")),
@@ -142,9 +158,35 @@ func TestAccountsConfigKeepsTestInstallsOffTheRealLogin(t *testing.T) {
 			t.Errorf("%s parsed", bad)
 		}
 	}
-	for _, bad := range []string{`token_url = "https://127.0.0.1:1"`, `frob = 1`} {
+	for _, bad := range []string{`token_url = "http://127.0.0.1:1/token"`, `api_url = "http://127.0.0.1:1"`, `frob = 1`} {
 		if _, err := ParseAccountsConfig([]byte(bad), prod); err == nil {
 			t.Errorf("%s parsed for production", bad)
+		}
+	}
+}
+
+func TestAccountAddRefusesASpecThatMovesClaudesConfig(t *testing.T) {
+	l := testLayout(t)
+	l.Name = "remote-agents-test"
+	if err := os.Mkdir(filepath.Join(l.Home, "cfg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeAccountsConfig(t, l, fmt.Sprintf("claude_config_dir = %q\n", filepath.Join(l.Home, "cfg")))
+	work := t.TempDir()
+	script := filepath.Join(work, "claude")
+	if err := os.WriteFile(script, []byte(fakeSignIn), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(string) (string, bool) { return "", false }
+	for _, key := range claudeauth.EnvVars {
+		token, err := spec.Spec{Mode: spec.ModeExec, Workdir: work, Argv: []string{script, "auth", "login"}, Env: map[string]string{key: l.Home + "/.claude"}}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = Account(context.Background(), l, []string{"claude", "add", "home", token}, IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}, []string{"HOME=" + l.Home}, lookup)
+		if err == nil || !strings.Contains(err.Error(), key) || strings.Contains(out.String(), "args=") {
+			t.Fatalf("%s: %v\n%s", key, err, out.String())
 		}
 	}
 }

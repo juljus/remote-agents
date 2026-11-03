@@ -111,11 +111,16 @@ func claudeVault(l boxlayout.Layout, lookupEnv func(string) (string, bool)) (acc
 // with dir as its config dir and the session's shims, so the login's browser
 // opens on the laptop and its callback reaches the box.
 func signInClaude(l boxlayout.Layout, s spec.Spec, base []string, dir string, stdio IO) error {
+	// The base environment sets none of these either: claudeVault refuses them.
+	for _, key := range claudeauth.EnvVars {
+		if _, set := s.Env[key]; set {
+			return fmt.Errorf("the sign-in spec sets %s, which would move the login out of its sign-in dir", key)
+		}
+	}
 	path, env, err := prepareAgent(l, s, base)
 	if err != nil {
 		return err
 	}
-	// The base environment sets none of claudeauth.EnvVars: claudeVault refuses them.
 	env = append(env, "CLAUDE_CONFIG_DIR="+dir)
 	cmd := exec.Command(path, s.Argv[1:]...)
 	cmd.Args[0] = s.Argv[0]

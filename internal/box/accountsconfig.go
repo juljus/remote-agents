@@ -90,6 +90,9 @@ func ParseAccountsConfig(data []byte, l boxlayout.Layout) (AccountsConfig, error
 		if set.raw == nil {
 			continue
 		}
+		if l.Name == boxlayout.DefaultName {
+			return AccountsConfig{}, fmt.Errorf("%s is for test installs only", key)
+		}
 		if err := loopbackURL(*set.raw); err != nil {
 			return AccountsConfig{}, fmt.Errorf("%s: %w", key, err)
 		}
@@ -100,7 +103,8 @@ func ParseAccountsConfig(data []byte, l boxlayout.Layout) (AccountsConfig, error
 
 // testConfigDir resolves a test install's Claude Code config dir, which
 // must exist and must not be the real login's: ~/.claude holds its
-// credentials, and home its global config.
+// credentials, and home its global config. Its login files must be its own,
+// not links to others.
 func testConfigDir(dir, home string) (string, error) {
 	if !filepath.IsAbs(dir) {
 		return "", fmt.Errorf("must be absolute, got %q", dir)
@@ -119,6 +123,22 @@ func testConfigDir(dir, home string) (string, error) {
 		}
 		if resolved == loginResolved {
 			return "", fmt.Errorf("%s is the real login's dir %s", dir, loginDir)
+		}
+	}
+	paths, err := claudeauth.PathsIn(resolved)
+	if err != nil {
+		return "", err
+	}
+	for _, file := range []string{paths.Credentials(), paths.GlobalConfig} {
+		info, err := os.Lstat(file)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return "", fmt.Errorf("%s is a symlink, which may lead to the real login's files", file)
 		}
 	}
 	return resolved, nil
