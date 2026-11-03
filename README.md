@@ -1,13 +1,13 @@
 # remote-agents
 
-Run Claude Code on a remote Linux box while it feels local on your Mac.
+Run Claude Code or Codex on a remote Linux box while it feels local on your Mac.
 
-`rclaude` in a laptop terminal starts Claude Code on the box; the laptop only displays it.
-`claude` stays your local Claude Code. Sessions live in [shpool](https://github.com/shell-pool/shpool)
-on the box, so a closed lid, a network change or a dropped SSH link does not stop them: the laptop
-reconnects on its own. While the link is up, a launchd daemon on the laptop gives box sessions the
-laptop's clipboard and browser, carries OAuth logins started on the box back to it, and forwards
-status events to cmux if you use it.
+`rclaude` in a laptop terminal starts Claude Code on the box, `rcodex` starts Codex; the laptop
+only displays them. `claude` and `codex` stay your local ones. Sessions live in
+[shpool](https://github.com/shell-pool/shpool) on the box, so a closed lid, a network change or a
+dropped SSH link does not stop them: the laptop reconnects on its own. While the link is up, a
+launchd daemon on the laptop gives box sessions the laptop's clipboard and browser, carries OAuth
+logins started on the box back to it, and forwards status events to cmux if you use it.
 
 Why: long agent runs want a machine that stays on, has cores and disk to spare, and is not your
 laptop; you still want to work with them from your own terminal, clipboard and browser.
@@ -18,7 +18,8 @@ laptop; you still want to work with them from your own terminal, clipboard and b
   password prompt (keys or an agent). cmux is optional; `make lint` needs staticcheck and
   shellcheck.
 - Box: Linux x86_64 with systemd, a user with lingering enabled (`loginctl enable-linger <user>`).
-  `make deploy-box` installs shpool and Claude Code there.
+  `make deploy-box` installs shpool and Claude Code there. Codex comes with the bootstrap's pinned
+  toolchain below; on another box, put `codex` on `/usr/local/bin` yourself.
 
 `box/bootstrap/` builds such a box from scratch on a Hetzner dedicated server: one key-only SSH
 user, Tailscale and a closed public NIC. See [its README](box/bootstrap/README.md).
@@ -31,7 +32,8 @@ Box, from the laptop; idempotent, and it never restarts the shpool daemon:
 
 It installs shpool (pinned), `remote-agents-box`, the clipboard, browser and hook shims, a
 `systemctl --user` socket for shpool, and Claude Code if missing. Log in to Claude once on the box
-through a session (`rclaude`, then `/login`).
+through a session (`rclaude`, then `/login`), and to Codex with `rcodex login`, whose browser
+callback comes back through the link, or `rcodex login --device-auth`.
 
 Laptop:
 
@@ -57,6 +59,12 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   session on the box (Claude's own `claude --resume` line would look for it locally). With
   `--continue` or the resume picker the id comes from the SessionStart hook cmux injects; outside
   cmux only `rclaude --resume <id>` gets the line, since a new session may never have started.
+- `rcodex [args]` starts Codex the same way, and `rcodex resume <id>` resumes a session. Codex
+  picks a new session's id at its first turn, so `rcodex` prints the resume line only when the
+  laptop knows the id: when it resumed one, or inside cmux, which relays the hooks reporting it.
+  The box gives Codex its hooks with `-c`, trusted so Codex runs them without asking, and leaves
+  `~/.codex/config.toml` alone; arguments that would replace or disable those hooks are refused.
+  Each session runs `codex --no-daemon`, so it never shares Codex's background server.
 - `remote-agents ls` lists sessions on the box; `remote-agents attach <session>` reattaches.
 - Pasting or dragging laptop files into a session uploads each one the box lacks to
   `~/.local/state/remote-agents/pasted/<sha256>/<name>` and pastes that path instead, so Claude can
@@ -64,9 +72,10 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   wins. Directories and files over 100 MB are not uploaded; a notice on the bottom row says so.
   Copies go 7 days after their last paste.
 - While the link is down, Ctrl+C detaches; the session keeps running.
-- A session ends when Claude exits. If the box loses it instead, say the shpool daemon stops,
-  `rclaude` reconnects and resumes the same Claude session; a Claude that takes over 10 seconds
-  to exit on that stop is killed, which ends the session for an attached `rclaude`.
+- A session ends when its agent exits. If the box loses it instead, say the shpool daemon stops,
+  the wrapper reconnects and resumes the same agent session; an agent that takes over 10 seconds
+  to exit on that stop is killed, which ends the session for an attached wrapper. A Codex lost
+  before its first turn has no session yet and starts again.
 
 ## Security model
 

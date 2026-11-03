@@ -19,7 +19,8 @@ mirrors. The scripts refuse to run while a value is missing or malformed.
    key, read through the rescue session, to `<host key out>`. Pin that key.
 2. `provision.sh -p root@<ip>`: packages, the pinned toolchain, unattended security upgrades, the
    box user with passwordless sudo, key-only SSH without root, the firewall with public SSH still
-   open, Tailscale prefs. Root login ends during this run; repeat runs go as `<user>@<host>`.
+   open, Tailscale prefs. The toolchain includes Codex, logged in later with `rcodex login`.
+   Root login ends during this run; repeat runs go as `<user>@<host>`.
 3. On the box, `sudo tailscale login`, and open its URL as the box's owner.
 4. Add the laptop's `Host` entry for the tailnet name and pin the host key for it, then
    `provision.sh <tailnet host>` without `-p` closes public SSH.
