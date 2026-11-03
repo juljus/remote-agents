@@ -643,8 +643,8 @@ func TestAddSavesANewLoginAndRefusesAMismatch(t *testing.T) {
 	if err := addSaved(f, "x", func(string) error { return fmt.Errorf("cancelled") }); err == nil || err.Error() != "cancelled" {
 		t.Fatalf("failed sign-in: %v", err)
 	}
-	if saved, err := f.vault.Add(ctx, "work", signIn("work", 9)); err != nil || saved || f.liveTokens().RefreshToken != "fake-refresh-work-1" {
-		t.Fatalf("adding the active account: %v, saved %v", err, saved)
+	if added, err := f.vault.Add(ctx, "work", signIn("work", 9)); err != nil || added != AddedAlready || f.liveTokens().RefreshToken != "fake-refresh-work-1" {
+		t.Fatalf("adding the active account: %v, %v", added, err)
 	}
 	dirents, err := os.ReadDir(f.vault.Dir)
 	if err != nil {
@@ -657,13 +657,84 @@ func TestAddSavesANewLoginAndRefusesAMismatch(t *testing.T) {
 	}
 }
 
-// addSaved adds an account that must be saved, as no test adds the live one but where it says so.
+// addSaved adds an account whose new login must be saved.
 func addSaved(f *fixture, name string, signIn func(string) error) error {
-	saved, err := f.vault.Add(ctx, name, signIn)
-	if err == nil && !saved {
-		return errors.New("not saved")
+	added, err := f.vault.Add(ctx, name, signIn)
+	if err == nil && added != AddedNew {
+		return fmt.Errorf("added %v", added)
 	}
 	return err
+}
+
+// signInAs is a sign-in that leaves login and the account record of tag behind.
+func signInAs(tag, login string) func(string) error {
+	return func(dir string) error {
+		if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(`{"claudeAiOauth":`+login+`}`), 0o600); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(`{"oauthAccount":`+account(tag)+`}`), 0o600)
+	}
+}
+
+func TestAddingTheBoxsOwnAccount(t *testing.T) {
+	t.Run("unnamed: the box's login is saved", func(t *testing.T) {
+		f := newFixture(t)
+		f.setLive(f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+		if added, err := f.vault.Add(ctx, "work", signInAs("work", f.login("work", 9, time.Hour, 20*24*time.Hour))); err != nil || added != AddedLive {
+			t.Fatalf("Add = %v, %v", added, err)
+		}
+		if f.entryTokens("work").RefreshToken != "fake-refresh-work-1" || f.liveTokens().RefreshToken != "fake-refresh-work-1" {
+			t.Fatalf("work %+v, live %+v", f.entryTokens("work"), f.liveTokens())
+		}
+	})
+	t.Run("an entry that may be the unverified box login: refused", func(t *testing.T) {
+		f := newFixture(t)
+		f.seed("work", f.login("work", 1, -time.Hour, 20*24*time.Hour), account("work"))
+		f.setLive(f.login("work", 1, -time.Hour, 20*24*time.Hour), account("work"))
+		if _, err := f.vault.Add(ctx, "work", signInAs("work", f.login("work", 9, time.Hour, 20*24*time.Hour))); err == nil || !strings.Contains(err.Error(), "account work may be the box's login") {
+			t.Fatalf("proven: %v", err)
+		}
+		if f.entryTokens("work").RefreshToken != "fake-refresh-work-1" {
+			t.Fatalf("work %+v", f.entryTokens("work"))
+		}
+	})
+	t.Run("unknown box login: existing names refused, new ones saved", func(t *testing.T) {
+		f := newFixture(t)
+		f.seed("home", f.login("home", 1, time.Hour, 20*24*time.Hour), account("home"))
+		f.setLive(f.login("other", 1, -time.Hour, 20*24*time.Hour), account("other"))
+		if _, err := f.vault.Add(ctx, "home", signInAs("home", f.login("home", 2, time.Hour, 20*24*time.Hour))); err == nil || !strings.Contains(err.Error(), "account home may be the box's login") {
+			t.Fatalf("unknown: %v", err)
+		}
+		if err := addSaved(f, "work", signInAs("work", f.login("work", 1, time.Hour, 20*24*time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestAddRemovesSignInDirsACrashLeft(t *testing.T) {
+	f := newFixture(t)
+	if err := f.vault.ensureDir(); err != nil {
+		t.Fatal(err)
+	}
+	old, recent := filepath.Join(f.vault.Dir, ".login-old"), filepath.Join(f.vault.Dir, ".login-recent")
+	for _, dir := range []string{old, recent} {
+		if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(old, twoHoursAgo, twoHoursAgo); err != nil {
+		t.Fatal(err)
+	}
+	if err := addSaved(f, "work", signInAs("work", f.login("work", 1, time.Hour, 20*24*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("old sign-in dir: %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Fatalf("a sign-in in progress lost its dir: %v", err)
+	}
 }
 
 func TestAddReportsALoginDirItCouldNotRemove(t *testing.T) {
@@ -687,8 +758,8 @@ func TestAddReportsALoginDirItCouldNotRemove(t *testing.T) {
 		t.Cleanup(func() { os.Chmod(stuck, 0o700) })
 		return os.Chmod(stuck, 0o500)
 	}
-	if saved, err := f.vault.Add(ctx, "work", signIn); err == nil || saved {
-		t.Fatalf("Add = %v, %v: a failed cleanup was hidden", saved, err)
+	if _, err := f.vault.Add(ctx, "work", signIn); err == nil {
+		t.Fatal("Add succeeded: a failed cleanup was hidden")
 	}
 }
 

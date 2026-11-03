@@ -72,15 +72,18 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 			return fmt.Errorf("add needs an exec spec, got mode %q", s.Mode)
 		}
 		signIn := func(dir string) error { return signInClaude(l, s, base, dir, stdio) }
-		saved, err := vault.Add(ctx, rest[0], signIn)
+		added, err := vault.Add(ctx, rest[0], signIn)
 		if err != nil {
 			return err
 		}
-		if !saved {
+		switch added {
+		case accounts.AddedNew:
+			fmt.Fprintf(stdio.Stdout, "saved the new login as %s; switch to it with: rclaude account use %s\n", rest[0], rest[0])
+		case accounts.AddedLive:
+			fmt.Fprintf(stdio.Stdout, "the box is logged in to that account already; saved its login as %s\n", rest[0])
+		case accounts.AddedAlready:
 			fmt.Fprintf(stdio.Stdout, "%s is the box's login already; it stays as it is\n", rest[0])
-			return nil
 		}
-		fmt.Fprintf(stdio.Stdout, "saved the new login as %s; switch to it with: rclaude account use %s\n", rest[0], rest[0])
 		return nil
 	}
 	return vault.KeepFresh(ctx, stdio.Stdout)

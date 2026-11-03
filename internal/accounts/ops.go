@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -188,11 +189,17 @@ func (v Vault) Save(ctx context.Context, name string) error {
 		if _, taken := s.entries[name]; taken {
 			return fmt.Errorf("account %s is another login", name)
 		}
-		if err := v.writeEntry(s, name, entry{Login: *l.read.Login, Account: *l.read.Account}); err != nil {
-			return err
-		}
-		return v.markSwitched(name)
+		return v.nameLive(s, l, name, *l.read.Account)
 	})
+}
+
+// nameLive saves the verified live login, which no entry names, under name
+// with account as its record.
+func (v Vault) nameLive(s *state, l *live, name string, account claudeauth.Account) error {
+	if err := v.writeEntry(s, name, entry{Login: *l.read.Login, Account: account}); err != nil {
+		return err
+	}
+	return v.markSwitched(name)
 }
 
 // Remove forgets an account that is not, and may not be, the live one.
@@ -216,31 +223,54 @@ func (v Vault) Remove(ctx context.Context, name string) error {
 	})
 }
 
+// Added says what Add kept.
+type Added int
+
+const (
+	// AddedNew: the new login is saved under the name.
+	AddedNew Added = iota
+	// AddedLive: the box was logged in to the account already, without a
+	// name; its login is saved under the name and the new one dropped.
+	AddedLive
+	// AddedAlready: the name is the box's login already, which stays.
+	AddedAlready
+)
+
+// signInDirPrefix names the Claude Code config dirs that Add signs in to.
+const signInDirPrefix = ".login-"
+
+// signInMaxAge is how long a sign-in may take before its leftover dir is a
+// crash's to remove.
+const signInMaxAge = time.Hour
+
 // Add saves under name the login that signIn makes in an empty Claude Code
 // config dir. Naming an existing account, it replaces that account's login,
-// which must sign in as the same account. saved is false when the login is
-// of the account the box uses now, whose entry follows the live login, so
-// the new login went unused.
-func (v Vault) Add(ctx context.Context, name string, signIn func(configDir string) error) (saved bool, err error) {
+// which must sign in as the same account and must not be the box's login.
+// When the box is logged in to the account already, its login is kept
+// instead and the new one goes unused.
+func (v Vault) Add(ctx context.Context, name string, signIn func(configDir string) error) (added Added, err error) {
 	if err := ValidName(name); err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := v.ensureDir(); err != nil {
-		return false, err
+		return 0, err
 	}
-	dir, err := os.MkdirTemp(v.Dir, ".login-")
+	dir, err := os.MkdirTemp(v.Dir, signInDirPrefix)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
 	if err := signIn(dir); err != nil {
-		return false, err
+		return 0, err
 	}
 	made, id, err := v.signedIn(ctx, dir)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	err = v.locked(func(s *state) error {
+		if err := v.removeStaleSignIns(); err != nil {
+			return err
+		}
 		l, err := v.live(ctx, s)
 		if err != nil {
 			return err
@@ -248,16 +278,46 @@ func (v Vault) Add(ctx context.Context, name string, signIn func(configDir strin
 		if other := s.named(id); other != "" && other != name {
 			return fmt.Errorf("that login is account %s already", other)
 		}
-		if e, ok := s.entries[name]; ok && e.Account.Identity() != id {
+		e, ok := s.entries[name]
+		if ok && e.Account.Identity() != id {
 			return fmt.Errorf("account %s is %s, not %s", name, e.Account.Email(), made.Account.Email())
 		}
-		if l.state == liveVerified && *l.id == id {
+		switch {
+		case l.state == liveVerified && *l.id == id && l.active == name:
+			added = AddedAlready
 			return nil
+		case l.state == liveVerified && *l.id == id:
+			added = AddedLive
+			return v.nameLive(s, l, name, *made.Account)
+		case ok && l.possiblyLive(name):
+			return fmt.Errorf("account %s may be the box's login, which is unverified (%s); %s, or sign in again with /login inside a session", name, l.unverified, unverifiedHint)
 		}
-		saved = true
+		added = AddedNew
 		return v.writeEntry(s, name, entry{Login: *made.Login, Account: *made.Account})
 	})
-	return saved, err
+	return added, err
+}
+
+// removeStaleSignIns removes the sign-in dirs a crashed Add left behind; the
+// caller holds the vault lock.
+func (v Vault) removeStaleSignIns() error {
+	dirs, err := filepath.Glob(filepath.Join(v.Dir, signInDirPrefix+"*"))
+	if err != nil {
+		return err
+	}
+	for _, dir := range dirs {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		if time.Since(info.ModTime()) < signInMaxAge {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // signedIn reads the login a sign-in left in dir and checks with the server
