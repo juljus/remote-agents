@@ -165,6 +165,22 @@ func TestCodexUseRefusesToDropALogin(t *testing.T) {
 			t.Fatalf("live %s", f.liveRefresh())
 		}
 	})
+	t.Run("expired", func(t *testing.T) {
+		f := newCodexFixture(t)
+		f.seed("home", "home", 1, later)
+		f.seed("work", "work", 1, t0)
+		f.setLive("work", 1, t0)
+		if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "send a Codex session a message") || !strings.Contains(err.Error(), "codex logout") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("signed out", func(t *testing.T) {
+		f := newCodexFixture(t)
+		f.seed("home", "home", 1, later)
+		if switched, err := f.vault.Use(ctx, "home"); err != nil || !switched || f.liveRefresh() != "fake-refresh-home-1" {
+			t.Fatalf("Use = %v, %v", switched, err)
+		}
+	})
 }
 
 func TestCodexUseRefusesALoginThatChangedWhileItWorked(t *testing.T) {

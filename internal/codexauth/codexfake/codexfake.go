@@ -67,7 +67,6 @@ type Server struct {
 
 	mu        sync.Mutex
 	used      map[string]bool
-	revoked   map[string]bool
 	next      int
 	onRefresh func()
 	presented []string
@@ -79,20 +78,13 @@ var (
 )
 
 func NewServer(t *testing.T, now func() time.Time) *Server {
-	s := &Server{Now: now, used: map[string]bool{}, revoked: map[string]bool{}, next: 100}
+	s := &Server{Now: now, used: map[string]bool{}, next: 100}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /oauth/token", s.token)
 	mux.HandleFunc("GET /backend-api/wham/usage", s.usage)
 	s.Server = httptest.NewServer(mux)
 	t.Cleanup(s.Close)
 	return s
-}
-
-// Revoke makes the server refuse an access token.
-func (s *Server) Revoke(tag string, n int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.revoked[fmt.Sprintf("fake-access-%s-%d", tag, n)] = true
 }
 
 // Spend uses up a refresh token, as another copy of its login refreshing would.
@@ -174,10 +166,7 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		ok = decode(auth, &claims) == nil
 	}
 	m := accessPattern.FindStringSubmatch(claims.Tok)
-	s.mu.Lock()
-	revoked := s.revoked[claims.Tok]
-	s.mu.Unlock()
-	if !ok || m == nil || revoked || r.Header.Get("ChatGPT-Account-Id") != "acct-"+m[1] {
+	if !ok || m == nil || r.Header.Get("ChatGPT-Account-Id") != "acct-"+m[1] {
 		reply(w, 401, map[string]string{})
 		return
 	}

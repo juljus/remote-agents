@@ -120,8 +120,11 @@ keeps the login it started with, so a switch reaches only the Codex sessions sta
 It names the running ones; restart each with `rcodex resume <id>` to move it over. Codex keeps
 its login in `~/.codex/auth.json`, which a switch replaces whole under Codex's `auth.lock`; the
 saved ones wait in `~/.config/remote-agents/accounts/codex/`. The login names its own account,
-so the vault always knows whose the live one is. A switch waits while the live access token is
-within 15 minutes of expiry, when a Codex may be refreshing it. The timer refreshes an idle
+so the vault always knows whose the live one is. A running Codex refreshes its login outside its
+lock and keeps the new tokens only if `auth.json` still holds that login, so a switch that lands
+in between costs that account its login. A switch is therefore refused while the live access
+token is expired or within 15 minutes of expiry, when a Codex refreshes it; a Codex that
+refreshes because a request was refused can still race a switch, which is rare. The timer refreshes an idle
 login a day before its access token expires, as often as a Codex that used it would. Usage
 comes from `chatgpt.com/backend-api/wham/usage`, the endpoint Codex's `/status` reads, which is
 undocumented too. Accounts need Codex's logins in `auth.json`, the default: a `config.toml`

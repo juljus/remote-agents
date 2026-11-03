@@ -863,7 +863,7 @@ func TestRender(t *testing.T) {
 		{Name: "work", Email: "work@example.com", Error: "signed out"},
 	}}
 	var out bytes.Buffer
-	if err := Render(&out, l, t0); err != nil {
+	if err := Render(&out, l, t0, "rclaude"); err != nil {
 		t.Fatal(err)
 	}
 	want := `   ACCOUNT    EMAIL              5-HOUR          WEEKLY
@@ -877,7 +877,7 @@ The box's login has no name: keep it with ` + "`rclaude account save <name>`" + 
 	}
 	// An unverified login cannot be saved, so the hint stays away.
 	out.Reset()
-	if err := Render(&out, Listing{Accounts: []Row{{Active: true, Error: "unverified"}}}, t0); err != nil {
+	if err := Render(&out, Listing{Accounts: []Row{{Active: true, Error: "unverified"}}}, t0, "rcodex"); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "account save") {

@@ -133,6 +133,13 @@ func (v ClaudeVault) Use(ctx context.Context, name string) (switched bool, err e
 	return switched, err
 }
 
+// copyError refuses to act on an entry that holds the box's login under
+// another account's name, as a guessed save that a failed switch followed
+// leaves; switching away makes its copy the only one again.
+func copyError(name string) error {
+	return fmt.Errorf("account %s holds a copy of the box's login; switch to another account first", name)
+}
+
 func unnamedError(l *live) error {
 	who := "an account no saved one names"
 	if email := l.email(); email != "" {

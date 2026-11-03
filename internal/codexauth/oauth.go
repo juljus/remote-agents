@@ -35,12 +35,8 @@ const (
 	ClientID        = "app_EMoamEEZ73f0CkXaXp7hrann"
 )
 
-// Codex refreshes a login whose access token expires within five minutes,
-// and one it last refreshed eight days ago.
-const (
-	accessRefreshWindow = 5 * time.Minute
-	RefreshInterval     = 8 * 24 * time.Hour
-)
+// Codex refreshes a login whose access token expires within five minutes.
+const accessRefreshWindow = 5 * time.Minute
 
 // Timeouts for a token refresh and a usage read.
 const (

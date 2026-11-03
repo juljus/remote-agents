@@ -20,12 +20,11 @@ var ErrNotChatGPT = errors.New("auth.json holds no ChatGPT login")
 // Login is one ChatGPT login, the whole of an auth.json, kept whole so a
 // switch writes back every field Codex keeps.
 type Login struct {
-	fields      jsonobject.Object
-	tokens      tokens
-	identity    Identity
-	email       string
-	accessExp   time.Time
-	lastRefresh time.Time
+	fields    jsonobject.Object
+	tokens    tokens
+	identity  Identity
+	email     string
+	accessExp time.Time
 }
 
 type tokens struct {
@@ -33,7 +32,6 @@ type tokens struct {
 	AccessToken  string      `json:"access_token"`
 	RefreshToken string      `json:"refresh_token"`
 	AccountID    *string     `json:"account_id"`
-	LoginOwnerID *string     `json:"login_owner_id"`
 	Provenance   *provenance `json:"oauth_provenance"`
 }
 
@@ -56,10 +54,11 @@ func ParseLogin(data []byte) (Login, error) {
 		return Login{}, err
 	}
 	var head struct {
-		AuthMode    *string         `json:"auth_mode"`
-		APIKey      *string         `json:"OPENAI_API_KEY"`
-		Tokens      json.RawMessage `json:"tokens"`
-		LastRefresh *time.Time      `json:"last_refresh"`
+		AuthMode *string         `json:"auth_mode"`
+		APIKey   *string         `json:"OPENAI_API_KEY"`
+		Tokens   json.RawMessage `json:"tokens"`
+		// LastRefresh is read only to refuse one Codex could not read.
+		LastRefresh *time.Time `json:"last_refresh"`
 	}
 	if err := json.Unmarshal(data, &head); err != nil {
 		return Login{}, err
@@ -68,9 +67,6 @@ func ParseLogin(data []byte) (Login, error) {
 		return Login{}, ErrNotChatGPT
 	}
 	l := Login{fields: o}
-	if head.LastRefresh != nil {
-		l.lastRefresh = *head.LastRefresh
-	}
 	if err := l.setTokens(head.Tokens); err != nil {
 		return Login{}, err
 	}
@@ -147,20 +143,6 @@ func (l Login) Email() string { return l.email }
 
 // AccessExpiresBy reports whether the access token has expired by t.
 func (l Login) AccessExpiresBy(t time.Time) bool { return !l.accessExp.After(t) }
-
-// RefreshedBefore reports whether the login was last refreshed before t,
-// or never as far as auth.json says.
-func (l Login) RefreshedBefore(t time.Time) bool { return l.lastRefresh.Before(t) }
-
-// SameLogin reports whether two logins are one sign-in, perhaps at
-// different points of its refresh token's rotation, as Codex tells them
-// apart: by the login's owner id, or by the refresh token when either lacks one.
-func (l Login) SameLogin(o Login) bool {
-	if l.tokens.LoginOwnerID != nil && o.tokens.LoginOwnerID != nil {
-		return *l.tokens.LoginOwnerID == *o.tokens.LoginOwnerID && l.identity == o.identity
-	}
-	return l.tokens.RefreshToken == o.tokens.RefreshToken
-}
 
 func (l Login) MarshalJSON() ([]byte, error) { return l.fields.Marshal("") }
 

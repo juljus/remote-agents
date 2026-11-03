@@ -88,9 +88,6 @@ func TestParseLoginReadsAChatGPTLogin(t *testing.T) {
 	if l.AccessExpiresBy(t0.Add(59*time.Minute)) || !l.AccessExpiresBy(t0.Add(time.Hour)) {
 		t.Fatal("access expiry")
 	}
-	if l.RefreshedBefore(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)) || !l.RefreshedBefore(t0) {
-		t.Fatal("last refresh")
-	}
 	if s := fmt.Sprint(l) + fmt.Sprintf("%#v", l); strings.Contains(s, "fake-") {
 		t.Fatalf("printed a token: %s", s)
 	}
@@ -100,7 +97,7 @@ func TestParseLoginReadsAChatGPTLogin(t *testing.T) {
 		"https://api.openai.com/auth":    map[string]any{"user_id": "user-p"},
 	})
 	l = mustLogin(t, fmt.Sprintf(`{"tokens":{"id_token":%q,"access_token":%q,"refresh_token":"r","account_id":"acct-p"}}`, profile, accessToken(t, "p", 1, t0)))
-	if l.Identity() != (Identity{AccountID: "acct-p", UserID: "user-p"}) || l.Email() != "p@example.com" || !l.RefreshedBefore(t0) {
+	if l.Identity() != (Identity{AccountID: "acct-p", UserID: "user-p"}) || l.Email() != "p@example.com" {
 		t.Fatalf("profile claims %+v %s", l.Identity(), l.Email())
 	}
 }
@@ -127,20 +124,6 @@ func TestParseLoginRefusesWhatIsNotAChatGPTLogin(t *testing.T) {
 		if _, err := ParseLogin([]byte(data)); err == nil || errors.Is(err, ErrNotChatGPT) || strings.Contains(err.Error(), "fake-") {
 			t.Errorf("%s: %v", name, err)
 		}
-	}
-}
-
-func TestSameLoginFollowsRotation(t *testing.T) {
-	a := mustLogin(t, authJSON(t, "work", 1, t0, ""))
-	if !a.SameLogin(mustLogin(t, authJSON(t, "work", 1, t0.Add(time.Hour), ""))) || a.SameLogin(mustLogin(t, authJSON(t, "work", 2, t0, ""))) {
-		t.Fatal("by refresh token")
-	}
-	owned := func(n int, owner string) Login {
-		return mustLogin(t, authJSON(t, "work", n, t0, fmt.Sprintf(`,
-    "login_owner_id": %q`, owner)))
-	}
-	if !owned(1, "o1").SameLogin(owned(2, "o1")) || owned(1, "o1").SameLogin(owned(2, "o2")) {
-		t.Fatal("by login owner")
 	}
 }
 
@@ -256,7 +239,7 @@ func TestRefreshSendsWhatCodexSendsAndSavesTheReply(t *testing.T) {
 	if fmt.Sprint(rs.bodies) != fmt.Sprint([]map[string]string{want}) {
 		t.Fatalf("sent %v", rs.bodies)
 	}
-	if !next.SameLogin(old) || next.tokens.RefreshToken != "fake-refresh-work-2" || next.AccessExpiresBy(t0.Add(239*time.Hour)) || next.RefreshedBefore(t0) {
+	if next.Identity() != old.Identity() || next.tokens.RefreshToken != "fake-refresh-work-2" || next.AccessExpiresBy(t0.Add(239*time.Hour)) {
 		t.Fatalf("refreshed %+v", next.tokens.RefreshToken)
 	}
 	data, err := json.Marshal(next)

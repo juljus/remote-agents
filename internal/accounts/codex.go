@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"time"
 
 	"remote-agents/internal/codexauth"
@@ -25,8 +24,12 @@ type CodexVault struct {
 const codexRefreshAhead = 24 * time.Hour
 
 // codexBusyWindow is how close to its expiry the live access token may be
-// for a switch: from five minutes before, a Codex may be refreshing it, and
-// a switch that lands before that refresh is saved would lose its tokens.
+// for a switch. A Codex refreshes outside its lock and saves the new tokens
+// only if auth.json still holds its login, so a switch that lands between
+// the two loses them, and the saved copy holds a spent refresh token. A
+// Codex refreshes when its access token is five minutes from expiry, which
+// this window keeps switches away from; one that refreshes on a refused
+// request, which a valid token rarely meets, can still race a switch.
 const codexBusyWindow = 15 * time.Minute
 
 type codexState = state[codexauth.Login]
@@ -58,16 +61,9 @@ type codexLive struct {
 	read *codexauth.Login
 	// other: auth.json holds another kind of login, such as an API key.
 	other bool
-	// active is the entry that signs in as the login, or "".
+	// active is the entry that signs in as the login, or "": the only one
+	// that may hold a copy of it, as no two entries sign in as one account.
 	active string
-	// copies are the entries that hold the login itself.
-	copies []string
-}
-
-// possiblyLive reports whether name's saved login may be a copy of the live
-// one, which Codex may have refreshed since.
-func (l *codexLive) possiblyLive(name string) bool {
-	return name == l.active || slices.Contains(l.copies, name)
 }
 
 // live reads the box's login and saves it to the entry that signs in as it,
@@ -83,11 +79,6 @@ func (v CodexVault) live(ctx context.Context, s *codexState) (*codexLive, error)
 	l := &codexLive{read: read}
 	if read == nil {
 		return l, nil
-	}
-	for _, name := range s.names() {
-		if s.entries[name].SameLogin(*read) {
-			l.copies = append(l.copies, name)
-		}
 	}
 	l.active = codexNamed(s, read.Identity())
 	if l.active == "" {
@@ -131,7 +122,7 @@ func (v CodexVault) Usage(ctx context.Context) (Listing, error) {
 		for _, name := range s.names() {
 			e := s.entries[name]
 			r := Row{Name: name, Email: e.Email(), Active: name == l.active}
-			if l.possiblyLive(name) {
+			if name == l.active {
 				rows = append(rows, liveRow(r, e))
 				continue
 			}
@@ -186,12 +177,12 @@ func (v CodexVault) Use(ctx context.Context, name string) (switched bool, err er
 		case l.read == nil:
 		case l.active == name:
 			return nil
-		case l.possiblyLive(name):
-			return copyError(name)
 		case l.active == "":
 			return fmt.Errorf("the box's Codex is signed in to %s; keep that login with `rcodex account save <name>` first", l.read.Email())
+		case l.read.AccessExpiresBy(v.Store.Now()):
+			return errors.New("the box's Codex login expired, and the next Codex request refreshes it, which a switch now could lose; send a Codex session a message, then switch, or, if that account was signed out, run `codex logout` on the box first")
 		case l.read.AccessExpiresBy(v.Store.Now().Add(codexBusyWindow)):
-			return errors.New("the box's Codex is about to refresh its login, and a switch now could lose it; try again in a quarter of an hour, or once a Codex session has made a request")
+			return errors.New("the box's Codex is about to refresh its login, which a switch now could lose; try again in a quarter of an hour")
 		}
 		login, err := v.fresh(ctx, s, name)
 		if err != nil {
@@ -248,7 +239,7 @@ func (v CodexVault) Remove(ctx context.Context, name string) error {
 		if err != nil {
 			return err
 		}
-		if l.possiblyLive(name) {
+		if name == l.active {
 			return fmt.Errorf("account %s is the box's login; switch to another one first", name)
 		}
 		return removeEntry(v.files(), s, name)
@@ -309,8 +300,6 @@ func (v CodexVault) Add(ctx context.Context, name string, signIn func(home strin
 		case l.read != nil && l.read.Identity() == id:
 			added = AddedLive
 			return v.writeEntry(s, name, *l.read)
-		case ok && l.possiblyLive(name):
-			return copyError(name)
 		}
 		added = AddedNew
 		return v.writeEntry(s, name, made)
@@ -320,7 +309,7 @@ func (v CodexVault) Add(ctx context.Context, name string, signIn func(home strin
 
 // KeepFresh refreshes every inactive saved login whose access token expires
 // within codexRefreshAhead, so an account nobody uses stays signed in. It
-// never touches the live login, nor a saved copy of it, and reports each
+// never touches the live login, nor its entry, and reports each
 // account it could not refresh.
 func (v CodexVault) KeepFresh(ctx context.Context, log io.Writer) error {
 	var failed []error
@@ -334,7 +323,7 @@ func (v CodexVault) KeepFresh(ctx context.Context, log io.Writer) error {
 		}
 		due := v.Store.Now().Add(codexRefreshAhead)
 		for _, name := range s.names() {
-			if l.possiblyLive(name) || !s.entries[name].AccessExpiresBy(due) {
+			if name == l.active || !s.entries[name].AccessExpiresBy(due) {
 				continue
 			}
 			_, err := v.Store.Refresh(ctx, s.entries[name], codexauth.ReasonScheduled, func(next codexauth.Login) error {
@@ -353,7 +342,7 @@ func (v CodexVault) KeepFresh(ctx context.Context, log io.Writer) error {
 
 // fresh is an inactive entry's login with a usable access token, refreshed
 // and saved first if needed; the caller holds the vault's lock and has made
-// sure the entry is not possibly live.
+// sure the entry is not the live login's.
 func (v CodexVault) fresh(ctx context.Context, s *codexState, name string) (codexauth.Login, error) {
 	login, err := v.Store.Fresh(ctx, s.entries[name], func(next codexauth.Login) error {
 		return v.writeEntry(s, name, next)

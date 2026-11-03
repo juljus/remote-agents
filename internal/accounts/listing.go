@@ -91,8 +91,9 @@ func (l Listing) Named() []Row {
 }
 
 // Render writes the listing as a table, numbering the accounts that can be
-// switched to and marking the active one; times are in now's location.
-func Render(w io.Writer, l Listing, now time.Time) error {
+// switched to and marking the active one; times are in now's location, and
+// cli is the command that saves accounts.
+func Render(w io.Writer, l Listing, now time.Time, cli string) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "\tACCOUNT\tEMAIL\t5-HOUR\tWEEKLY")
 	n := 0
@@ -119,7 +120,7 @@ func Render(w io.Writer, l Listing, now time.Time) error {
 	}
 	for _, r := range l.Accounts {
 		if r.Name == "" && r.Error == "" {
-			_, err := fmt.Fprintln(w, "The box's login has no name: keep it with `rclaude account save <name>`.")
+			_, err := fmt.Fprintf(w, "The box's login has no name: keep it with `%s account save <name>`.\n", cli)
 			return err
 		}
 	}

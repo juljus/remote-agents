@@ -389,7 +389,7 @@ func account(e env, agent config.Agent, args []string) (int, error) {
 		if err != nil || code != 0 {
 			return code, err
 		}
-		return 0, accounts.Render(os.Stdout, listing, time.Now())
+		return 0, accounts.Render(os.Stdout, listing, time.Now(), "r"+kind)
 	case len(args) == 2 && args[0] == "list" && args[1] == "--json":
 		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), false, kind, "list"))
 	case len(args) == 2 && (args[0] == "use" || args[0] == "save" || args[0] == "remove"):
@@ -434,7 +434,7 @@ func pickAccount(e env, kind string) (int, error) {
 	if err != nil || code != 0 {
 		return code, err
 	}
-	if err := accounts.Render(os.Stdout, listing, time.Now()); err != nil {
+	if err := accounts.Render(os.Stdout, listing, time.Now(), "r"+kind); err != nil {
 		return 1, err
 	}
 	name, err := accounts.Choose(os.Stdin, os.Stdout, listing, "r"+kind)

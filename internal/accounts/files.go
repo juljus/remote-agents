@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -92,16 +93,11 @@ func locked[E any](f files, parse func([]byte) (E, error), fn func(*state[E]) er
 
 func read[E any](f files, parse func([]byte) (E, error)) (*state[E], error) {
 	s := &state[E]{entries: map[string]E{}}
-	dirents, err := os.ReadDir(f.dir)
+	names, err := entryNames(f.dir)
 	if err != nil {
 		return nil, err
 	}
-	for _, d := range dirents {
-		name, ok := strings.CutSuffix(d.Name(), ".json")
-		// The lock, record and temporary files have names no account can have.
-		if !ok || ValidName(name) != nil {
-			continue
-		}
+	for _, name := range names {
 		data, err := os.ReadFile(f.entryPath(name))
 		if err != nil {
 			return nil, err
@@ -113,6 +109,31 @@ func read[E any](f files, parse func([]byte) (E, error)) (*state[E], error) {
 		s.entries[name] = e
 	}
 	return s, nil
+}
+
+// Saved reports whether the vault in dir holds any account.
+func Saved(dir string) (bool, error) {
+	names, err := entryNames(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return len(names) > 0, err
+}
+
+// entryNames are the accounts of the vault in dir.
+func entryNames(dir string) ([]string, error) {
+	dirents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, d := range dirents {
+		// The lock, record and temporary files have names no account can have.
+		if name, ok := strings.CutSuffix(d.Name(), ".json"); ok && ValidName(name) == nil {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 func writeEntry[E any](f files, s *state[E], name string, e E) error {
@@ -192,9 +213,3 @@ const (
 	// AddedAlready: the name is the box's login already, which stays.
 	AddedAlready
 )
-
-// copyError refuses to act on an entry that holds the box's login under
-// another account's name; switching away makes its copy the only one again.
-func copyError(name string) error {
-	return fmt.Errorf("account %s holds a copy of the box's login; switch to another account first", name)
-}
