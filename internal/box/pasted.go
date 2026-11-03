@@ -23,15 +23,12 @@ const pastedTTL = 7 * 24 * time.Hour
 // PasteFiles is the box's side of paste-files. It answers which of the
 // laptop's queried paths are on the box, keeps each file the laptop then
 // sends as pasted/<content hash>/<name>, and once the laptop's side ends
-// writes the path of each. Pastes made more than pastedTTL ago go first;
-// pasting the same content again keeps its dir. The prune and each file's
+// writes the path of each. Once it has answered, pastes made more than
+// pastedTTL ago go; pasting the same content again keeps its dir. The prune and each file's
 // store hold the pasted lock, so a prune never removes a file another store
 // just kept; receiving the laptop's upload does not, so a stalled upload
 // holds up no other.
 func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) error {
-	if err := preparePasted(l, now); err != nil {
-		return err
-	}
 	frames := pastefile.NewReader(r)
 	paths, err := frames.Query()
 	if err != nil {
@@ -44,6 +41,13 @@ func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) err
 		}
 	}
 	if err := pastefile.WriteAnswer(w, onBox); err != nil {
+		return err
+	}
+	// The laptop holds the user's typing until it has the answer; the prune can wait.
+	if err := createPastedDir(l); err != nil {
+		return err
+	}
+	if err := prunePasted(l, now); err != nil {
 		return err
 	}
 	var stored []string
@@ -110,26 +114,16 @@ func receivePasted(l boxlayout.Layout, frames *pastefile.Reader, name string, no
 	return path, nil
 }
 
-// keepPasted moves tmp to dir/<sum>/name, or drops it when that is there
-// already. Either way the content's dir counts as pasted now.
+// keepPasted moves tmp to dir/<sum>/name, over a copy there already that the
+// agent may have changed, and counts the content's dir as pasted now.
 func keepPasted(dir, tmp, sum, name string, now time.Time) (string, error) {
 	contentDir := filepath.Join(dir, sum)
 	path := filepath.Join(contentDir, name)
 	if err := os.Mkdir(contentDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return "", fmt.Errorf("creating pasted dir: %w", err)
 	}
-	_, err := os.Lstat(path)
-	switch {
-	case err == nil:
-		if err := os.Remove(tmp); err != nil {
-			return "", fmt.Errorf("dropping pasted copy: %w", err)
-		}
-	case errors.Is(err, fs.ErrNotExist):
-		if err := os.Rename(tmp, path); err != nil {
-			return "", fmt.Errorf("committing pasted file: %w", err)
-		}
-	default:
-		return "", fmt.Errorf("looking up pasted file: %w", err)
+	if err := os.Rename(tmp, path); err != nil {
+		return "", fmt.Errorf("committing pasted file: %w", err)
 	}
 	if err := os.Chtimes(contentDir, now, now); err != nil {
 		return "", fmt.Errorf("refreshing pasted dir: %w", err)
@@ -137,6 +131,7 @@ func keepPasted(dir, tmp, sum, name string, now time.Time) (string, error) {
 	return path, nil
 }
 
+// removeIfThere removes path unless it is gone already.
 func removeIfThere(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -144,13 +139,16 @@ func removeIfThere(path string) error {
 	return nil
 }
 
-// preparePasted creates the pasted dir and prunes pastes older than pastedTTL from it.
-func preparePasted(l boxlayout.Layout, now time.Time) error {
-	dir := l.PastedDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+// prunePasted removes the pastes made more than pastedTTL ago, in either layout.
+func prunePasted(l boxlayout.Layout, now time.Time) error {
+	return withFlock(l.PastedLock(), func() error { return pruneOlderThan(l.PastedDir(), pastedTTL, now, os.RemoveAll) })
+}
+
+func createPastedDir(l boxlayout.Layout) error {
+	if err := os.MkdirAll(l.PastedDir(), 0o700); err != nil {
 		return fmt.Errorf("creating pasted dir: %w", err)
 	}
-	return withFlock(l.PastedLock(), func() error { return pruneOlderThan(dir, pastedTTL, now) })
+	return nil
 }
 
 // StorePasted is paste-store, which laptops built before paste-files use. It
@@ -158,7 +156,10 @@ func preparePasted(l boxlayout.Layout, now time.Time) error {
 // content hash, and writes its path to w, one per line, holding the pasted
 // lock as PasteFiles does.
 func StorePasted(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) error {
-	if err := preparePasted(l, now); err != nil {
+	if err := createPastedDir(l); err != nil {
+		return err
+	}
+	if err := prunePasted(l, now); err != nil {
 		return err
 	}
 	dir := l.PastedDir()

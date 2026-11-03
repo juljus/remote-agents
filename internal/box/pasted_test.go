@@ -272,9 +272,8 @@ func TestPasteFilesRefusesNamesThatAreNotOneFileName(t *testing.T) {
 		if err == nil {
 			t.Errorf("name %q was stored", name)
 		}
-		entries, _ := os.ReadDir(l.PastedDir())
-		if len(entries) != 0 {
-			t.Errorf("name %q left %v", name, entries)
+		if entries, err := os.ReadDir(l.PastedDir()); err != nil || len(entries) != 0 {
+			t.Errorf("name %q left %v, %v", name, entries, err)
 		}
 	}
 }
@@ -292,8 +291,51 @@ func TestPasteFilesLeavesNothingOfATruncatedUpload(t *testing.T) {
 	if err := PasteFiles(l, in, io.Discard, time.Now()); err == nil {
 		t.Fatal("a truncated upload was stored")
 	}
-	if entries, _ := os.ReadDir(l.PastedDir()); len(entries) != 0 {
-		t.Fatalf("left %v", entries)
+	if entries, err := os.ReadDir(l.PastedDir()); err != nil || len(entries) != 0 {
+		t.Fatalf("left %v, %v", entries, err)
+	}
+}
+
+func TestPastingContentAgainRestoresACopyTheAgentChanged(t *testing.T) {
+	l := testLayout(t)
+	var out bytes.Buffer
+	if err := PasteFiles(l, exchange(t, []string{"/l/a.csv"}, [2]string{"a.csv", "original"}), &out, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, stored := replies(t, &out, 1)
+	if err := os.WriteFile(stored[0], []byte("edited on the box"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PasteFiles(l, exchange(t, []string{"/l/a.csv"}, [2]string{"a.csv", "original"}), io.Discard, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(stored[0]); err != nil || string(got) != "original" {
+		t.Fatalf("copy holds %q, %v", got, err)
+	}
+}
+
+func TestPasteFilesAnswersBeforeWaitingOnThePastedLock(t *testing.T) {
+	l := testLayout(t)
+	if err := os.MkdirAll(filepath.Dir(l.PastedLock()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = withFlock(l.PastedLock(), func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer close(release)
+	answered := make(chan struct{})
+	go func() { _ = PasteFiles(l, exchange(t, []string{"/l/x"}), firstLine{stored: answered}, time.Now()) }()
+	select {
+	case <-answered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the answer waited on the pasted lock")
 	}
 }
 
