@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // object is a JSON object kept in its key order with each value as read, so
@@ -47,7 +48,7 @@ func parseObject(data []byte) (object, error) {
 	if _, err := dec.Token(); err != nil {
 		return nil, err
 	}
-	if _, err := dec.Token(); err == nil {
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("data after the JSON object")
 	}
 	return o, nil

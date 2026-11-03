@@ -26,18 +26,26 @@ type Store struct {
 	Now       func() time.Time
 }
 
-// ReadLive reads the live login under the lock Claude Code takes for each
-// write of its credentials.
+// ReadLive reads the live login, the credentials under the lock Claude Code
+// takes for each write of them.
 func (s Store) ReadLive(ctx context.Context) (Live, error) {
 	if err := os.MkdirAll(s.Paths.SecureDir, 0o700); err != nil {
 		return Live{}, err
 	}
 	var live Live
-	err := withStorageLock(ctx, s.Paths, func() (err error) {
-		live, err = readLive(s.Paths)
+	if err := withStorageLock(ctx, s.Paths, func() (err error) {
+		live.Login, err = readLogin(s.Paths)
 		return err
-	})
-	return live, err
+	}); err != nil {
+		return Live{}, err
+	}
+	// Claude Code retries its write lock for a few seconds only, so the config is read outside it.
+	account, err := readAccount(s.Paths)
+	if err != nil {
+		return Live{}, err
+	}
+	live.Account = account
+	return live, nil
 }
 
 // LiveTx replaces the live login while its Store holds Claude Code's refresh lock.
@@ -62,11 +70,14 @@ func (s Store) WithLive(ctx context.Context, read Live, fn func(LiveTx) error) e
 	lockCtx, cancel := context.WithTimeout(ctx, lockWait)
 	defer cancel()
 	return withLocks(lockCtx, locks[:], refreshLockTiming, func() error {
-		now, err := s.ReadLive(ctx)
-		if err != nil {
+		var now *Login
+		if err := withStorageLock(ctx, s.Paths, func() (err error) {
+			now, err = readLogin(s.Paths)
+			return err
+		}); err != nil {
 			return err
 		}
-		if !sameLogin(read.Login, now.Login) {
+		if !sameLogin(read.Login, now) {
 			return ErrLoginChanged
 		}
 		return fn(LiveTx{ctx: ctx, store: s, read: read.Login})
@@ -85,6 +96,10 @@ func sameLogin(a, b *Login) bool {
 // running one reads the new credentials before its next request. Once the
 // credentials changed, the account follows even if ctx ends.
 func (tx LiveTx) Replace(l Login, a Account) error {
+	// A switch that changed the credentials must be able to change the account too.
+	if _, err := requireGlobalConfig(tx.store.Paths); err != nil {
+		return err
+	}
 	if err := writeLogin(tx.ctx, tx.store.Paths, tx.read, l); err != nil {
 		return err
 	}

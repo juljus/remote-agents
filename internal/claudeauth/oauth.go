@@ -204,7 +204,7 @@ func refreshError(status int, body []byte) error {
 		return fmt.Errorf("token endpoint answered %d", status)
 	}
 	switch {
-	case e.Error == "invalid_grant":
+	case (status == http.StatusBadRequest || status == http.StatusUnauthorized) && e.Error == "invalid_grant":
 		return ErrRefreshRefused
 	case status == http.StatusBadRequest && e.Error == "invalid_scope":
 		return errInvalidScope

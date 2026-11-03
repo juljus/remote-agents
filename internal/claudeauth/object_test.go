@@ -60,7 +60,7 @@ func TestObjectRewritesOnlyTheKeySet(t *testing.T) {
 }
 
 func TestParseObjectRefusesWhatIsNotOneObject(t *testing.T) {
-	for _, bad := range []string{`[]`, `{"a":1}{}`, `{"a":1,"a":2}`, `{"a":}`, ``} {
+	for _, bad := range []string{`[]`, `{"a":1}{}`, `{"a":1} x`, `{"a":1}}`, `{"a":1,"a":2}`, `{"a":}`, ``} {
 		if _, err := parseObject([]byte(bad)); err == nil {
 			t.Errorf("%q parsed", bad)
 		}

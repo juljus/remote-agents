@@ -443,6 +443,8 @@ func TestRefreshErrorsNameTheCauseButNoToken(t *testing.T) {
 		want   string
 	}{
 		{400, `{"error":"invalid_grant","error_description":"Refresh token fake-refresh-1 not found"}`, ErrRefreshRefused.Error()},
+		{401, `{"error":"invalid_grant"}`, ErrRefreshRefused.Error()},
+		{500, `{"error":"invalid_grant"}`, "token endpoint answered 500 (invalid_grant)"},
 		{429, `{"error":"rate_limited"}`, "token endpoint answered 429 (rate_limited)"},
 		{500, `oops fake-refresh-1`, "token endpoint answered 500"},
 		{200, `{"access_token":"x"}`, "lacks access_token or expires_in"},
@@ -495,7 +497,7 @@ func TestUsageReadsBothWindowsStrictly(t *testing.T) {
 	}
 }
 
-func TestWriteAccountNeedsClaudeCodesConfig(t *testing.T) {
+func TestWritesNeedClaudeCodesConfig(t *testing.T) {
 	s := testStore(t, Endpoints{})
 	err := withLive(t, s, func(tx LiveTx) error { return tx.ReplaceAccount(mustAccount(t, accountJSON("a"))) })
 	if err == nil || !strings.Contains(err.Error(), "start Claude Code once") {
@@ -503,5 +505,23 @@ func TestWriteAccountNeedsClaudeCodesConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(s.Paths.GlobalConfig) + "/.claude.json"); !os.IsNotExist(err) {
 		t.Fatalf("config created: %v", err)
+	}
+	// A switch then changes neither file, rather than the credentials alone.
+	writeLive(t, s, loginJSON("a", t0), accountJSON("a"))
+	if err := os.Remove(s.Paths.GlobalConfig); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(s.Paths.Credentials())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = withLive(t, s, func(tx LiveTx) error {
+		return tx.Replace(mustLogin(t, loginJSON("b", t0)), mustAccount(t, accountJSON("b")))
+	})
+	if err == nil || !strings.Contains(err.Error(), "start Claude Code once") {
+		t.Fatalf("Replace = %v", err)
+	}
+	if after, err := os.ReadFile(s.Paths.Credentials()); err != nil || string(after) != string(before) {
+		t.Fatalf("credentials changed: %v\n%s", err, after)
 	}
 }

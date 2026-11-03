@@ -22,32 +22,49 @@ type Live struct {
 	Account *Account
 }
 
-// readLive reads both files; the caller holds the credentials write lock.
-func readLive(p Paths) (Live, error) {
+// readLogin reads claudeAiOauth, nil when there is none; the caller holds
+// the credentials write lock.
+func readLogin(p Paths) (*Login, error) {
 	creds, err := readObjectFile(p.Credentials())
 	if err != nil {
-		return Live{}, err
+		return nil, err
 	}
-	var live Live
-	if raw, ok := creds.get("claudeAiOauth"); ok && string(raw) != "null" {
-		l, err := parseLogin(raw)
-		if err != nil {
-			return Live{}, fmt.Errorf("%s: %w", p.Credentials(), err)
-		}
-		live.Login = &l
+	raw, ok := creds.get("claudeAiOauth")
+	if !ok || string(raw) == "null" {
+		return nil, nil
 	}
+	l, err := parseLogin(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", p.Credentials(), err)
+	}
+	return &l, nil
+}
+
+// readAccount reads the global config's oauthAccount, nil when there is none.
+func readAccount(p Paths) (*Account, error) {
 	config, err := readObjectFile(p.GlobalConfig)
 	if err != nil {
-		return Live{}, err
+		return nil, err
 	}
-	if raw, ok := config.get("oauthAccount"); ok && string(raw) != "null" {
-		a, err := parseAccount(raw)
-		if err != nil {
-			return Live{}, fmt.Errorf("%s: %w", p.GlobalConfig, err)
-		}
-		live.Account = &a
+	raw, ok := config.get("oauthAccount")
+	if !ok || string(raw) == "null" {
+		return nil, nil
 	}
-	return live, nil
+	a, err := parseAccount(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", p.GlobalConfig, err)
+	}
+	return &a, nil
+}
+
+// requireGlobalConfig is the file a symlinked global config points to. The
+// config must exist: Claude Code writes it on its first start.
+func requireGlobalConfig(p Paths) (string, error) {
+	path, err := filepath.EvalSymlinks(p.GlobalConfig)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("%s is missing: start Claude Code once first", p.GlobalConfig)
+	}
+	return path, err
 }
 
 // readObjectFile reads a JSON object file; a missing file is an empty object.
@@ -81,11 +98,11 @@ func writeLogin(ctx context.Context, p Paths, read *Login, l Login) error {
 		if info, err := os.Lstat(p.Credentials()); err == nil && info.Mode()&fs.ModeSymlink != 0 {
 			return fmt.Errorf("%s is a symlink, which Claude Code refuses", p.Credentials())
 		}
-		now, err := readLive(p)
+		now, err := readLogin(p)
 		if err != nil {
 			return err
 		}
-		if !sameLogin(read, now.Login) {
+		if !sameLogin(read, now) {
 			return ErrLoginChanged
 		}
 		creds, err := readObjectFile(p.Credentials())
@@ -105,16 +122,12 @@ func writeLogin(ctx context.Context, p Paths, read *Login, l Login) error {
 }
 
 // writeAccount replaces oauthAccount under Claude Code's global config lock,
-// in the file a symlinked config points to. The config must exist: Claude
-// Code writes it on its first start.
+// in the file a symlinked config points to.
 func writeAccount(ctx context.Context, p Paths, a Account) error {
 	ctx, cancel := context.WithTimeout(ctx, lockWait)
 	defer cancel()
 	return withLocks(ctx, []string{p.globalConfigLock()}, configLockTiming, func() error {
-		path, err := filepath.EvalSymlinks(p.GlobalConfig)
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("%s is missing: start Claude Code once first", p.GlobalConfig)
-		}
+		path, err := requireGlobalConfig(p)
 		if err != nil {
 			return err
 		}
