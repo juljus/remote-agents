@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 )
 
 // object is a JSON object kept in its key order with each value as read, so
@@ -117,40 +115,4 @@ func writeKey(buf *bytes.Buffer, key string) error {
 	buf.Truncate(buf.Len() - 1)
 	buf.WriteByte(':')
 	return nil
-}
-
-// writeFileAtomic replaces path with data and mode; readers see the old file or the new one.
-func writeFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			err = errors.Join(err, os.Remove(f.Name()))
-		}
-	}()
-	if err := f.Chmod(mode); err != nil {
-		return errors.Join(fmt.Errorf("writing %s: %w", path, err), f.Close())
-	}
-	if _, err := f.Write(data); err != nil {
-		return errors.Join(fmt.Errorf("writing %s: %w", path, err), f.Close())
-	}
-	if err := f.Sync(); err != nil {
-		return errors.Join(fmt.Errorf("writing %s: %w", path, err), f.Close())
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return fmt.Errorf("committing %s: %w", path, err)
-	}
-	committed = true
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("syncing %s: %w", dir, err)
-	}
-	return errors.Join(d.Sync(), d.Close())
 }

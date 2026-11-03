@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"remote-agents/internal/atomicfile"
 )
 
 // credentialsMode is the mode Claude Code gives .credentials.json.
@@ -79,7 +80,7 @@ func writeLogin(p Paths, l Login) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(p.Credentials(), data, credentialsMode)
+	return atomicfile.Write(p.Credentials(), data, credentialsMode)
 }
 
 // writeAccount replaces oauthAccount under Claude Code's global config lock.
@@ -105,6 +106,6 @@ func writeAccount(ctx context.Context, p Paths, a Account) error {
 		if err != nil {
 			return err
 		}
-		return writeFileAtomic(p.GlobalConfig, data, info.Mode().Perm())
+		return atomicfile.Write(p.GlobalConfig, data, info.Mode().Perm())
 	})
 }
