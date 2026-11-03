@@ -278,14 +278,20 @@ func TestCodexAccountAddsListsAndSwitches(t *testing.T) {
 	if len(listing.Accounts) != 2 || listing.Accounts[1].Name != "work" || !listing.Accounts[1].Active || listing.Accounts[0].SevenDay == nil || listing.Accounts[0].SevenDay.Utilization != 40 {
 		t.Fatalf("listing %+v", listing)
 	}
-	// A Codex runs a session: the switch leaves it on work until restarted.
-	unlock := lockFile(t, filepath.Join(cfg, "thread-writer-locks", codexSession+".lock"))
-	defer unlock()
+	// A run's Codex holds its session and a subagent's: the switch leaves both on work.
+	for _, id := range []string{codexSession, "01a1a1e4-0000-7753-927c-b59c2ec2f926"} {
+		unlock := lockFile(t, filepath.Join(cfg, "thread-writer-locks", id+".lock"))
+		defer unlock()
+	}
 	if err := os.WriteFile(filepath.Join(cfg, "thread-writer-locks", ".coordination.lock"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := writeRunRecord(l, "11111111-2222-4333-8444-555555555555", runRecord{AgentSession: codexSession}); err != nil {
+		t.Fatal(err)
+	}
 	got := run("use", "home")
-	if !strings.Contains(got, "switched the box's Codex to home; Codex sessions started from now on use it") || !strings.Contains(got, "rcodex resume <id>:\n  "+codexSession+"\n") {
+	if !strings.Contains(got, "switched the box's Codex to home; Codex sessions started from now on use it") ||
+		!strings.Contains(got, "rcodex resume <id>:\n  "+codexSession+"\n1 other open Codex threads") {
 		t.Fatalf("use:\n%s", got)
 	}
 	if data, err := os.ReadFile(filepath.Join(cfg, "auth.json")); err != nil || !strings.Contains(string(data), codexfake.RefreshToken("home", 1)) {
@@ -346,6 +352,10 @@ func TestKeepFreshRunsOnlyInTheProductionInstall(t *testing.T) {
 			t.Fatalf("%v: %v", args, err)
 		}
 	}
+	// An account may be named keep-fresh.
+	if err := Account(context.Background(), l, []string{"claude", "remove", "keep-fresh"}, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), "no account keep-fresh") {
+		t.Fatalf("remove keep-fresh: %v", err)
+	}
 }
 
 func TestKeepFreshOfEveryAgentRunsEachDespiteTheOthers(t *testing.T) {
@@ -358,9 +368,26 @@ func TestKeepFreshOfEveryAgentRunsEachDespiteTheOthers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	err := Account(context.Background(), l, []string{"keep-fresh"}, IO{Stdout: &bytes.Buffer{}}, nil, func(string) (string, bool) { return "", false })
+	none := func(string) (string, bool) { return "", false }
+	err := Account(context.Background(), l, []string{"keep-fresh"}, IO{Stdout: &bytes.Buffer{}}, nil, none)
 	if err == nil || !strings.Contains(err.Error(), "claude: account broken") || !strings.Contains(err.Error(), "codex: account broken") {
 		t.Fatalf("err = %v", err)
+	}
+	// An agent with no saved accounts is left alone, however it keeps its login.
+	if err := os.RemoveAll(l.AccountsDir("codex")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(l.AccountsDir("claude"), "broken.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(l.Home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.Home, ".codex", "config.toml"), []byte("cli_auth_credentials_store = \"keyring\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Account(context.Background(), l, []string{"keep-fresh"}, IO{Stdout: &bytes.Buffer{}}, nil, none); err != nil {
+		t.Fatalf("no accounts: %v", err)
 	}
 }
 
@@ -390,5 +417,17 @@ func TestAccountRefusesUnknownCommands(t *testing.T) {
 	}
 	if err := Account(context.Background(), l, []string{"claude", "add", "x", token}, IO{}, nil, none); err == nil || !strings.Contains(err.Error(), "exec spec") {
 		t.Fatalf("reattach spec: %v", err)
+	}
+}
+
+func TestCodexSwitchSaysWhenItCannotTellTheRunningSessions(t *testing.T) {
+	l := testLayout(t)
+	home := t.TempDir()
+	unlock := lockFile(t, filepath.Join(home, "thread-writer-locks", ".coordination.lock"))
+	defer unlock()
+	var out bytes.Buffer
+	err := codexSwitched(l, home, &out, "home")
+	if err == nil || !strings.Contains(err.Error(), "could not tell which Codex sessions are running") || !strings.Contains(out.String(), "switched the box's Codex to home") {
+		t.Fatalf("%v\n%s", err, out.String())
 	}
 }
