@@ -99,6 +99,10 @@ func (m Model) current() (accounts.Row, bool) {
 	return m.listing.Accounts[m.cursor], true
 }
 
+// startable: s can start the row's weekly window, which has not started,
+// as the account the row names.
+func startable(r accounts.Row) bool { return r.Name != "" && r.NotStarted() }
+
 // maxName is the longest name accounts.ValidName admits.
 const maxName = 32
 
@@ -141,7 +145,7 @@ func (m *Model) browse(k Key) Action {
 		m.Notify(true, "the box's login has no name, so there is nothing saved to remove")
 	case k.Code == KeyRune && k.Rune == 'd':
 		m.mode, m.status = confirming, ""
-	case k.Code == KeyRune && k.Rune == 's' && row.NotStarted():
+	case k.Code == KeyRune && k.Rune == 's' && startable(row):
 		return Action{Kind: ActStart, Name: row.Name}
 	}
 	return Action{}
@@ -242,7 +246,7 @@ func (m Model) footer() string {
 		return "y remove · any other key keeps it"
 	}
 	keys := []string{"↑↓ move", "enter switch", "a add", "e rename", "d remove"}
-	if row, ok := m.current(); ok && row.NotStarted() {
+	if row, ok := m.current(); ok && startable(row) {
 		keys = append(keys, "s start week")
 	}
 	return strings.Join(append(keys, "q quit"), " · ")

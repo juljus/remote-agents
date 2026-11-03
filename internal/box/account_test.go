@@ -433,12 +433,12 @@ func TestCodexSwitchSaysWhenItCannotTellTheRunningSessions(t *testing.T) {
 }
 
 // fakeHello stands in for `claude -p hi`: it records how it ran and, given
-// an account's config dir, refreshes the login there as Claude Code may.
+// a scratch config dir, refreshes the login there as Claude Code may.
 const fakeHello = `#!/bin/sh
 echo "args=$* config=${CLAUDE_CONFIG_DIR:-own} empty=$(ls -A | wc -l | tr -d " ")" >> "$(dirname "$0")/asked"
-if [ -n "$CLAUDE_CONFIG_DIR" ]; then
-  printf '{"claudeAiOauth":{"accessToken":"fake-access-w2","refreshToken":"fake-refresh-w2","expiresAt":4102444800000}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
-fi
+case "$CLAUDE_CONFIG_DIR" in
+*/.login-*) printf '{"claudeAiOauth":{"accessToken":"fake-access-w2","refreshToken":"fake-refresh-w2","expiresAt":4102444800000}}' > "$CLAUDE_CONFIG_DIR/.credentials.json" ;;
+esac
 `
 
 func TestAccountStartSendsTheAccountARequest(t *testing.T) {
@@ -501,7 +501,7 @@ func TestAccountStartSendsTheAccountARequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lines := strings.Split(strings.TrimSpace(string(asked)), "\n"); len(lines) != 2 || !strings.Contains(lines[0], "args=-p hi config=") || strings.Contains(lines[0], "config="+live+" ") || !strings.HasSuffix(lines[0], "empty=2") || lines[1] != "args=-p hi config="+live+" empty=0" {
+	if lines := strings.Split(strings.TrimSpace(string(asked)), "\n"); len(lines) != 2 || !strings.Contains(lines[0], "args=-p hi config=") || !strings.Contains(lines[0], "/.login-") || !strings.HasSuffix(lines[0], "empty=0") || lines[1] != "args=-p hi config="+live+" empty=0" {
 		t.Fatalf("asked:\n%s", asked)
 	}
 	entry, err := os.ReadFile(filepath.Join(l.AccountsDir("claude"), "work.json"))
@@ -510,5 +510,22 @@ func TestAccountStartSendsTheAccountARequest(t *testing.T) {
 	}
 	if err := Account(context.Background(), l, []string{"codex", "start", "x", token}, IO{}, nil, lookup); err == nil {
 		t.Fatal("codex start ran")
+	}
+}
+
+func TestReportHeldNamesTheSessionsThatKeepTheOldAccount(t *testing.T) {
+	var out bytes.Buffer
+	if err := reportHeld(&out, []string{"a", "b", "sub"}, map[string]bool{"a": true, "b": true}); err != nil {
+		t.Fatal(err)
+	}
+	want := "running Codex sessions keep their account until restarted; restart each with rcodex resume <id>:\n  a\n  b\n" +
+		"1 other open Codex threads, such as subagents' or a Codex's started outside rcodex, keep their account until their Codex restarts\n" +
+		"the box neither refreshes nor switches back to the account they keep until they exit\n"
+	if out.String() != want {
+		t.Fatalf("report:\n%s", out.String())
+	}
+	out.Reset()
+	if err := reportHeld(&out, nil, nil); err != nil || out.Len() != 0 {
+		t.Fatalf("nothing held: %q, %v", out.String(), err)
 	}
 }

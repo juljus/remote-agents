@@ -1579,7 +1579,7 @@ cat %[4]q/started-home`, cfg, vault, boxInstall, boxHome+"/"+boxTestDir))
 		t.Fatal(err)
 	}
 	want := "fake-refresh-home-1\n\"emailAddress\": \"home@example.com\"\n700 VAULT\n600 VAULT/work.json\n600 VAULT/home.json\n0\n" +
-		".live.json\n.lock\nhome.json\nwork.json\n" +
+		".live.json\n.lock\n.start\nhome.json\nwork.json\n" +
 		"-p hi --model haiku --no-session-persistence --strict-mcp-config --setting-sources project\n"
 	if out != want {
 		t.Fatalf("box state:\n%s\nwant\n%s", out, want)

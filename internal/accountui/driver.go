@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -47,6 +50,9 @@ func (s *screen) draw(m Model) error {
 }
 
 func (s *screen) clear() error {
+	if s.drawn == 0 {
+		return nil
+	}
 	_, err := io.WriteString(s.out, s.rewind())
 	s.drawn = 0
 	return err
@@ -67,11 +73,20 @@ type picker struct {
 	src     byteSource
 	scr     *screen
 	backend Backend
-	// suspend runs fn with the terminal as it was before the picker.
-	suspend func(fn func() error) error
+	// suspend runs fn with the terminal as it was before the picker; its
+	// error is the terminal's, which ends the picker.
+	suspend func(fn func()) error
 }
 
 func (p picker) run() (string, error) {
+	said, err := p.loop()
+	if err != nil {
+		return "", errors.Join(err, p.scr.clear())
+	}
+	return said, p.scr.clear()
+}
+
+func (p picker) loop() (string, error) {
 	listing, err := p.backend.List()
 	if err != nil {
 		return "", err
@@ -88,62 +103,78 @@ func (p picker) run() (string, error) {
 		a := m.Key(k)
 		switch a.Kind {
 		case ActQuit:
-			return "", p.scr.clear()
-		case ActSwitch:
-			said, err := p.backend.Do("use", a.Name)
-			if err == nil {
-				return said, p.scr.clear()
-			}
-			m.Notify(true, "%v", err)
+			return "", nil
 		case ActNone:
 		default:
-			if err := p.act(&m, a); err != nil {
-				return "", err
+			said, switched, err := p.act(&m, a)
+			if err != nil || switched {
+				return said, err
 			}
 		}
 	}
 }
 
-// act does what a, which stays in the picker, asks, and shows its outcome
-// on the status line.
-func (p picker) act(m *Model, a Action) error {
-	var said string
-	var err error
+// act does what a asks. A switch that worked ends the picker; any other
+// outcome shows on the status line, over the accounts listed again.
+func (p picker) act(m *Model, a Action) (said string, switched bool, err error) {
+	var failed error
 	focus := a.Name
 	switch a.Kind {
+	case ActSwitch:
+		said, failed = p.backend.Do("use", a.Name)
+		if failed == nil {
+			return said, true, nil
+		}
 	case ActAdd:
-		err = p.suspend(func() error { return p.backend.Add(a.Name) })
-		said = "added " + a.Name
+		if err := p.suspend(func() { failed = p.backend.Add(a.Name) }); err != nil {
+			return "", false, err
+		}
+		said = "saved " + a.Name
 	case ActRename:
-		said, err = p.backend.Do("rename", a.Name, a.NewName)
+		said, failed = p.backend.Do("rename", a.Name, a.NewName)
 		focus = a.NewName
 	case ActSave:
-		said, err = p.backend.Do("save", a.Name)
+		said, failed = p.backend.Do("save", a.Name)
 	case ActRemove:
-		said, err = p.backend.Do("remove", a.Name)
+		said, failed = p.backend.Do("remove", a.Name)
 	case ActStart:
 		m.Notify(false, "sending %s a request to start its week…", a.Name)
 		if err := p.scr.draw(*m); err != nil {
+			return "", false, err
+		}
+		failed = p.backend.Start(a.Name)
+	}
+	listing, listFailed := p.backend.List()
+	if err := p.drain(); err != nil {
+		return "", false, err
+	}
+	switch {
+	case listFailed != nil && failed != nil:
+		m.Notify(true, "%v; listing the accounts again failed too: %v", failed, listFailed)
+	case listFailed != nil:
+		m.Notify(true, "%s, but listing the accounts again failed: %v", line(said), listFailed)
+	case failed != nil:
+		m.SetListing(listing, "")
+		m.Notify(true, "%v", failed)
+	case a.Kind == ActStart:
+		m.SetListing(listing, focus)
+		p.started(m, a.Name)
+	default:
+		m.SetListing(listing, focus)
+		m.Notify(false, "%s", line(said))
+	}
+	return "", false, nil
+}
+
+// drain drops the keys typed while the picker waited on the box, so that
+// none acts on a table that has changed under it.
+func (p picker) drain() error {
+	for {
+		_, ok, err := p.src.next(0)
+		if err != nil || !ok {
 			return err
 		}
-		err = p.backend.Start(a.Name)
 	}
-	if err != nil {
-		m.Notify(true, "%v", err)
-		return nil
-	}
-	listing, err := p.backend.List()
-	if err != nil {
-		m.Notify(true, "%s, but listing the accounts again failed: %v", line(said), err)
-		return nil
-	}
-	m.SetListing(listing, focus)
-	if a.Kind == ActStart {
-		p.started(m, a.Name)
-		return nil
-	}
-	m.Notify(false, "%s", line(said))
-	return nil
 }
 
 // started tells whether the request started name's weekly window.
@@ -171,13 +202,14 @@ func line(said string) string {
 // Run runs the picker on the terminal in and out, and returns what the box
 // said when the picker switched it to another account; "" when the picker
 // was left.
-func Run(in, out *os.File, backend Backend) (string, error) {
+func Run(in, out *os.File, backend Backend) (said string, err error) {
 	fd := int(in.Fd())
 	t := &tty{fd: fd, out: out}
 	if err := t.raw(); err != nil {
 		return "", err
 	}
-	defer t.restore()
+	defer func() { err = errors.Join(err, t.restore()) }()
+	defer restoreOnSignal(t)()
 	p := picker{
 		src: fdSource{fd: fd},
 		scr: &screen{
@@ -191,28 +223,55 @@ func Run(in, out *os.File, backend Backend) (string, error) {
 		},
 		backend: backend,
 	}
-	p.suspend = func(fn func() error) error {
+	p.suspend = func(fn func()) error {
 		if err := p.scr.clear(); err != nil {
 			return err
 		}
 		if err := t.restore(); err != nil {
 			return err
 		}
-		ran := fn()
-		return errors.Join(ran, t.raw())
+		fn()
+		return t.raw()
 	}
 	return p.run()
+}
+
+// restoreOnSignal puts the terminal back before a signal that ends the
+// process takes its default course; the returned func stops watching.
+func restoreOnSignal(t *tty) (stop func()) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGHUP)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-sigs:
+			// The process ends with the signal either way; a terminal that
+			// cannot be put back has nothing more to tell.
+			_ = t.restore()
+			signal.Reset(syscall.SIGTERM, syscall.SIGHUP)
+			_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(sigs)
+		close(done)
+	}
 }
 
 // tty switches a terminal between raw mode, with the cursor hidden, and
 // the mode it was in.
 type tty struct {
-	fd    int
-	out   io.Writer
+	fd  int
+	out io.Writer
+	mu  sync.Mutex
+	// saved is the mode to restore while the terminal is raw.
 	saved *term.State
 }
 
 func (t *tty) raw() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	saved, err := term.MakeRaw(t.fd)
 	if err != nil {
 		return err
@@ -223,6 +282,8 @@ func (t *tty) raw() error {
 }
 
 func (t *tty) restore() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.saved == nil {
 		return nil
 	}

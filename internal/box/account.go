@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -217,7 +218,8 @@ func openCodexVault(l boxlayout.Layout) (openVault, error) {
 	}
 	store := codexauth.Store{Paths: cfg.Paths, Endpoints: cfg.Endpoints, Client: &http.Client{}, Now: time.Now}
 	switched := func(w io.Writer, name string) error { return codexSwitched(l, cfg.Paths.Home, w, name) }
-	return openVault{vault: accounts.CodexVault{Dir: l.AccountsDir("codex"), Store: store}, switched: switched}, nil
+	running := func() ([]string, error) { return heldCodexSessions(cfg.Paths.Home) }
+	return openVault{vault: accounts.CodexVault{Dir: l.AccountsDir("codex"), Store: store, Running: running}, switched: switched}, nil
 }
 
 // checkCodexStoresInFile refuses a Codex config that keeps logins in the
@@ -245,7 +247,9 @@ func checkCodexStoresInFile(p codexauth.Paths) error {
 // codexSwitched names the running Codex sessions of the box's runs, which
 // keep the login they started with until they are restarted.
 func codexSwitched(l boxlayout.Layout, home string, w io.Writer, name string) error {
-	fmt.Fprintf(w, "switched the box's Codex to %s; Codex sessions started from now on use it\n", name)
+	if _, err := fmt.Fprintf(w, "switched the box's Codex to %s; Codex sessions started from now on use it\n", name); err != nil {
+		return err
+	}
 	held, err := heldCodexSessions(home)
 	if err == nil {
 		var runs map[string]bool
@@ -266,13 +270,18 @@ func reportHeld(w io.Writer, held []string, runs map[string]bool) error {
 			listed = append(listed, id)
 		}
 	}
+	var b strings.Builder
 	if len(listed) > 0 {
-		fmt.Fprintf(w, "running Codex sessions keep their account until restarted; restart each with rcodex resume <id>:\n  %s\n", strings.Join(listed, "\n  "))
+		fmt.Fprintf(&b, "running Codex sessions keep their account until restarted; restart each with rcodex resume <id>:\n  %s\n", strings.Join(listed, "\n  "))
 	}
 	if others := len(held) - len(listed); others > 0 {
-		fmt.Fprintf(w, "%d other open Codex threads, such as subagents' or a Codex's started outside rcodex, keep their account until their Codex restarts\n", others)
+		fmt.Fprintf(&b, "%d other open Codex threads, such as subagents' or a Codex's started outside rcodex, keep their account until their Codex restarts\n", others)
 	}
-	return nil
+	if len(held) > 0 {
+		b.WriteString("the box neither refreshes nor switches back to the account they keep until they exit\n")
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 // runSessions are the agent sessions the box's runs last saw running.
@@ -355,8 +364,12 @@ func signIn(l boxlayout.Layout, agent accountAgent, s spec.Spec, base []string, 
 	return nil
 }
 
-// askTimeout bounds one request an account sends to start its window.
-const askTimeout = 2 * time.Minute
+// askTimeout bounds one request an account sends to start its window, and
+// askGrace how long it has to exit once stopped.
+const (
+	askTimeout = 2 * time.Minute
+	askGrace   = 10 * time.Second
+)
 
 // askAgent runs the spec's one-request command in workdir, its output kept
 // from the terminal and quoted only when it fails.
@@ -369,6 +382,9 @@ func askAgent(ctx context.Context, l boxlayout.Layout, agent accountAgent, s spe
 	}
 	var out bytes.Buffer
 	cmd.Dir, cmd.Stdout, cmd.Stderr = workdir, &out, &out
+	// Stopped, Claude Code gets to finish writing a login it rotated.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = askGrace
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("the request failed (%w): %s", err, lastLine(out.String()))
 	}

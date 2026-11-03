@@ -2,11 +2,17 @@ package accounts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
+	"remote-agents/internal/atomicfile"
 	"remote-agents/internal/codexauth"
 )
 
@@ -16,6 +22,8 @@ import (
 type CodexVault struct {
 	Dir   string
 	Store codexauth.Store
+	// Running lists the threads that running Codex processes hold.
+	Running func() ([]string, error)
 }
 
 // codexRefreshAhead is how long before its access token expires KeepFresh
@@ -64,19 +72,26 @@ type codexLive struct {
 	// active is the entry that signs in as the login, or "": the only one
 	// that may hold a copy of it, as no two entries sign in as one account.
 	active string
+	// kept are the running threads that started on each account the box
+	// switched away from.
+	kept codexKept
 }
 
 // live reads the box's login and saves it to the entry that signs in as it,
 // so the entry holds the latest refresh token once Codex has rotated it.
 func (v CodexVault) live(ctx context.Context, s *codexState) (*codexLive, error) {
+	kept, err := v.stillKept()
+	if err != nil {
+		return nil, err
+	}
 	read, err := v.Store.ReadLive(ctx)
 	if errors.Is(err, codexauth.ErrNotChatGPT) {
-		return &codexLive{other: true}, nil
+		return &codexLive{other: true, kept: kept}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	l := &codexLive{read: read}
+	l := &codexLive{read: read, kept: kept}
 	if read == nil {
 		return l, nil
 	}
@@ -124,6 +139,15 @@ func (v CodexVault) Usage(ctx context.Context) (Listing, error) {
 			r := Row{Name: name, Email: e.Email(), Active: name == l.active}
 			if name == l.active {
 				rows = append(rows, liveRow(r, e))
+				continue
+			}
+			if threads := l.kept.threads(e.Identity()); len(threads) > 0 {
+				if e.AccessExpiresBy(now) {
+					r.Error = keptReason(threads)
+					rows = append(rows, pendingRow[codexauth.Login]{row: r})
+					continue
+				}
+				rows = append(rows, pendingRow[codexauth.Login]{row: r, login: &e})
 				continue
 			}
 			login, err := v.fresh(ctx, s, name)
@@ -177,9 +201,17 @@ func (v CodexVault) Use(ctx context.Context, name string) (switched bool, err er
 		case l.read.AccessExpiresBy(v.Store.Now().Add(codexBusyWindow)):
 			return errors.New("the box's Codex is about to refresh its login, which a switch now could lose; try again in a quarter of an hour")
 		}
+		if threads := l.kept.threads(s.entries[name].Identity()); len(threads) > 0 {
+			return fmt.Errorf("%s with its login, and may have refreshed it; switching back would hand them the saved copy; exit them first: %s", keptSessions(threads, name), strings.Join(threads, ", "))
+		}
 		login, err := v.fresh(ctx, s, name)
 		if err != nil {
 			return err
+		}
+		if l.read != nil {
+			if err := v.keep(l, l.read.Identity()); err != nil {
+				return err
+			}
 		}
 		return v.Store.WithLive(ctx, l.read, func(tx codexauth.LiveTx) error {
 			if err := tx.Replace(login); err != nil {
@@ -307,8 +339,8 @@ func (v CodexVault) Add(ctx context.Context, name string, signIn func(home strin
 
 // KeepFresh refreshes every inactive saved login whose access token expires
 // within codexRefreshAhead, so an account nobody uses stays signed in. It
-// never touches the live login, nor its entry, and reports each
-// account it could not refresh.
+// never touches the live login, nor its entry, nor a login running Codex
+// processes still use, and reports each account it could not refresh.
 func (v CodexVault) KeepFresh(ctx context.Context, log io.Writer) error {
 	var failed []error
 	err := v.locked(func(s *codexState) error {
@@ -322,6 +354,10 @@ func (v CodexVault) KeepFresh(ctx context.Context, log io.Writer) error {
 		due := v.Store.Now().Add(codexRefreshAhead)
 		for _, name := range s.names() {
 			if name == l.active || !s.entries[name].AccessExpiresBy(due) {
+				continue
+			}
+			if threads := l.kept.threads(s.entries[name].Identity()); len(threads) > 0 {
+				fmt.Fprintf(log, "account %s: not refreshed while %s\n", name, keptSessions(threads, ""))
 				continue
 			}
 			_, err := v.Store.Refresh(ctx, s.entries[name], codexauth.ReasonScheduled, func(next codexauth.Login) error {
@@ -354,4 +390,111 @@ func codexSignedOut(name string, err error) error {
 		return fmt.Errorf("signed out: log in again with `rcodex account add %s`", name)
 	}
 	return err
+}
+
+// codexKeptFile records, for each account the box switched away from, the
+// threads that were running then. Each of those Codex processes keeps the
+// account's login in memory and refreshes it there, without saving the new
+// tokens anywhere the vault sees: while one runs, the vault must not
+// refresh that login, nor hand those processes its saved copy back.
+const codexKeptFile = ".kept.json"
+
+type codexKept []keptAccount
+
+type keptAccount struct {
+	AccountID string   `json:"account_id"`
+	UserID    string   `json:"user_id"`
+	Threads   []string `json:"threads"`
+}
+
+func (k codexKept) threads(id codexauth.Identity) []string {
+	for _, a := range k {
+		if a.AccountID == id.AccountID && a.UserID == id.UserID {
+			return a.Threads
+		}
+	}
+	return nil
+}
+
+func (v CodexVault) keptPath() string { return filepath.Join(v.Dir, codexKeptFile) }
+
+// stillKept reads the record and drops from it the threads that have
+// ended; the caller holds the vault's lock.
+func (v CodexVault) stillKept() (codexKept, error) {
+	data, err := os.ReadFile(v.keptPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var recorded codexKept
+	if err := json.Unmarshal(data, &recorded); err != nil {
+		return nil, fmt.Errorf("reading %s: %w", v.keptPath(), err)
+	}
+	running, err := v.Running()
+	if err != nil {
+		return nil, fmt.Errorf("listing the running Codex sessions: %w", err)
+	}
+	var kept codexKept
+	for _, a := range recorded {
+		a.Threads = slices.DeleteFunc(a.Threads, func(id string) bool { return !slices.Contains(running, id) })
+		if len(a.Threads) > 0 {
+			kept = append(kept, a)
+		}
+	}
+	return kept, v.writeKept(kept)
+}
+
+// keep records the running threads that no other account keeps as id's,
+// before the box switches away from it.
+func (v CodexVault) keep(l *codexLive, id codexauth.Identity) error {
+	running, err := v.Running()
+	if err != nil {
+		return fmt.Errorf("listing the running Codex sessions, which keep the login a switch replaces: %w", err)
+	}
+	var others []string
+	for _, a := range l.kept {
+		if a.AccountID != id.AccountID || a.UserID != id.UserID {
+			others = append(others, a.Threads...)
+		}
+	}
+	threads := slices.DeleteFunc(slices.Clone(running), func(t string) bool { return slices.Contains(others, t) })
+	if len(threads) == 0 {
+		return nil
+	}
+	kept := slices.DeleteFunc(slices.Clone(l.kept), func(a keptAccount) bool { return a.AccountID == id.AccountID && a.UserID == id.UserID })
+	kept = append(kept, keptAccount{AccountID: id.AccountID, UserID: id.UserID, Threads: threads})
+	return v.writeKept(kept)
+}
+
+func (v CodexVault) writeKept(kept codexKept) error {
+	if len(kept) == 0 {
+		err := os.Remove(v.keptPath())
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	data, err := json.Marshal(kept)
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(v.keptPath(), data, entryMode)
+}
+
+// keptSessions says how many running sessions started on account name.
+func keptSessions(threads []string, name string) string {
+	on := "it"
+	if name != "" {
+		on = name
+	}
+	if len(threads) == 1 {
+		return "1 Codex session that started on " + on + " runs"
+	}
+	return fmt.Sprintf("%d Codex sessions that started on %s run", len(threads), on)
+}
+
+func keptReason(threads []string) string {
+	return "not refreshed while " + keptSessions(threads, "") + "; they use it until they exit"
 }

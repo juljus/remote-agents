@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"time"
 
 	"remote-agents/internal/atomicfile"
@@ -198,10 +200,11 @@ func (v ClaudeVault) Rename(_ context.Context, old, new string) error {
 
 // Start sends the account one request through ask, which starts its weekly
 // window when it has not started. ask runs Claude Code in workdir, an empty
-// dir, with configDir as its config dir ("" for ~/.claude); the box's own
-// account asks with the box's login as it is, in its own dir. Any
-// other account asks from a config dir that holds its login, and keeps the
-// tokens Claude Code may rotate there.
+// dir of the vault's, with configDir as its config dir ("" for ~/.claude):
+// the box's own account asks with the box's login as it is; any other
+// account asks from a scratch config dir that holds a copy of its login,
+// fresh enough that Claude Code need not rotate it, and keeps the tokens
+// Claude Code rotates there all the same.
 func (v ClaudeVault) Start(ctx context.Context, name string, ask func(workdir, configDir string) error) error {
 	if err := ValidName(name); err != nil {
 		return err
@@ -215,9 +218,13 @@ func (v ClaudeVault) Start(ctx context.Context, name string, ask func(workdir, c
 		if err != nil {
 			return err
 		}
+		workdir, err := v.startDir()
+		if err != nil {
+			return err
+		}
 		switch {
 		case l.state != liveNone && l.active == name:
-			return v.files().scratch(func(dir string) error { return ask(dir, v.Store.Paths.EnvDir()) })
+			return ask(workdir, v.Store.Paths.EnvDir())
 		case l.state == liveUnknown:
 			return fmt.Errorf("the box's login is unverified (%s) and may be account %s's; %s, then start it", l.unverified, name, unverifiedHint)
 		case l.possiblyLive(name):
@@ -227,21 +234,65 @@ func (v ClaudeVault) Start(ctx context.Context, name string, ask func(workdir, c
 		if err != nil {
 			return err
 		}
+		if login.AccessExpired(v.Store.Now().Add(startHeadroom)) {
+			login, err = v.Store.Refresh(ctx, login, func(next claudeauth.Login) error {
+				return v.writeEntry(s, name, claudeEntry{Login: next, Account: e.Account})
+			})
+			if err != nil {
+				return signedOut(name, err)
+			}
+		}
 		return v.files().scratch(func(dir string) error {
 			paths, err := claudeauth.PathsIn(dir)
 			if err != nil {
 				return err
 			}
-			if err := writeJSON(paths.Credentials(), map[string]any{"claudeAiOauth": login}); err != nil {
+			if err := writeJSON(paths.Credentials(), claudeCredentials{Login: login}); err != nil {
 				return err
 			}
-			if err := writeJSON(paths.GlobalConfig, map[string]any{"oauthAccount": e.Account}); err != nil {
+			if err := writeJSON(paths.GlobalConfig, claudeGlobalConfig{Account: e.Account}); err != nil {
 				return err
 			}
-			asked := ask(dir, dir)
-			return errors.Join(asked, v.keepRotated(ctx, s, name, paths, login))
+			asked := ask(workdir, dir)
+			// A cancelled request still leaves what Claude Code rotated to keep.
+			return errors.Join(asked, v.keepRotated(context.WithoutCancel(ctx), s, name, paths, login))
 		})
 	})
+}
+
+// startHeadroom is how long the login Start hands Claude Code must last:
+// longer than the request may take plus the five minutes before expiry in
+// which Claude Code refreshes a login.
+const startHeadroom = 15 * time.Minute
+
+// startDir is the empty dir Start's requests run in, one for every request
+// so that Claude Code's record of the dirs it ran in gains only it.
+func (v ClaudeVault) startDir() (string, error) {
+	if err := v.files().ensureDir(); err != nil {
+		return "", err
+	}
+	dir := filepath.Join(v.Dir, ".start")
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	if len(entries) > 0 {
+		return "", fmt.Errorf("%s holds files, which Claude Code would read as the project's; empty it", dir)
+	}
+	return dir, nil
+}
+
+// claudeCredentials and claudeGlobalConfig are what Claude Code reads a
+// login and its account from, in a config dir of its own.
+type claudeCredentials struct {
+	Login claudeauth.Login `json:"claudeAiOauth"`
+}
+
+type claudeGlobalConfig struct {
+	Account claudeauth.Account `json:"oauthAccount"`
 }
 
 // keepRotated saves to name's entry the login Claude Code left in paths
@@ -259,7 +310,7 @@ func (v ClaudeVault) keepRotated(ctx context.Context, s *claudeState, name strin
 	return v.writeEntry(s, name, claudeEntry{Login: *after.Login, Account: s.entries[name].Account})
 }
 
-func writeJSON(path string, v any) error {
+func writeJSON[T claudeCredentials | claudeGlobalConfig](path string, v T) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err

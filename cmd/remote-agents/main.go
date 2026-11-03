@@ -544,12 +544,11 @@ func (b boxAccounts) query(argv []string) (string, error) {
 	case res.Transport:
 		return "", fmt.Errorf("link to box failed: %s", res.Detail)
 	case res.ExitCode != 0:
-		lines := strings.Split(strings.TrimSpace(errOut.String()), "\n")
-		last := strings.TrimPrefix(lines[len(lines)-1], "remote-agents-box: ")
-		if last == "" {
+		said := strings.Fields(strings.TrimSpace(out.String() + "\n" + strings.ReplaceAll(errOut.String(), "remote-agents-box: ", "")))
+		if len(said) == 0 {
 			return "", fmt.Errorf("the box's account command failed (exit %d)", res.ExitCode)
 		}
-		return "", errors.New(last)
+		return "", errors.New(strings.Join(said, " "))
 	}
 	return out.String(), nil
 }

@@ -104,6 +104,7 @@ func (l *Login) setTokens(raw json.RawMessage) error {
 	if access.Exp == nil {
 		return errors.New("access token names no expiry")
 	}
+	// Codex reads the user and the email the same way (login/src/token_data.rs).
 	user := id.Auth.ChatGPTUserID
 	if user == "" {
 		user = id.Auth.UserID

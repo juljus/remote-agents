@@ -124,12 +124,16 @@ unknown; it fails, refreshing none, while nothing says whose the box's login is.
 `api.anthropic.com/api/oauth/usage`, the endpoint Claude Code's `/usage` reads, and the live
 login's account from `/api/oauth/profile`; both are undocumented, so a change in their shape
 shows as an error. A weekly window with no reset time is taken as not started. To start an
-inactive account's window, Claude Code runs with a copy of its login in a dir of its own, under
-the vault's lock, and any tokens it rotates there go back to the account.
+inactive account's window, Claude Code runs with a copy of its login in a config dir of its own,
+under the vault's lock; the copy is refreshed first so that Claude Code need not rotate it, and
+any tokens it rotates there all the same go back to the account.
 
 `rcodex account` does the same for Codex's ChatGPT logins, with one difference: a running Codex
 keeps the login it started with, so a switch reaches only the Codex sessions started after it.
-It names the running ones; restart each with `rcodex resume <id>` to move it over. Codex keeps
+It names the running ones; restart each with `rcodex resume <id>` to move it over. Those
+sessions keep the old account's login in memory and refresh it there, where the vault never sees
+the new tokens, so until they exit the box neither refreshes that account nor switches back to it.
+A session that refreshed it meanwhile leaves the saved copy spent: add that account again. Codex keeps
 its login in `~/.codex/auth.json`, which a switch replaces whole under Codex's `auth.lock`; the
 saved ones wait in `~/.config/remote-agents/accounts/codex/`. The login names its own account,
 so the vault always knows whose the live one is. A running Codex refreshes its login outside its

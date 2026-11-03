@@ -237,3 +237,13 @@ func TestPickerCutsLinesToTheTerminal(t *testing.T) {
 		}
 	}
 }
+
+func TestPickerOffersNoStartForTheUnsavedLogin(t *testing.T) {
+	m := New(accounts.Listing{Accounts: []accounts.Row{{Email: "stray@example.com", Active: true, Weekly: &accounts.Window{}}}})
+	if a := m.Key(Key{Code: KeyRune, Rune: 's'}); a.Kind != ActNone {
+		t.Fatalf("s = %+v", a)
+	}
+	if got := m.View(200, now, false)[3]; strings.Contains(got, "start week") {
+		t.Fatalf("footer %q", got)
+	}
+}

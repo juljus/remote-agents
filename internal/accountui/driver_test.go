@@ -19,6 +19,8 @@ type fakeBox struct {
 	fail map[string]error
 	// onStart is what a request to an account does to its listing.
 	onStart func(l *accounts.Listing)
+	// switchesAnyway: a use that fails has switched all the same.
+	switchesAnyway bool
 }
 
 func (b *fakeBox) List() (accounts.Listing, error) {
@@ -31,6 +33,11 @@ func (b *fakeBox) List() (accounts.Listing, error) {
 
 func (b *fakeBox) Do(args ...string) (string, error) {
 	b.calls = append(b.calls, strings.Join(args, " "))
+	if args[0] == "use" && b.switchesAnyway {
+		for i := range b.listing.Accounts {
+			b.listing.Accounts[i].Active = b.listing.Accounts[i].Name == args[1]
+		}
+	}
 	if err := b.fail[args[0]]; err != nil {
 		return "", err
 	}
@@ -91,7 +98,7 @@ func (h *harness) run(t *testing.T, src *bursts) (string, error) {
 		src:     src,
 		scr:     &screen{out: &h.out, width: func() (int, error) { return 200, nil }, now: func() time.Time { return now }},
 		backend: h.box,
-		suspend: func(fn func() error) error { h.suspended++; return fn() },
+		suspend: func(fn func()) error { h.suspended++; fn(); return nil },
 	}
 	return p.run()
 }
@@ -181,7 +188,7 @@ func TestRunAddsWithTheTerminalHandedBack(t *testing.T) {
 	}
 	frames := h.frames()
 	last := frames[len(frames)-2]
-	if !strings.HasPrefix(last[3], "▸ work") || last[5] != "added work" {
+	if !strings.HasPrefix(last[3], "▸ work") || last[5] != "saved work" {
 		t.Fatalf("after add:\n%s", strings.Join(last, "\n"))
 	}
 }
@@ -230,5 +237,44 @@ func TestRunFailsWhenTheFirstListingFails(t *testing.T) {
 	h.box.fail["list"] = errors.New("link to box failed")
 	if _, err := h.run(t, keys("q")); err == nil || h.out.Len() != 0 {
 		t.Fatalf("err %v, drew %q", err, h.out.String())
+	}
+}
+
+func TestRunListsAgainAfterAFailedSwitch(t *testing.T) {
+	h := newHarness()
+	h.box.fail["use"] = errors.New("could not tell which Codex sessions are running")
+	h.box.switchesAnyway = true
+	if _, err := h.run(t, keys("k", "\r", "q")); err != nil {
+		t.Fatal(err)
+	}
+	frames := h.frames()
+	last := frames[len(frames)-2]
+	if !strings.HasSuffix(last[0], "active") || last[4] != "could not tell which Codex sessions are running" {
+		t.Fatalf("after a failed switch:\n%s", strings.Join(last, "\n"))
+	}
+}
+
+func TestRunDropsKeysTypedWhileTheBoxWorked(t *testing.T) {
+	h := newHarness()
+	h.box.onStart = func(*accounts.Listing) {}
+	// Enter, typed while the request ran, must not switch to molton.
+	if _, err := h.run(t, keys("j", "s\r", "q")); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(h.box.calls, []string{"list", "start molton", "list"}) {
+		t.Fatalf("calls %q", h.box.calls)
+	}
+}
+
+func TestRunEndsWhenTheTerminalCannotBeTakenBack(t *testing.T) {
+	h := newHarness()
+	p := picker{
+		src:     keys("a", "w", "\r", "q"),
+		scr:     &screen{out: &h.out, width: func() (int, error) { return 200, nil }, now: func() time.Time { return now }},
+		backend: h.box,
+		suspend: func(fn func()) error { fn(); return errors.New("raw mode: input/output error") },
+	}
+	if _, err := p.run(); err == nil || !strings.Contains(err.Error(), "raw mode") {
+		t.Fatalf("run = %v", err)
 	}
 }

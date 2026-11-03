@@ -945,7 +945,7 @@ func TestStartAsksAsTheAccountAndKeepsWhatClaudeRotated(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		asked = append(asked, fmt.Sprint(workdir == configDir, strings.Contains(string(creds), "fake-refresh-home-1"), strings.Contains(string(config), "home@example.com")))
+		asked = append(asked, fmt.Sprint(workdir != configDir, strings.Contains(string(creds), "fake-refresh-home-1"), strings.Contains(string(config), "home@example.com")))
 		return os.WriteFile(filepath.Join(configDir, ".credentials.json"), []byte(`{"claudeAiOauth":`+rotated+`}`), 0o600)
 	})
 	if err != nil || fmt.Sprint(asked) != "[true true true]" {
@@ -1008,4 +1008,64 @@ func activeName(l Listing) string {
 		}
 	}
 	return ""
+}
+
+func TestStartGivesALoginClaudeCodeNeedNotRefresh(t *testing.T) {
+	f := newFixture(t)
+	f.setLive(f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+	if err := f.vault.Save(ctx, "work"); err != nil {
+		t.Fatal(err)
+	}
+	// Ten minutes left: enough for Fresh, too little for a request that
+	// may take two minutes before Claude Code's five-minute window.
+	f.seed("home", f.login("home", 1, 10*time.Minute, 20*24*time.Hour), account("home"))
+	var workdir, given string
+	err := f.vault.Start(ctx, "home", func(w, configDir string) error {
+		creds, err := os.ReadFile(filepath.Join(configDir, ".credentials.json"))
+		workdir, given = w, string(creds)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.entryTokens("home").RefreshToken == "fake-refresh-home-1" || !strings.Contains(given, `"`+f.entryTokens("home").RefreshToken+`"`) {
+		t.Fatalf("given a login about to expire, entry %+v", f.entryTokens("home"))
+	}
+	// The request runs from an empty dir of its own, not the config dir.
+	if entries, err := os.ReadDir(workdir); err != nil || len(entries) != 0 {
+		t.Fatalf("workdir %s: %v, %v", workdir, entries, err)
+	}
+}
+
+func TestStartKeepsWhatClaudeRotatedWhenTheCommandIsCancelled(t *testing.T) {
+	f := newFixture(t)
+	f.setLive(f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+	if err := f.vault.Save(ctx, "work"); err != nil {
+		t.Fatal(err)
+	}
+	f.seed("home", f.login("home", 1, time.Hour, 20*24*time.Hour), account("home"))
+	rotated := f.login("home", 2, 8*time.Hour, 30*24*time.Hour)
+	cancelled, cancel := context.WithCancel(ctx)
+	err := f.vault.Start(cancelled, "home", func(_, configDir string) error {
+		cancel()
+		if err := os.WriteFile(filepath.Join(configDir, ".credentials.json"), []byte(`{"claudeAiOauth":`+rotated+`}`), 0o600); err != nil {
+			return err
+		}
+		return context.Canceled
+	})
+	if !errors.Is(err, context.Canceled) || f.entryTokens("home").RefreshToken != "fake-refresh-home-2" {
+		t.Fatalf("Start = %v, home %+v", err, f.entryTokens("home"))
+	}
+}
+
+func TestStartRefusesACopyOfTheBoxLogin(t *testing.T) {
+	f := newFixture(t)
+	// A guessed save went to the wrong entry: work holds the box's login.
+	box := f.login("box", 1, time.Hour, 3*24*time.Hour)
+	f.seed("work", box, account("work"))
+	f.setLive(box, account("box"))
+	ran := false
+	if err := f.vault.Start(ctx, "work", func(string, string) error { ran = true; return nil }); err == nil || ran || !strings.Contains(err.Error(), "holds a copy of the box's login") {
+		t.Fatalf("Start = %v, ran %v", err, ran)
+	}
 }

@@ -194,7 +194,8 @@ func (f files) scratch(fn func(dir string) error) (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
+	// Claude Code locks a config dir with a dir beside it.
+	defer func() { err = errors.Join(err, os.RemoveAll(dir), os.RemoveAll(dir+".lock")) }()
 	return fn(dir)
 }
 
