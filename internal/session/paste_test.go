@@ -239,6 +239,35 @@ func TestABoxThatAnswersNonsenseFailsThePastePromptly(t *testing.T) {
 	failedPaste(t, `printf '1\n0'; cat >/dev/null; printf '3\nabc%020000d' 0`, `the box stored an upload at "abc"`)
 }
 
+func TestABoxThatAnswersNonsenseMidUploadStopsTheRest(t *testing.T) {
+	h := newPTY(t)
+	dir := t.TempDir()
+	var files []string
+	for _, name := range []string{"a.bin", "b.bin", "c.bin"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, make([]byte, 4<<20), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, path)
+	}
+	receivedAt := filepath.Join(dir, "received")
+	ssh := fakeBox(t, echoLine+`; sleep 1; exit 0`, `printf '3\n000'; printf '3\nabc'; cat > '`+receivedAt+`'`)
+	done := start(testOptions(ssh, h))
+	h.waitFor(t, "ready")
+	paste := "\x1b[200~" + strings.Join(files, " ") + "\x1b[201~"
+	if _, err := h.master.Write([]byte(paste + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor(t, "got["+paste+"]")
+	h.waitFor(t, `the box stored an upload at "abc"`)
+	if r := wait(t, done); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if info, err := os.Stat(receivedAt); err != nil || info.Size() > 9<<20 {
+		t.Fatalf("the laptop went on uploading: %v, %v", info, err)
+	}
+}
+
 func TestAStalledUploadFailsThePaste(t *testing.T) {
 	defer func(was time.Duration) { stallTimeout = was }(stallTimeout)
 	stallTimeout = 300 * time.Millisecond

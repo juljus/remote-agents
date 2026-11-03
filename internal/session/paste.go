@@ -178,8 +178,20 @@ func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, erro
 	go func() {
 		paths, err := readStored(frames, len(up.sent))
 		stored <- storedResult{paths, err}
+		if err != nil {
+			// A box that goes on writing must not block on a reader that left.
+			_, _ = io.Copy(io.Discard, r)
+		}
 	}()
 	for i, f := range up.sent {
+		select {
+		case res := <-stored:
+			if res.err != nil {
+				return uploaded{}, res.err
+			}
+			return uploaded{}, errors.New("the box sent where the uploads landed before it had them")
+		default:
+		}
 		if err := send(w, f, srcs[i]); err != nil {
 			return uploaded{}, err
 		}
