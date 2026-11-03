@@ -179,7 +179,7 @@ func runAgent(agentName string, args []string) (int, error) {
 	if plan.SessionID == "" {
 		hint = "remote-agents attach " + name
 	}
-	agentArgs, hooks, err := cmuxHooks(e, agentName, agent.Kind, plan.Args)
+	agentArgs, hooks, err := cmuxHooks(e, agentName, agent.Kind, plan.Args, args)
 	if err != nil {
 		return 1, err
 	}
@@ -215,18 +215,23 @@ func resumeCommandOf(agentName string, cli agentcli.CLI) func(id string) string 
 // cmuxHooks returns the agent arguments with cmux's hooks added and, when
 // running inside cmux, the executor for the hooks the box relays back. cmux's
 // claude wrapper picks Claude's hooks; Codex's are the ones cmux installs
-// for it, which the box adds itself.
-func cmuxHooks(e env, agentName string, kind config.Kind, args []string) ([]string, *hookexec.Executor, error) {
+// for it, which the box adds itself. userArgs are the wrapper's own, which
+// cmux restores a Codex tab with.
+func cmuxHooks(e env, agentName string, kind config.Kind, args, userArgs []string) ([]string, *hookexec.Executor, error) {
 	if e.cfg.Cmux == nil {
 		return args, nil, nil
-	}
-	if kind == config.KindCodex {
-		hooks, err := cmuxcodex.NewExecutor(os.Environ(), os.Getpid())
-		return args, hooks, err
 	}
 	entry, err := agentEntry(agentName)
 	if err != nil {
 		return nil, nil, err
+	}
+	if kind == config.KindCodex {
+		dir, err := os.Getwd()
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading the working directory: %w", err)
+		}
+		hooks, err := cmuxcodex.NewExecutor(os.Environ(), os.Getpid(), cmuxcodex.Launch{Executable: entry, Args: userArgs, Dir: dir})
+		return args, hooks, err
 	}
 	captured, launched := cmuxcapture.LaunchedByCmux(entry, args, os.Environ(), os.Getpid())
 	if !launched {
@@ -347,7 +352,7 @@ func attach(name string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	_, hooks, err := cmuxHooks(e, agentName, agent.Kind, nil)
+	_, hooks, err := cmuxHooks(e, agentName, agent.Kind, nil, nil)
 	if err != nil {
 		return 1, err
 	}

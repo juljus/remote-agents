@@ -5,7 +5,9 @@
 package cmuxcodex
 
 import (
+	"encoding/base64"
 	"errors"
+	"maps"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -55,10 +57,28 @@ func Argvs() [][]string {
 // its launch to cmux. Inherited from an outer agent, they describe that one.
 const launchEnvPrefix = "CMUX_AGENT_LAUNCH_"
 
+// Launch is how the wrapper was started: cmux restores a Codex tab by
+// running Executable with resume <id> and the flags among Args, in Dir.
+type Launch struct {
+	Executable string
+	Args       []string
+	Dir        string
+}
+
+func (l Launch) env() map[string]string {
+	argv := append([]string{l.Executable}, l.Args...)
+	return map[string]string{
+		launchEnvPrefix + "KIND":       "codex",
+		launchEnvPrefix + "EXECUTABLE": l.Executable,
+		launchEnvPrefix + "ARGV_B64":   base64.StdEncoding.EncodeToString([]byte(strings.Join(argv, "\x00"))),
+		launchEnvPrefix + "CWD":        l.Dir,
+	}
+}
+
 // NewExecutor runs, in the wrapper's cmux terminal, the hooks a Codex on the
 // box relays; environ is the wrapper's environment and pid its process.
 // Outside cmux there is nothing to relay to, and it returns nil.
-func NewExecutor(environ []string, pid int) (*hookexec.Executor, error) {
+func NewExecutor(environ []string, pid int, launch Launch) (*hookexec.Executor, error) {
 	base := make([]string, 0, len(environ))
 	env := map[string]string{}
 	for _, kv := range environ {
@@ -80,5 +100,6 @@ func NewExecutor(environ []string, pid int) (*hookexec.Executor, error) {
 	}
 	env[hookexec.BinEnvVar] = cli
 	env[PIDEnvVar] = strconv.Itoa(pid)
+	maps.Copy(env, launch.env())
 	return &hookexec.Executor{BaseEnv: base, Env: func([]string) map[string]string { return env }, Allowed: Argvs()}, nil
 }
