@@ -48,7 +48,7 @@ func TestAtOnTheLastRowLeavesTheCornerUnknown(t *testing.T) {
 		t.Fatalf("a mark over an unknown corner: %q", got)
 	}
 	// The shell's row scrolls away; the new last row is blank.
-	if got := written(t, w, out, "\r\n"); got != "\r\n\x1b[0m\x1b[4;9H"+Mark+"\x1b[4;1H\x1b[0m" {
+	if got := written(t, w, out, "\r\n"); got != "\r\n\x1b[0m\x1b[4;9H"+drawn+"\x1b[4;1H\x1b[0m" {
 		t.Fatalf("after scrolling wrote %q", got)
 	}
 }
@@ -60,7 +60,7 @@ func TestMarkIsDrawnOnlyOnceShown(t *testing.T) {
 		t.Fatalf("drawn before Show: %q", got)
 	}
 	w.Show()
-	if got, want := written(t, w, out, "!"), "!\x1b[0m\x1b[4;9H"+Mark+"\x1b[1;4H\x1b[0m"; got != want {
+	if got, want := written(t, w, out, "!"), "!\x1b[0m\x1b[4;9H"+drawn+"\x1b[1;4H\x1b[0m"; got != want {
 		t.Fatalf("wrote %q, want %q", got, want)
 	}
 	if got := written(t, w, out, "more"); got != "more" {
@@ -69,6 +69,9 @@ func TestMarkIsDrawnOnlyOnceShown(t *testing.T) {
 }
 
 const hide = "\x1b[0m\x1b[4;9H\x1b[2X"
+
+// drawn is the mark as it is printed while the output has autowrap on.
+const drawn = "\x1b[?7l" + Mark + "\x1b[?7h"
 
 func shown(t *testing.T, cols, rows, row, col int) (*Writer, *bytes.Buffer) {
 	t.Helper()
@@ -86,9 +89,49 @@ func TestScrollAtTheBottomHidesTheMarkFirst(t *testing.T) {
 	w, out := shown(t, 10, 4, 3, 1)
 	written(t, w, out, "\x1b[4;1H")
 	got := written(t, w, out, "a\nb")
-	want := "a" + hide + "\x1b[4;2H\x1b[0m\nb\x1b[0m\x1b[4;9H" + Mark + "\x1b[4;3H\x1b[0m"
+	want := "a" + hide + "\x1b[4;2H\x1b[0m\nb\x1b[0m\x1b[4;9H" + drawn + "\x1b[4;3H\x1b[0m"
 	if got != want {
 		t.Fatalf("wrote %q, want %q", got, want)
+	}
+}
+
+// What the output does around the corner, as Ghostty's Terminal.zig has it,
+// for what the oracle cannot follow: regions, origin mode, deleted lines and
+// wide characters.
+func TestOutputMovesOrCoversTheMarkAsGhosttyDoes(t *testing.T) {
+	for _, tc := range []struct {
+		name, setup, op string
+		// hidden reports that the mark is erased before op takes effect, drawn that it is there after it.
+		hidden, drawn bool
+		row, col      int
+	}{
+		{"a region above the last row scrolls without it", "\x1b[1;3r", "\x1b[3;1H\n", false, true, 2, 0},
+		{"a region down to the last row scrolls it", "\x1b[2;4r", "\x1b[4;1H\n", true, true, 3, 0},
+		{"origin mode keeps the cursor in the region", "\x1b[2;3r\x1b[?6h", "\x1b[9;5H", false, true, 2, 4},
+		{"deleting a line above the last row shifts it up", "", "\x1b[2;1H\x1b[M", true, true, 1, 0},
+		{"deleting a line in a region above it leaves it", "\x1b[1;3r", "\x1b[2;1H\x1b[M", false, true, 1, 0},
+		// Overwriting the head of a wide character clears its tail as well.
+		{"a wide character over its first cell takes it", "", "\x1b[4;8H\u4e2d", false, false, 3, 9},
+		{"a wide character at the last column wraps to the row below", "", "\x1b[3;10H\u4e2d", false, true, 3, 2},
+		{"a wide character at the corner wraps and scrolls", "", "\x1b[4;10H\u4e2d", true, true, 3, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, out := shown(t, 10, 4, 1, 1)
+			written(t, w, out, tc.setup)
+			if !w.t.active().drawn {
+				t.Fatal("setup took the mark")
+			}
+			got := written(t, w, out, tc.op)
+			if strings.Contains(got, hide) != tc.hidden {
+				t.Errorf("hidden = %v, want %v: %q", !tc.hidden, tc.hidden, got)
+			}
+			if w.t.active().drawn != tc.drawn {
+				t.Errorf("drawn = %v, want %v: %q", !tc.drawn, tc.drawn, got)
+			}
+			if c := w.t.cur(); !c.exact() || c.row != tc.row || c.lo != tc.col {
+				t.Errorf("cursor %+v, want %d,%d", *c, tc.row, tc.col)
+			}
+		})
 	}
 }
 
@@ -119,7 +162,7 @@ func TestPendingWrapHidesTheMarkUntilTheCursorMoves(t *testing.T) {
 func TestSynchronizedFrameGetsTheMarkBeforeItEnds(t *testing.T) {
 	w, out := shown(t, 10, 4, 1, 1)
 	got := written(t, w, out, "\x1b[?2026h\x1b[4;1H\x1b[2Kx\x1b[1;1H\x1b[?2026l")
-	want := "\x1b[?2026h\x1b[4;1H\x1b[2Kx\x1b[1;1H\x1b[0m\x1b[4;9H" + Mark + "\x1b[1;1H\x1b[0m\x1b[?2026l"
+	want := "\x1b[?2026h\x1b[4;1H\x1b[2Kx\x1b[1;1H\x1b[0m\x1b[4;9H" + drawn + "\x1b[1;1H\x1b[0m\x1b[?2026l"
 	if got != want {
 		t.Fatalf("wrote %q, want %q", got, want)
 	}
@@ -183,11 +226,11 @@ func TestEraseDisplayOnThePrimaryScreenHidesTheMarkFirst(t *testing.T) {
 func TestLeavingAScreenTakesItsMark(t *testing.T) {
 	w, out := shown(t, 10, 4, 1, 1)
 	got := written(t, w, out, "\x1b[?1049h")
-	if !strings.HasPrefix(got, hide+"\x1b[1;1H\x1b[0m\x1b[?1049h") || !strings.HasSuffix(got, Mark+"\x1b[1;1H\x1b[0m") {
+	if !strings.HasPrefix(got, hide+"\x1b[1;1H\x1b[0m\x1b[?1049h") || !strings.HasSuffix(got, drawn+"\x1b[1;1H\x1b[0m") {
 		t.Fatalf("wrote %q", got)
 	}
 	got = written(t, w, out, "\x1b[?1049l")
-	if !strings.HasPrefix(got, hide+"\x1b[1;1H\x1b[0m\x1b[?1049l") || !strings.HasSuffix(got, Mark+"\x1b[1;1H\x1b[0m") {
+	if !strings.HasPrefix(got, hide+"\x1b[1;1H\x1b[0m\x1b[?1049l") || !strings.HasSuffix(got, drawn+"\x1b[1;1H\x1b[0m") {
 		t.Fatalf("wrote %q", got)
 	}
 }
@@ -198,8 +241,17 @@ func TestMarkLeavesAndRestoresModes(t *testing.T) {
 	written(t, w, out, "\x1b[6;1H\x1b[48;5;7m\x1b[2K\x1b]8;;https://example.com\x1b\\\x1b[2;5r\x1b[?6h\x1b[4h\x1b[1;31m\x1b[3;2H")
 	w.Show()
 	got := written(t, w, out, "")
-	want := "\x1b]8;;\x1b\\\x1b[4l\x1b[?6l\x1b[0;48;5;7m\x1b[6;9H" + Mark + "\x1b[?6h\x1b[3;2H\x1b[0;1;31;48;5;7m\x1b[4h\x1b]8;;https://example.com\x1b\\"
+	want := "\x1b]8;;\x1b\\\x1b[4l\x1b[?6l\x1b[0;48;5;7m\x1b[6;9H" + drawn + "\x1b[?6h\x1b[3;2H\x1b[0;1;31;48;5;7m\x1b[4h\x1b]8;;https://example.com\x1b\\"
 	if got != want {
+		t.Fatalf("wrote %q, want %q", got, want)
+	}
+}
+
+// Output with autowrap off already drops what does not fit; the mark keeps
+// the output's mode as it is.
+func TestMarkUnderAutowrapOffLeavesTheModeAlone(t *testing.T) {
+	w, out := shown(t, 10, 4, 1, 1)
+	if got, want := written(t, w, out, "\x1b[?7l\x1b[H\x1b[J"), "\x1b[?7l\x1b[H\x1b[J\x1b[0m\x1b[4;9H"+Mark+"\x1b[1;1H\x1b[0m"; got != want {
 		t.Fatalf("wrote %q, want %q", got, want)
 	}
 }
@@ -235,7 +287,7 @@ func TestBottomLineKeepsTheMarkAndTheCursor(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("BottomLine = %v, %v", ok, err)
 	}
-	want := "\x1b(B\x0f\x1b[0m\x1b[4;1H\x1b[2Ka long not\x1b(0\x0f\x1b[2;3H\x1b[0m\x1b[0m\x1b[4;11H" + Mark + "\x1b[2;3H\x1b[0m"
+	want := "\x1b(B\x0f\x1b[0m\x1b[4;1H\x1b[2K\x1b[?7la long not\x1b[?7h\x1b(0\x0f\x1b[2;3H\x1b[0m\x1b[0m\x1b[4;11H" + drawn + "\x1b[2;3H\x1b[0m"
 	if got := out.String(); got != want {
 		t.Fatalf("wrote %q, want %q", got, want)
 	}
@@ -271,8 +323,18 @@ func TestResizeWaitsForTheOutputToPlaceTheCursor(t *testing.T) {
 	if got := written(t, w, out, "x"); got != "x" {
 		t.Fatalf("wrote %q", got)
 	}
-	if got := written(t, w, out, "\x1b[H\x1b[J"); !strings.HasSuffix(got, "\x1b[5;11H"+Mark+"\x1b[1;1H\x1b[0m") {
+	if got := written(t, w, out, "\x1b[H\x1b[J"); !strings.HasSuffix(got, "\x1b[5;11H"+drawn+"\x1b[1;1H\x1b[0m") {
 		t.Fatalf("wrote %q", got)
+	}
+}
+
+// The terminal moved the mark with its reflow, so there is nothing Close can erase.
+func TestCloseAfterAResizeWritesNothing(t *testing.T) {
+	w, out := shown(t, 10, 4, 1, 1)
+	w.Resize(8, 4)
+	out.Reset()
+	if err := w.Close(); err != nil || out.Len() != 0 {
+		t.Fatalf("Close = %v, wrote %q", err, out)
 	}
 }
 

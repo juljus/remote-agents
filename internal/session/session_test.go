@@ -65,8 +65,11 @@ func (h *ptyHarness) output() string {
 }
 
 // marking is what the session adds to the output for the remote mark: the
-// cursor query, the mark and the moves to the corner and back.
-var marking = regexp.MustCompile(`\x1b\[6n|` + corner.Mark + `|\x1b\[\d+;\d+H|\x1b\[2X|\x1b\[0(;[\d;]+)?m`)
+// cursor query, clearing the corner at the start, and drawing or erasing
+// the mark with the moves to the corner and back.
+var marking = regexp.MustCompile(`\x1b\[6n` +
+	`|\x1b\[\d+;\d+H\x1b\[0m\x1b\[2X\x1b\[\d+;\d+H` +
+	`|\x1b\[0(;[\d;:]+)?m\x1b\[\d+;\d+H(\x1b\[\?7l` + corner.Mark + `\x1b\[\?7h|\x1b\[2X)\x1b\[\d+;\d+H\x1b\[0(;[\d;:]+)?m`)
 
 // text is the output without the remote mark.
 func (h *ptyHarness) text() string { return marking.ReplaceAllString(h.output(), "") }

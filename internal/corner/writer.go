@@ -126,14 +126,16 @@ func (w *Writer) BottomLine(text string) (bool, error) {
 	text = text[:min(len(text), max(w.t.cols-MarkCells, 0))]
 	r := w.t.restorer()
 	last, certain, has := w.t.last, w.t.lastCertain, w.t.hasLast
-	err := w.send([]byte(r.away() + r.asciiAway() + "\x1b[0m" + cup(w.t.rows, 1) + "\x1b[2K" + text + r.asciiBack() + r.back()))
+	err := w.send([]byte(r.away() + r.asciiAway() + "\x1b[0m" + cup(w.t.rows, 1) + "\x1b[2K" + r.noWrap(text) + r.asciiBack() + r.back()))
 	w.t.last, w.t.lastCertain, w.t.hasLast = last, certain, has
 	w.marked = w.marked || text != ""
 	return true, err
 }
 
-// Resize follows the terminal to a new size. It reflows what it shows, so
-// the mark comes back only once the output has placed the cursor again.
+// Resize follows the terminal to a new size. The terminal has already
+// reflowed what it shows, a drawn mark too, to where the model cannot follow,
+// so the mark comes back only once the output has placed the cursor and
+// erased the new corner.
 func (w *Writer) Resize(cols, rows int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -789,8 +791,8 @@ type restorer struct {
 	row, col, top  int
 	pen            pen
 	charset        charset
-	origin, insert bool
-	link           string
+	origin, insert, autowrap bool
+	link                     string
 	// bg is the background of the blank corner cells.
 	bg string
 }
@@ -800,7 +802,7 @@ func (t *term) restorer() restorer {
 	c := scr.cur
 	return restorer{
 		cols: t.cols, rows: t.rows, row: c.row, col: c.lo, top: t.top,
-		pen: c.pen, charset: c.charset, origin: t.origin, insert: t.insert,
+		pen: c.pen, charset: c.charset, origin: t.origin, insert: t.insert, autowrap: t.autowrap,
 		link: scr.link, bg: scr.corner[0].bg,
 	}
 }
@@ -851,11 +853,21 @@ func (r restorer) asciiBack() string {
 	return s + [...]string{"\x0f", "\x0e", "\x1bn", "\x1bo"}[r.charset.gl]
 }
 
+// noWrap prints body with autowrap off, so a terminal that shrank before
+// the resize reaches the model drops what no longer fits instead of
+// wrapping and scrolling.
+func (r restorer) noWrap(body string) string {
+	if !r.autowrap {
+		return body
+	}
+	return "\x1b[?7l" + body + "\x1b[?7h"
+}
+
 func (r restorer) corner(body string) string {
 	return r.away() + blankSGR(r.bg) + cup(r.rows, r.cols-1) + body + r.back()
 }
 
-func (r restorer) show() string { return r.corner(Mark) }
+func (r restorer) show() string { return r.corner(r.noWrap(Mark)) }
 
 // hide erases the mark the way the corner was blank before it.
 func (r restorer) hide() string { return r.corner("\x1b[2X") }
