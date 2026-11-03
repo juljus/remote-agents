@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Stands in for Codex in end-to-end tests.
+
+Like Codex it takes its hooks from a -c hooks={...} override, runs only those
+trusted by the hash Codex computes, reports SessionStart at the first turn,
+resumes with `resume <id>` and prints Codex's resume hint on exit. Line
+commands: prompt starts a turn, stop and interrupt end it, permission asks
+for approval; hook <event> runs an event's hooks; bg runs a sleep the way
+Codex's shell tool does and leave leaves one behind its shell; hog allocates
+memory until it is killed.
+"""
+
+import hashlib
+import json
+import os
+import signal
+import subprocess
+import sys
+import tomllib
+import uuid
+
+LABELS = {
+    "SessionStart": "session_start", "UserPromptSubmit": "user_prompt_submit", "Stop": "stop",
+    "Interrupt": "interrupt", "PermissionRequest": "permission_request", "PreToolUse": "pre_tool_use",
+    "PostToolUse": "post_tool_use", "PreCompact": "pre_compact", "PostCompact": "post_compact",
+    "SubagentStart": "subagent_start", "SubagentStop": "subagent_stop",
+}
+
+
+def say(line):
+    print(line, flush=True)
+
+
+args = sys.argv[1:]
+say("fake-codex args=" + " ".join(args))
+hooks = {}
+session = str(uuid.uuid4())
+resumed = False
+root = args[: args.index("resume")] if "resume" in args else args
+if root.count("--no-daemon") > 1:
+    say("error: the argument '--no-daemon' cannot be used multiple times")
+    sys.exit(2)
+i = 0
+while i < len(args):
+    if args[i] == "-c" and i + 1 < len(args) and args[i + 1].startswith("hooks="):
+        hooks = tomllib.loads(args[i + 1])["hooks"]
+        i += 2
+    elif args[i] == "resume" and i + 1 < len(args):
+        session, resumed = args[i + 1], True
+        i += 2
+    else:
+        i += 1
+
+trust = hooks.pop("state", {})
+
+
+def trusted(event, group, hook):
+    identity = {"event_name": LABELS[event], "hooks": [{"async": False, "command": hook["command"],
+                                                         "timeout": hook["timeout"], "type": "command"}]}
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    key = "/<session-flags>/config.toml:%s:%d:0" % (LABELS[event], group)
+    return trust.get(key, {}).get("trusted_hash") == "sha256:" + digest
+
+
+untrusted = [e for e, groups in hooks.items() for g, grp in enumerate(groups) if not trusted(e, g, grp["hooks"][0])]
+if untrusted:
+    say("fake-codex hooks need review: " + " ".join(untrusted))
+    hooks = {}
+else:
+    say("fake-codex hooks trusted: %d" % sum(len(g) for g in hooks.values()))
+
+home = os.environ["HOME"]
+transcript = os.path.join(home, "remote-agents-test", "codex-sessions", "rollout-%s.jsonl" % session)
+say("fake-codex session=%s pid=%d cwd=%s" % (session, os.getpid(), os.getcwd()))
+say("fake-codex env BROWSER=%s SESSION=%s TERM=%s" % (
+    os.environ.get("BROWSER"), os.environ.get("REMOTE_AGENTS_SESSION"), os.environ.get("TERM")))
+started = False
+
+
+def run(event, **fields):
+    """Runs event's hooks as Codex does, after writing the rollout as Codex would."""
+    os.makedirs(os.path.dirname(transcript), exist_ok=True)
+    with open(transcript, "a") as f:
+        f.write(json.dumps({"event": event}) + "\n")
+    payload = json.dumps(dict({"session_id": session, "transcript_path": transcript, "cwd": os.getcwd(),
+                               "hook_event_name": event, "model": "fake", "permission_mode": "default"}, **fields))
+    for group in hooks.get(event, []):
+        hook = group["hooks"][0]
+        res = subprocess.run(["sh", "-c", hook["command"]], input=payload, capture_output=True, text=True)
+        kind = "activity" if hook["command"].endswith(" activity") else "cmux"
+        say("%s exit=%d%s" % (kind, res.returncode, " out=" + res.stdout if kind == "cmux" else ""))
+        sys.stderr.write(res.stderr)
+
+
+def turn():
+    global started
+    if not started:
+        started = True
+        run("SessionStart", source="resume" if resumed else "startup")
+    run("UserPromptSubmit", turn_id="t1", prompt="go")
+
+
+def resume_hint():
+    if started or resumed:
+        say("To continue this session, run:\n  codex resume " + session)
+
+
+def interrupted(*_):
+    say("")
+    resume_hint()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, interrupted)
+snapshot = ". '%s/.codex/shell_snapshots/fake.sh' >/dev/null 2>&1 || true" % home
+for line in sys.stdin:
+    cmd, *rest = line.split() or [""]
+    arg = rest[0] if rest else ""
+    if cmd == "whoami":
+        say("fake-codex pid=%d" % os.getpid())
+    elif cmd == "exit":
+        resume_hint()
+        sys.exit(int(arg))
+    elif cmd == "prompt":
+        turn()
+    elif cmd == "stop":
+        run("Stop", turn_id="t1", last_assistant_message=None, stop_hook_active=False)
+    elif cmd == "interrupt":
+        run("Interrupt", turn_id="t1")
+    elif cmd == "permission":
+        run("PermissionRequest", turn_id="t1", tool_name="Bash", tool_input={})
+    elif cmd == "hook":
+        run(arg)
+    elif cmd == "bg":
+        subprocess.Popen(["bash", "-c", "%s; sleep %s; pwd -P >/dev/null" % (snapshot, arg)])
+        say("bg started")
+    elif cmd == "leave":
+        subprocess.run(["bash", "-c", "%s; sleep %s >/dev/null 2>&1 &" % (snapshot, arg)])
+        say("leave started")
+    elif cmd == "hog":
+        res = subprocess.run(["python3", "-c", "b = []\nwhile True: b.append(bytearray(64 << 20))"])
+        say("hog exit=%d" % (128 - res.returncode if res.returncode < 0 else res.returncode))
+    else:
+        say("got: " + line.strip())

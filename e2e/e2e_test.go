@@ -104,7 +104,7 @@ func setup(m *testing.M) (int, error) {
 	if out, err := build.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("build: %v: %s", err, out)
 	}
-	for _, agent := range []string{"fakeclaude", "realclaude", "isolatedclaude"} {
+	for _, agent := range []string{"fakeclaude", "fakecodex", "realclaude", "isolatedclaude"} {
 		if err := os.Symlink("remote-agents", filepath.Join(binDir, "r"+agent)); err != nil {
 			return 0, err
 		}
@@ -124,8 +124,10 @@ func setup(m *testing.M) (int, error) {
 	if _, err := onBox(fmt.Sprintf(`printf 'memory_max = "2G"\n' > %q`, box.SessionConfig())); err != nil {
 		return 0, err
 	}
-	if _, err := sh("scp", "-q", "-p", filepath.Join(root, "testdata", "fake-claude"), host+":"+boxTestDir+"/fake-claude"); err != nil {
-		return 0, err
+	for _, fake := range []string{"fake-claude", "fake-codex"} {
+		if _, err := sh("scp", "-q", "-p", filepath.Join(root, "testdata", fake), host+":"+boxTestDir+"/"+fake); err != nil {
+			return 0, err
+		}
 	}
 	// Real Claude Code with its own config dir: onboarding done, workdir trusted, not logged in.
 	if _, err := onBox(fmt.Sprintf(`set -e
@@ -145,8 +147,12 @@ chmod +x %[1]s/claude-isolated`, boxTestDir, boxHome)); err != nil {
 exec %q "$@"`, blockFile, host, realSSH)); err != nil {
 		return 0, err
 	}
+	// Tests count hook lines before a hook may have run.
+	if err := os.WriteFile(hookLog, nil, 0o644); err != nil {
+		return 0, err
+	}
 	fakeCmux := filepath.Join(work, "cmux")
-	if err := writeExec(fakeCmux, fmt.Sprintf(`echo "$* surface=$CMUX_SURFACE_ID pid=$CMUX_CLAUDE_PID custom=$CMUX_CUSTOM_CLAUDE_PATH stdin=$(cat)" >> %q; printf '{"ok":true}'`, hookLog)); err != nil {
+	if err := writeExec(fakeCmux, fmt.Sprintf(`echo "$* surface=$CMUX_SURFACE_ID pid=$CMUX_CLAUDE_PID custom=$CMUX_CUSTOM_CLAUDE_PATH codexpid=$CMUX_CODEX_PID launch=$CMUX_AGENT_LAUNCH_KIND stdin=$(cat)" >> %q; printf '{"ok":true}'`, hookLog)); err != nil {
 		return 0, err
 	}
 	fakeWrapper := filepath.Join(work, "cmux-claude-wrapper")
@@ -175,6 +181,11 @@ command = "%s/%s/fake-claude"
 kind = "claude"
 args = ["--dangerously-skip-permissions"]
 
+[agents.fakecodex]
+command = "%s/%s/fake-codex"
+kind = "codex"
+args = ["--yolo"]
+
 [agents.realclaude]
 command = "claude"
 kind = "claude"
@@ -182,7 +193,7 @@ kind = "claude"
 [agents.isolatedclaude]
 command = "%s/%s/claude-isolated"
 kind = "claude"
-`, host, boxInstall, boxHome, boxTestDir, fakeBrowser, fakeWrapper, boxHome, boxTestDir, boxHome, boxTestDir)
+`, host, boxInstall, boxHome, boxTestDir, fakeBrowser, fakeWrapper, boxHome, boxTestDir, boxHome, boxTestDir, boxHome, boxTestDir)
 	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
 		return 0, err
 	}
@@ -276,8 +287,14 @@ type term struct {
 
 func start(t *testing.T, name string, args ...string) *term {
 	t.Helper()
+	return startEnv(t, nil, name, args...)
+}
+
+// startEnv starts name with extra added to the test environment.
+func startEnv(t *testing.T, extra []string, name string, args ...string) *term {
+	t.Helper()
 	cmd := exec.Command(filepath.Join(binDir, name), args...)
-	cmd.Env = testEnv()
+	cmd.Env = append(testEnv(), extra...)
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 40, Cols: 120})
 	if err != nil {
 		t.Fatal(err)
@@ -355,11 +372,11 @@ func (tm *term) expectAfter(mark int, pattern string, timeout time.Duration) []s
 	}
 }
 
-// drawnAfter waits for a fake-claude session to draw its screen after mark.
+// drawnAfter waits for a fake agent's session to draw its screen after mark.
 // Keys typed before a session draws, while it is still connecting, are dropped.
 func (tm *term) drawnAfter(mark int) {
 	tm.t.Helper()
-	tm.expectAfter(mark, `fake-claude session=`, 20*time.Second)
+	tm.expectAfter(mark, `fake-(claude|codex) session=`, 20*time.Second)
 }
 
 func (tm *term) send(s string) {
