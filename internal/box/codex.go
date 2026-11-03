@@ -171,31 +171,74 @@ var errCodexCoordinating = errors.New("a Codex holds the coordination lock of it
 // writing a session holds an exclusive flock on its lock file, which it
 // takes only under the coordination lock; probing under that lock cannot
 // race a Codex taking the session; a Codex that wants the coordination lock
-// meanwhile retries it for 30 seconds. Without a coordination lock file, no
-// Codex has taken a session lock.
+// meanwhile retries it for 30 seconds.
 func codexHeld(home, id string) (bool, error) {
+	held := false
+	err := underCodexCoordination(home, func(dir string) (err error) {
+		held, err = codexLockHeld(filepath.Join(dir, id+".lock"))
+		return err
+	})
+	return held, err
+}
+
+// codexHeldSessions are the sessions running Codex processes hold, sorted.
+func codexHeldSessions(home string) ([]string, error) {
+	var held []string
+	err := underCodexCoordination(home, func(dir string) error {
+		locks, err := filepath.Glob(filepath.Join(dir, "*.lock"))
+		if err != nil {
+			return err
+		}
+		for _, lock := range locks {
+			id := strings.TrimSuffix(filepath.Base(lock), ".lock")
+			if strings.HasPrefix(id, ".") {
+				continue
+			}
+			ok, err := codexLockHeld(lock)
+			if err != nil {
+				return err
+			}
+			if ok {
+				held = append(held, id)
+			}
+		}
+		return nil
+	})
+	slices.Sort(held)
+	return held, err
+}
+
+// underCodexCoordination runs fn on Codex's session lock dir holding the
+// coordination lock of its session locks. Without a coordination lock file,
+// no Codex has taken a session lock, and fn does not run.
+func underCodexCoordination(home string, fn func(dir string) error) error {
 	dir := filepath.Join(home, "thread-writer-locks")
 	coord, err := os.OpenFile(filepath.Join(dir, ".coordination.lock"), os.O_RDWR, 0)
 	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
+		return nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("opening Codex's coordination lock: %w", err)
+		return fmt.Errorf("opening Codex's coordination lock: %w", err)
 	}
 	defer coord.Close()
 	err = syscall.Flock(int(coord.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if errors.Is(err, syscall.EWOULDBLOCK) {
-		return false, errCodexCoordinating
+		return errCodexCoordinating
 	}
 	if err != nil {
-		return false, fmt.Errorf("taking Codex's coordination lock: %w", err)
+		return fmt.Errorf("taking Codex's coordination lock: %w", err)
 	}
-	lock, err := os.OpenFile(filepath.Join(dir, id+".lock"), os.O_RDWR, 0)
+	return fn(dir)
+}
+
+// codexLockHeld reports whether a running Codex holds the session lock at path.
+func codexLockHeld(path string) (bool, error) {
+	lock, err := os.OpenFile(path, os.O_RDWR, 0)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("opening the lock of Codex session %s: %w", id, err)
+		return false, fmt.Errorf("opening Codex's session lock %s: %w", filepath.Base(path), err)
 	}
 	defer lock.Close()
 	err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -203,7 +246,7 @@ func codexHeld(home, id string) (bool, error) {
 		return true, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("probing the lock of Codex session %s: %w", id, err)
+		return false, fmt.Errorf("probing Codex's session lock %s: %w", filepath.Base(path), err)
 	}
 	return false, nil
 }

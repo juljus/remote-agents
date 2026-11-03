@@ -3,6 +3,7 @@ package box
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -220,6 +221,25 @@ func TestCodexHeldFollowsTheSessionsWriterLock(t *testing.T) {
 	unlock()
 	if held, err := codexHeld(home, codexSession); err != nil || held {
 		t.Fatalf("held = %v, %v after the writer exited", held, err)
+	}
+}
+
+func TestCodexHeldSessionsAreTheRunningOnes(t *testing.T) {
+	home := t.TempDir()
+	if held, err := codexHeldSessions(home); err != nil || len(held) != 0 {
+		t.Fatalf("held = %v, %v before any Codex ran", held, err)
+	}
+	locks := filepath.Join(home, "thread-writer-locks")
+	other := "01a1a1e4-0000-7753-927c-b59c2ec2f926"
+	unlock := lockFile(t, filepath.Join(locks, codexSession+".lock"))
+	defer unlock()
+	for _, name := range []string{".coordination.lock", other + ".lock"} {
+		if err := os.WriteFile(filepath.Join(locks, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if held, err := codexHeldSessions(home); err != nil || fmt.Sprint(held) != "["+codexSession+"]" {
+		t.Fatalf("held = %v, %v", held, err)
 	}
 }
 
