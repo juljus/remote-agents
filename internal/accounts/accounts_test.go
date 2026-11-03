@@ -834,4 +834,12 @@ The box's login has no name: keep it with ` + "`rclaude account save <name>`" + 
 	if out.String() != want {
 		t.Fatalf("rendered\n%s\nwant\n%s", out.String(), want)
 	}
+	// An unverified login cannot be saved, so the hint stays away.
+	out.Reset()
+	if err := Render(&out, Listing{Accounts: []Row{{Active: true, Error: "unverified"}}}, t0); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "account save") {
+		t.Fatalf("rendered\n%s", out.String())
+	}
 }

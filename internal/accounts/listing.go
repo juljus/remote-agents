@@ -77,7 +77,7 @@ func Render(w io.Writer, l Listing, now time.Time) error {
 		return err
 	}
 	for _, r := range l.Accounts {
-		if r.Name == "" {
+		if r.Name == "" && r.Error == "" {
 			_, err := fmt.Fprintln(w, "The box's login has no name: keep it with `rclaude account save <name>`.")
 			return err
 		}
