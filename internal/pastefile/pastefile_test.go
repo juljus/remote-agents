@@ -2,7 +2,9 @@ package pastefile
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"slices"
 	"testing"
 )
 
@@ -64,13 +66,78 @@ func TestFramesRoundTrip(t *testing.T) {
 
 func TestReaderRefusesOversizedAndTruncatedFrames(t *testing.T) {
 	for name, stream := range map[string]string{
-		"too large":  "20971521\n",
+		"too large":  "104857601\n",
 		"truncated":  "10\nabc",
+		"no content": "10\n",
 		"not a size": "ten\n",
 		"no newline": "12",
 	} {
-		if _, err := NewReader(bytes.NewBufferString(stream)).Next(); err == nil || err == io.EOF {
+		if _, err := NewReader(bytes.NewBufferString(stream)).Next(); err == nil || errors.Is(err, io.EOF) {
 			t.Errorf("%s: Next = %v, want an error", name, err)
 		}
+		if err := NewReader(bytes.NewBufferString(stream)).CopyNext(io.Discard); err == nil || errors.Is(err, io.EOF) {
+			t.Errorf("%s: CopyNext = %v, want an error", name, err)
+		}
+	}
+}
+
+func TestStreamedFramesRoundTrip(t *testing.T) {
+	var stream bytes.Buffer
+	if err := CopyFrame(&stream, bytes.NewReader([]byte("content")), 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFrame(&stream, []byte("next")); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReader(&stream)
+	var got bytes.Buffer
+	if err := r.CopyNext(&got); err != nil || got.String() != "content" {
+		t.Fatalf("CopyNext = %q, %v", got.String(), err)
+	}
+	if next, err := r.Next(); err != nil || string(next) != "next" {
+		t.Fatalf("Next = %q, %v", next, err)
+	}
+	if err := r.CopyNext(&got); err != io.EOF {
+		t.Fatalf("after the last frame: %v, want EOF", err)
+	}
+}
+
+func TestCopyFrameRefusesWhatDoesNotMatchItsSize(t *testing.T) {
+	if err := CopyFrame(io.Discard, bytes.NewReader([]byte("short")), 10); err == nil {
+		t.Fatal("a source shorter than its size was framed")
+	}
+	if err := CopyFrame(io.Discard, bytes.NewReader(nil), MaxSize+1); err == nil {
+		t.Fatal("an oversized file was framed")
+	}
+}
+
+func TestQueryAndAnswerRoundTrip(t *testing.T) {
+	var stream bytes.Buffer
+	paths := []string{"/a/my file.pdf", "/b/c\nd"}
+	if err := WriteQuery(&stream, paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAnswer(&stream, []bool{true, false}); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReader(&stream)
+	if got, err := r.Query(); err != nil || !slices.Equal(got, paths) {
+		t.Fatalf("Query = %q, %v", got, err)
+	}
+	if got, err := r.Answer(2); err != nil || !slices.Equal(got, []bool{true, false}) {
+		t.Fatalf("Answer = %v, %v", got, err)
+	}
+}
+
+func TestAnswerRefusesTheWrongCount(t *testing.T) {
+	var stream bytes.Buffer
+	if err := WriteAnswer(&stream, []bool{true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewReader(&stream).Answer(2); err == nil {
+		t.Fatal("an answer for one path passed for two")
+	}
+	if _, err := NewReader(bytes.NewBufferString("2\n1x")).Answer(2); err == nil {
+		t.Fatal("an answer of other bytes passed")
 	}
 }
