@@ -52,3 +52,14 @@ if [[ -n "$archive" ]]; then
   install -m 0755 "$work/gh/gh_2.89.0_linux_amd64/bin/gh" /usr/local/bin/gh
   stamp gh "$GH_SHA256"
 fi
+
+# Codex finds the sandbox, ripgrep and its helpers beside its own resolved binary.
+CODEX_SHA256=1d44b28bc4ac9937d7d3532264baa68a507ce364956a0d4ebb856f331cdee254
+archive="$(fetch codex https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-package-x86_64-unknown-linux-musl.tar.gz "$CODEX_SHA256")"
+if [[ -n "$archive" ]]; then
+  mkdir "$work/codex/package"
+  tar -xzf "$archive" -C "$work/codex/package"
+  install_tree codex "$work/codex/package"
+  ln -sfn ../lib/codex/bin/codex /usr/local/bin/codex
+  stamp codex "$CODEX_SHA256"
+fi
