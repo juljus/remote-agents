@@ -66,3 +66,14 @@ func TestParseObjectRefusesWhatIsNotOneObject(t *testing.T) {
 		}
 	}
 }
+
+func TestWithoutDropsOnlyItsKey(t *testing.T) {
+	o, err := Parse([]byte(`{"a":1,"b":2,"c":3}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := o.Without("b").Without("x").Marshal("")
+	if err != nil || string(got) != `{"a":1,"c":3}` {
+		t.Fatalf("%s, %v", got, err)
+	}
+}

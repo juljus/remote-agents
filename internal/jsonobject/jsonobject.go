@@ -82,6 +82,17 @@ func (o Object) With(key string, value json.RawMessage) Object {
 	return out
 }
 
+// Without is o without key.
+func (o Object) Without(key string) Object {
+	out := make(Object, 0, len(o))
+	for _, m := range o {
+		if m.key != key {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // Marshal writes o compactly, or indented by indent when it is not empty.
 func (o Object) Marshal(indent string) ([]byte, error) {
 	var buf bytes.Buffer
