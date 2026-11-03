@@ -67,7 +67,10 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   Each session runs `codex --no-daemon`, so it never shares Codex's background server.
 - A cloud in the terminal's bottom-right corner marks a remote session while it is shown. It is
   drawn only over blank cells, never over the agent's text, and goes when the session ends or
-  detaches. After a resize it returns once the agent redraws its screen.
+  detaches. A resize moves the drawn cloud wherever the terminal reflows it, beyond the
+  wrapper's reach: Claude Code and Codex clear and redraw their screen on a resize, which erases
+  it, and the cloud then returns to the new corner. Output that is not redrawn keeps the moved
+  copy until it is overwritten.
 - `remote-agents ls` lists sessions on the box; `remote-agents attach <session>` reattaches.
 - Pasting or dragging laptop files into a session uploads each one the box lacks to
   `~/.local/state/remote-agents/pasted/<sha256>/<name>` and pastes that path instead, so Claude can

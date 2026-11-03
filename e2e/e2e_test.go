@@ -378,20 +378,31 @@ func (tm *term) text() string {
 // cloud starts the cell that shows the remote mark; the emulator may keep its variation selector apart.
 const cloud = "\u2601"
 
+// resize gives the terminal a new size, as dragging its window would.
+func (tm *term) resize(cols, rows int) {
+	tm.t.Helper()
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.screen.Resize(cols, rows)
+	if err := pty.Setsize(tm.master, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}); err != nil {
+		tm.t.Fatal(err)
+	}
+}
+
 // marks lists where the screen and its scrollback show the remote mark, as "screen x,y" or "scrollback x,y".
 func (tm *term) marks() []string {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	var found []string
-	for y := range termRows {
-		for x := range termCols {
+	for y := range tm.screen.Height() {
+		for x := range tm.screen.Width() {
 			if c := tm.screen.CellAt(x, y); c != nil && strings.HasPrefix(c.Content, cloud) {
 				found = append(found, fmt.Sprintf("screen %d,%d", x, y))
 			}
 		}
 	}
 	for y := range tm.screen.ScrollbackLen() {
-		for x := range termCols {
+		for x := range tm.screen.Width() {
 			if c := tm.screen.ScrollbackCellAt(x, y); c != nil && strings.HasPrefix(c.Content, cloud) {
 				found = append(found, fmt.Sprintf("scrollback %d,%d", x, y))
 			}
@@ -613,6 +624,22 @@ func TestTheCornerMarksTheRemoteSession(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	tm.expectMarks(nil, time.Second)
+}
+
+// Claude redraws its whole screen on a resize, which erases the mark where
+// the old size had it, and the mark comes back in the new corner.
+func TestRealClaudeGetsTheMarkInTheCornerAfterAResize(t *testing.T) {
+	tm := start(t, "risolatedclaude")
+	tm.expectCompact(0, "Not logged in", 30*time.Second)
+	tm.expectMarks([]string{fmt.Sprintf("screen %d,%d", termCols-2, termRows-1)}, 10*time.Second)
+	tm.resize(termCols+10, termRows+10)
+	tm.expectMarks([]string{fmt.Sprintf("screen %d,%d", termCols+8, termRows+9)}, 10*time.Second)
+	tm.send("\x03")
+	time.Sleep(300 * time.Millisecond)
+	tm.send("\x03")
+	time.Sleep(300 * time.Millisecond)
+	tm.send("\x03")
+	tm.wait(15 * time.Second)
 }
 
 func TestASessionOverItsMemoryCapLosesOnlyTheProcessThatOverran(t *testing.T) {
