@@ -55,6 +55,18 @@ func TestPasteFilesArgv(t *testing.T) {
 	}
 }
 
+func TestAccountArgv(t *testing.T) {
+	got := AccountArgv("ssh", testBox, false, "claude", "use", "home")
+	want := append(append([]string{"ssh"}, commonOptions...), "-T", "box",
+		`exec "$HOME/.local/share/ra-test/bin/remote-agents-box" account claude use home`)
+	if !slices.Equal(got, want) {
+		t.Fatalf("argv =\n%q\nwant\n%q", got, want)
+	}
+	if tty := AccountArgv("ssh", testBox, true, "claude", "add", "home", "TOKEN"); !slices.Contains(tty, "-tt") {
+		t.Fatalf("sign-in without a terminal: %q", tty)
+	}
+}
+
 func TestTunnelArgv(t *testing.T) {
 	got := TunnelArgv("ssh", "box", 8250)
 	want := append(append([]string{"ssh"}, commonOptions...), "-W", "localhost:8250", "box")

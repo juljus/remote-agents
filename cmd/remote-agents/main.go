@@ -6,7 +6,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -25,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/term"
 
+	"remote-agents/internal/accounts"
 	"remote-agents/internal/agentcli"
 	"remote-agents/internal/cmuxcapture"
 	"remote-agents/internal/cmuxcodex"
@@ -47,7 +50,9 @@ const usage = `usage:
   remote-agents attach <session>                   reattach to a running session
   remote-agents ls                                 list sessions running on the box
   remote-agents link                               run the link daemon (launchd runs this)
-  r<agent> [agent args...]                         same as run <agent>, e.g. rclaude`
+  r<agent> [agent args...]                         same as run <agent>, e.g. rclaude
+  rclaude account [list [--json] | use <name> | add <name> | save <name> | remove <name>]
+                                                   pick, list and switch the box's Claude accounts`
 
 // configEnvVar points at a config file other than ~/.config/remote-agents/config.toml.
 const configEnvVar = "REMOTE_AGENTS_CONFIG"
@@ -159,6 +164,9 @@ func runAgent(agentName string, args []string) (int, error) {
 	agent, err := e.cfg.Agent(agentName)
 	if err != nil {
 		return 1, err
+	}
+	if len(args) > 0 && args[0] == "account" {
+		return account(e, agent, args[1:])
 	}
 	cli := agent.CLI()
 	plan, err := cli.Analyze(append(slices.Clone(agent.Args), args...), uuid.NewString)
@@ -366,6 +374,82 @@ func runCommand(e env, agent config.Agent, args []string) (int, error) {
 	}
 	tty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	return passthrough(sshrun.ExecArgv(e.ssh, e.box(), token, tty))
+}
+
+const accountUsage = "usage: rclaude account [list [--json] | use <name> | add <name> | save <name> | remove <name>]"
+
+// account runs the box's account commands; without arguments it lists the
+// accounts and switches to the one picked.
+func account(e env, agent config.Agent, args []string) (int, error) {
+	if agent.Kind != config.KindClaude {
+		return 2, fmt.Errorf("accounts are for agents of kind %s", config.KindClaude)
+	}
+	kind := string(agent.Kind)
+	if len(args) == 0 {
+		return pickAccount(e, kind)
+	}
+	switch {
+	case len(args) == 1 && args[0] == "list":
+		listing, code, err := accountListing(e, kind)
+		if err != nil || code != 0 {
+			return code, err
+		}
+		return 0, accounts.Render(os.Stdout, listing, time.Now())
+	case len(args) == 2 && args[0] == "list" && args[1] == "--json":
+		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), false, kind, "list"))
+	case len(args) == 2 && (args[0] == "use" || args[0] == "save" || args[0] == "remove"):
+		if err := accounts.ValidName(args[1]); err != nil {
+			return 2, err
+		}
+		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), false, kind, args...))
+	case len(args) == 2 && args[0] == "add":
+		if err := accounts.ValidName(args[1]); err != nil {
+			return 2, err
+		}
+		s := spec.Spec{Mode: spec.ModeExec, Workdir: e.cfg.Workdir, Argv: []string{agent.Command, "auth", "login"}, Env: terminalEnv()}
+		token, err := s.Encode()
+		if err != nil {
+			return 1, err
+		}
+		return passthrough(sshrun.AccountArgv(e.ssh, e.box(), true, kind, "add", args[1], token))
+	}
+	return 2, errors.New(accountUsage)
+}
+
+func accountListing(e env, kind string) (accounts.Listing, int, error) {
+	var out bytes.Buffer
+	res := sshrun.Run(context.Background(), sshrun.AccountArgv(e.ssh, e.box(), false, kind, "list"), sshrun.Stdio{Stdout: &out, Stderr: os.Stderr}, 2*time.Second)
+	switch {
+	case res.Err != nil:
+		return accounts.Listing{}, 1, res.Err
+	case res.Transport:
+		return accounts.Listing{}, 255, fmt.Errorf("link to box failed: %s", res.Detail)
+	case res.ExitCode != 0:
+		return accounts.Listing{}, res.ExitCode, nil
+	}
+	var l accounts.Listing
+	if err := json.Unmarshal(out.Bytes(), &l); err != nil {
+		return accounts.Listing{}, 1, fmt.Errorf("reading the box's account listing: %w", err)
+	}
+	return l, 0, nil
+}
+
+func pickAccount(e env, kind string) (int, error) {
+	listing, code, err := accountListing(e, kind)
+	if err != nil || code != 0 {
+		return code, err
+	}
+	if err := accounts.Render(os.Stdout, listing, time.Now()); err != nil {
+		return 1, err
+	}
+	name, err := accounts.Choose(os.Stdin, os.Stdout, listing)
+	if err != nil {
+		return 1, err
+	}
+	if name == "" {
+		return 0, nil
+	}
+	return passthrough(sshrun.AccountArgv(e.ssh, e.box(), false, kind, "use", name))
 }
 
 func list() (int, error) {

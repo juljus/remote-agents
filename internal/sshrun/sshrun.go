@@ -80,6 +80,16 @@ func ListeningArgv(ssh string, b Box, port uint16) []string {
 	return argv(ssh, []string{"-T"}, b.Host, b.command("listening", fmt.Sprint(port)))
 }
 
+// AccountArgv runs an account command of agent kind; args must be shell-safe.
+// A sign-in needs the terminal.
+func AccountArgv(ssh string, b Box, tty bool, kind string, args ...string) []string {
+	opts := []string{"-T"}
+	if tty {
+		opts = []string{"-tt", "-e", "none"}
+	}
+	return argv(ssh, opts, b.Host, b.command(append([]string{"account", kind}, args...)...))
+}
+
 func ListArgv(ssh string, b Box) []string {
 	return argv(ssh, []string{"-T"}, b.Host, b.command("ls"))
 }
