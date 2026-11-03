@@ -30,17 +30,6 @@ func TestImageExtGoesByContent(t *testing.T) {
 	}
 }
 
-func TestHasImageName(t *testing.T) {
-	for name, want := range map[string]bool{
-		"a.png": true, "a.PNG": true, "a.jpg": true, "a.jpeg": true, "a.gif": true, "a.webp": true,
-		"a.svg": false, "a": false, "png": false, "a.png.txt": false,
-	} {
-		if got := HasImageName(name); got != want {
-			t.Errorf("HasImageName(%q) = %v", name, got)
-		}
-	}
-}
-
 func TestFramesRoundTrip(t *testing.T) {
 	var stream bytes.Buffer
 	files := [][]byte{png, {}, []byte("second\nwith newline")}

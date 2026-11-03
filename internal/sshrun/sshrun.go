@@ -51,9 +51,9 @@ func SessionArgv(ssh string, b Box, token string) []string {
 	return argv(ssh, []string{"-tt", "-e", "none"}, b.Host, b.command("attach", token))
 }
 
-// PasteArgv stores the image files framed on its stdin in the box's pasted dir.
-func PasteArgv(ssh string, b Box) []string {
-	return argv(ssh, []string{"-T"}, b.Host, b.command("paste-store"))
+// PasteFilesArgv runs the box's side of a paste-files exchange over its stdio.
+func PasteFilesArgv(ssh string, b Box) []string {
+	return argv(ssh, []string{"-T"}, b.Host, b.command("paste-files"))
 }
 
 func ExecArgv(ssh string, b Box, token string, tty bool) []string {

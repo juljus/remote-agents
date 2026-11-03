@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -38,16 +37,6 @@ var extByType = map[string]string{
 func ImageExt(head []byte) (string, bool) {
 	ext, ok := extByType[http.DetectContentType(head)]
 	return ext, ok
-}
-
-// HasImageName reports whether name has an image extension. Claude attaches
-// a pasted path only when it has one.
-func HasImageName(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
-		return true
-	}
-	return false
 }
 
 // WriteFrame writes one file to the stream.

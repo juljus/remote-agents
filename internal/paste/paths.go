@@ -3,10 +3,11 @@ package paste
 import (
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 
 	"remote-agents/internal/pastefile"
 )
@@ -85,18 +86,18 @@ func doubleQuoted(content []byte, i int, cur *strings.Builder) int {
 
 func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
 
-// An Image is a word of a paste that names a laptop image file.
-type Image struct {
+// A File is a word of a paste that names a path on the laptop.
+type File struct {
 	Path string
+	info fs.FileInfo
 	word word
 }
 
-// Images returns the words of content that name laptop image files, when
+// Files returns the words of content that name paths on the laptop, when
 // content is nothing but absolute paths, as terminals paste files. A path
-// with no image name, or that is no regular file holding an image on the
-// laptop, is left out: it may name a file on the box. An image that cannot
-// be uploaded is an error.
-func Images(content []byte) ([]Image, error) {
+// that is not on the laptop is left out: it may name one on the box. A path
+// that cannot be looked up is an error.
+func Files(content []byte) ([]File, error) {
 	ws, ok := words(content)
 	if !ok {
 		return nil, nil
@@ -106,61 +107,44 @@ func Images(content []byte) ([]Image, error) {
 			return nil, nil
 		}
 	}
-	var out []Image
+	var out []File
 	for _, w := range ws {
-		is, err := isImage(w.value)
+		info, err := os.Stat(w.value)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
-		if is {
-			out = append(out, Image{Path: w.value, word: w})
-		}
+		out = append(out, File{Path: w.value, info: info, word: w})
 	}
 	return out, nil
 }
 
-func isImage(path string) (bool, error) {
-	if !pastefile.HasImageName(path) {
-		return false, nil
+// Uploadable says why f cannot go to the box, or nil when it can. It names
+// f by its base name, short enough for a notice.
+func (f File) Uploadable() error {
+	name := filepath.Base(f.Path)
+	switch {
+	case f.info.IsDir():
+		return fmt.Errorf("%s is a directory", name)
+	case !f.info.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", name)
+	case f.info.Size() > pastefile.MaxSize:
+		return fmt.Errorf("%s is over %d MB", name, pastefile.MaxSize>>20)
 	}
-	info, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if !info.Mode().IsRegular() {
-		return false, nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-	head := make([]byte, pastefile.SniffLen)
-	n, err := io.ReadFull(f, head)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		return false, fmt.Errorf("reading %s: %w", path, err)
-	}
-	if _, ok := pastefile.ImageExt(head[:n]); !ok {
-		return false, nil
-	}
-	if info.Size() > pastefile.MaxSize {
-		return false, fmt.Errorf("%s is too large to upload (%d MB, the limit is %d MB)", path, info.Size()>>20, pastefile.MaxSize>>20)
-	}
-	return true, nil
+	return nil
 }
 
-// Replace puts boxPaths[i] in place of images[i] in content, escaped for the
-// shell; everything else stays as it was.
-func Replace(content []byte, images []Image, boxPaths []string) []byte {
+// Replace puts boxPaths[i] in place of files[i] in content, escaped for the
+// shell; everything else stays as it was. files are in paste order.
+func Replace(content []byte, files []File, boxPaths []string) []byte {
 	var out []byte
 	at := 0
-	for i, im := range images {
-		out = append(out, content[at:im.word.start]...)
+	for i, f := range files {
+		out = append(out, content[at:f.word.start]...)
 		out = append(out, shellEscape(boxPaths[i])...)
-		at = im.word.end
+		at = f.word.end
 	}
 	return append(out, content[at:]...)
 }

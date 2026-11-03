@@ -7,76 +7,172 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"remote-agents/internal/paste"
 	"remote-agents/internal/pastefile"
+	"remote-agents/internal/reconnect"
 	"remote-agents/internal/sshrun"
 )
 
-// uploadTimeout bounds the upload of one paste's images.
+// uploadTimeout bounds one paste's exchange with the box.
 const uploadTimeout = time.Minute
 
-// pasteRewriter is the Rewrite of an attempt's paste filter: the laptop image
-// paths in a paste become the box paths of their uploaded copies. When the
-// upload fails, the paste goes on unchanged and the user is told why.
+// errBoxEnded is what the exchange reads and writes once ssh has exited.
+var errBoxEnded = errors.New("the box ended the exchange early")
+
+// pasteRewriter is the Rewrite of an attempt's paste filter: each laptop path
+// in a paste that the box lacks becomes the box path of its uploaded copy.
+// A path the box has stays as typed, so the agent works on the box's own
+// file. A file that cannot upload stays as typed too, and the user is told
+// why; when the exchange fails, the whole paste goes on unchanged.
 func pasteRewriter(ctx context.Context, opts Options, out *screenOut) func([]byte) []byte {
 	return func(content []byte) []byte {
-		images, err := paste.Images(content)
-		if err == nil && len(images) == 0 {
+		files, err := paste.Files(content)
+		if err == nil && len(files) == 0 {
 			return content
 		}
-		var boxPaths []string
+		var up uploaded
 		if err == nil {
-			boxPaths, err = upload(ctx, opts, images)
+			up, err = upload(ctx, opts, files)
 		}
 		if ctx.Err() != nil {
-			opts.Logf("%s: the attempt ended while a pasted image was uploading; the paste went with it", opts.Spec.Session)
+			opts.Logf("%s: the attempt ended while a pasted file was uploading; the paste went with it", opts.Spec.Session)
 			return content
 		}
 		if err != nil {
-			opts.Logf("%s: pasted image not uploaded, its laptop path went in as text: %v", opts.Spec.Session, err)
-			out.notify("pasted image not uploaded: " + err.Error())
+			opts.Logf("%s: pasted files not uploaded, their laptop paths went in as text: %v", opts.Spec.Session, err)
+			out.notify("pasted files not uploaded: " + err.Error())
 			return content
 		}
-		return paste.Replace(content, images, boxPaths)
+		if len(up.refused) > 0 {
+			reasons := errors.Join(up.refused...)
+			opts.Logf("%s: pasted paths not uploaded, they went in as typed: %v", opts.Spec.Session, reasons)
+			out.notify("not uploaded: " + strings.ReplaceAll(reasons.Error(), "\n", "; "))
+		}
+		return paste.Replace(content, up.sent, up.boxPaths)
 	}
 }
 
-// upload sends the images to the box over one ssh command and returns where they landed.
-func upload(ctx context.Context, opts Options, images []paste.Image) ([]string, error) {
-	var stream bytes.Buffer
-	for _, im := range images {
-		data, err := os.ReadFile(im.Path)
-		if err != nil {
-			return nil, err
-		}
-		if err := pastefile.WriteFrame(&stream, data); err != nil {
-			return nil, fmt.Errorf("%s: %w", im.Path, err)
-		}
-	}
+// uploaded is what a paste-files exchange made of a paste's laptop files:
+// boxPaths[i] is where sent[i] landed, and refused says why each file the
+// box lacks did not go.
+type uploaded struct {
+	sent     []paste.File
+	boxPaths []string
+	refused  []error
+}
+
+// upload runs one paste-files exchange with the box over ssh.
+func upload(ctx context.Context, opts Options, files []paste.File) (uploaded, error) {
 	ctx, cancel := context.WithTimeout(ctx, uploadTimeout)
 	defer cancel()
-	var stdout, stderr bytes.Buffer
-	res := sshrun.Run(ctx, sshrun.PasteArgv(opts.SSH, opts.Box), sshrun.Stdio{Stdin: &stream, Stdout: &stdout, Stderr: &stderr}, 2*time.Second)
+	// ssh reads its stdin straight from the pipe, so its exit is not held up by a copy waiting on the laptop.
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		return uploaded{}, err
+	}
+	defer stdinW.Close()
+	stdoutR, stdoutW := io.Pipe()
+	var stderr bytes.Buffer
+	ran := make(chan reconnect.Result, 1)
+	go func() {
+		res := sshrun.Run(ctx, sshrun.PasteFilesArgv(opts.SSH, opts.Box), sshrun.Stdio{Stdin: stdinR, Stdout: stdoutW, Stderr: &stderr}, 2*time.Second)
+		stdoutW.CloseWithError(errBoxEnded)
+		stdinR.Close()
+		ran <- res
+	}()
+	up, err := exchange(stdinW, stdoutR, files)
+	if err != nil {
+		cancel()
+	}
+	res := <-ran
+	boxEnded := errors.Is(err, errBoxEnded) || errors.Is(err, syscall.EPIPE)
 	switch {
+	case err != nil && !boxEnded:
+		return uploaded{}, err
 	case res.Err != nil:
-		return nil, res.Err
+		return uploaded{}, res.Err
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return nil, fmt.Errorf("the upload to %s took over %s", opts.Box.Host, uploadTimeout)
+		return uploaded{}, fmt.Errorf("the upload to %s took over %s", opts.Box.Host, uploadTimeout)
 	case res.Transport:
-		return nil, fmt.Errorf("uploading to %s: %s", opts.Box.Host, res.Detail)
+		return uploaded{}, fmt.Errorf("uploading to %s: %s", opts.Box.Host, res.Detail)
 	case res.ExitCode != 0:
-		return nil, fmt.Errorf("box: %s", strings.TrimPrefix(strings.TrimSpace(stderr.String()), "remote-agents-box: "))
+		return uploaded{}, fmt.Errorf("box: %s", strings.TrimPrefix(strings.TrimSpace(stderr.String()), "remote-agents-box: "))
+	case err != nil:
+		return uploaded{}, err
 	}
-	paths := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
-	if len(paths) != len(images) || slices.ContainsFunc(paths, func(p string) bool { return !strings.HasPrefix(p, "/") }) {
-		return nil, fmt.Errorf("the box answered %q for %d images", stdout.String(), len(images))
+	return up, nil
+}
+
+// exchange is the laptop's side of paste-files: it asks the box which of
+// files it has, sends those it lacks that can go, ends its side and reads
+// where they landed.
+func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, error) {
+	paths := make([]string, len(files))
+	for i, f := range files {
+		paths[i] = f.Path
 	}
-	return paths, nil
+	if err := pastefile.WriteQuery(w, paths); err != nil {
+		return uploaded{}, fmt.Errorf("asking the box: %w", err)
+	}
+	frames := pastefile.NewReader(r)
+	onBox, err := frames.Answer(len(files))
+	if err != nil {
+		return uploaded{}, err
+	}
+	var up uploaded
+	for i, f := range files {
+		if onBox[i] {
+			continue
+		}
+		if err := f.Uploadable(); err != nil {
+			up.refused = append(up.refused, err)
+			continue
+		}
+		if err := send(w, f); err != nil {
+			return uploaded{}, err
+		}
+		up.sent = append(up.sent, f)
+	}
+	if err := w.Close(); err != nil {
+		return uploaded{}, err
+	}
+	for range up.sent {
+		path, err := frames.Next()
+		if err != nil {
+			return uploaded{}, fmt.Errorf("reading where the uploads landed: %w", err)
+		}
+		if !strings.HasPrefix(string(path), "/") {
+			return uploaded{}, fmt.Errorf("the box stored an upload at %q", path)
+		}
+		up.boxPaths = append(up.boxPaths, string(path))
+	}
+	return up, nil
+}
+
+// send writes f's base name and content to the box.
+func send(w io.Writer, f paste.File) error {
+	src, err := os.Open(f.Path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	info, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	if err := pastefile.WriteFrame(w, []byte(filepath.Base(f.Path))); err != nil {
+		return fmt.Errorf("uploading %s: %w", f.Path, err)
+	}
+	if err := pastefile.CopyFrame(w, src, info.Size()); err != nil {
+		return fmt.Errorf("uploading %s: %w", f.Path, err)
+	}
+	return nil
 }
 
 // noticeQuiet is how long the agent's output must pause before a notice is drawn.

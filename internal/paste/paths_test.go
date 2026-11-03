@@ -52,60 +52,82 @@ func writeFile(t *testing.T, dir, name string, data []byte) string {
 
 func escape(path string) string { return strings.ReplaceAll(path, " ", `\ `) }
 
-func TestImagesNamesOnlyLaptopImageFiles(t *testing.T) {
+func TestFilesNamesThePathsOnTheLaptop(t *testing.T) {
 	dir := t.TempDir()
 	shot := writeFile(t, dir, "my shot.png", png)
-	other := writeFile(t, dir, "b.PNG", png)
-	text := writeFile(t, dir, "notes.png", []byte("plain text, named like an image"))
-	noExt := writeFile(t, dir, "image", png)
-	paste := escape(shot) + " " + other + " " + text + " " + noExt + " /nonexistent/box.png " + dir
-	images, err := Images([]byte(paste))
+	report := writeFile(t, dir, "report.PDF", []byte("%PDF-1.7"))
+	paste := escape(shot) + " " + report + " /nonexistent/box.txt " + dir + " " + filepath.Join(report, "under")
+	files, err := Files([]byte(paste))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got []string
-	for _, im := range images {
-		got = append(got, im.Path)
+	for _, f := range files {
+		got = append(got, f.Path)
 	}
-	if !slices.Equal(got, []string{shot, other}) {
-		t.Fatalf("Images = %q", got)
+	if !slices.Equal(got, []string{shot, report, dir}) {
+		t.Fatalf("Files = %q", got)
 	}
 }
 
-func TestImagesIgnoresPastesThatAreNotJustPaths(t *testing.T) {
+func TestFilesIgnoresPastesThatAreNotJustPaths(t *testing.T) {
 	shot := writeFile(t, t.TempDir(), "a.png", png)
 	for _, paste := range []string{"see " + shot, shot + " and more", "'" + shot, "~/a.png", ""} {
-		if images, err := Images([]byte(paste)); err != nil || len(images) != 0 {
-			t.Errorf("Images(%q) = %v, %v", paste, images, err)
+		if files, err := Files([]byte(paste)); err != nil || len(files) != 0 {
+			t.Errorf("Files(%q) = %v, %v", paste, files, err)
 		}
 	}
 }
 
-func TestImagesRefusesWhatCannotBeUploaded(t *testing.T) {
-	dir := t.TempDir()
-	big := writeFile(t, dir, "big.png", append(png, make([]byte, pastefile.MaxSize)...))
-	if _, err := Images([]byte(big)); err == nil || !strings.Contains(err.Error(), "too large") {
-		t.Fatalf("oversized image: %v", err)
+func TestFilesFailsOnAPathItCannotLookUp(t *testing.T) {
+	locked := filepath.Join(t.TempDir(), "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	locked := writeFile(t, dir, "locked.png", png)
+	inside := writeFile(t, locked, "a.txt", []byte("x"))
 	if err := os.Chmod(locked, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Images([]byte(locked)); err == nil {
-		t.Fatal("unreadable image accepted")
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	if _, err := Files([]byte(inside)); err == nil {
+		t.Fatal("a path that could not be looked up passed")
 	}
 }
 
-func TestReplaceSwapsOnlyTheImageWords(t *testing.T) {
+func TestUploadableTakesOnlyRegularFilesWithinTheLimit(t *testing.T) {
+	dir := t.TempDir()
+	small := writeFile(t, dir, "small.zip", []byte("PK"))
+	big := writeFile(t, dir, "big.zip", nil)
+	if err := os.Truncate(big, pastefile.MaxSize+1); err != nil {
+		t.Fatal(err)
+	}
+	limit := writeFile(t, dir, "limit.zip", nil)
+	if err := os.Truncate(limit, pastefile.MaxSize); err != nil {
+		t.Fatal(err)
+	}
+	files, err := Files([]byte(strings.Join([]string{small, limit, big, dir}, " ")))
+	if err != nil || len(files) != 4 {
+		t.Fatalf("Files = %v, %v", files, err)
+	}
+	for i, want := range []string{"", "", "big.zip is over 100 MB", filepath.Base(dir) + " is a directory"} {
+		err := files[i].Uploadable()
+		if want == "" && err != nil || want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
+			t.Errorf("%s: Uploadable = %v, want %q", files[i].Path, err, want)
+		}
+	}
+}
+
+func TestReplaceSwapsOnlyTheGivenWords(t *testing.T) {
 	dir := t.TempDir()
 	shot := writeFile(t, dir, "my shot.png", png)
-	paste := "/box/kept.txt  " + escape(shot) + "\n'" + shot + "'"
-	images, err := Images([]byte(paste))
-	if err != nil || len(images) != 2 {
-		t.Fatalf("Images = %v, %v", images, err)
+	kept := writeFile(t, dir, "kept.txt", []byte("x"))
+	paste := kept + "  " + escape(shot) + "\n'" + shot + "'"
+	files, err := Files([]byte(paste))
+	if err != nil || len(files) != 3 {
+		t.Fatalf("Files = %v, %v", files, err)
 	}
-	got := string(Replace([]byte(paste), images, []string{"/home/agent/p/1.png", "/home/agent/my p/2.png"}))
-	want := "/box/kept.txt  /home/agent/p/1.png\n/home/agent/my\\ p/2.png"
+	got := string(Replace([]byte(paste), files[1:], []string{"/home/agent/p/1.png", "/home/agent/my p/2.png"}))
+	want := kept + "  /home/agent/p/1.png\n/home/agent/my\\ p/2.png"
 	if got != want {
 		t.Fatalf("Replace = %q, want %q", got, want)
 	}

@@ -1,4 +1,4 @@
-// Package paste finds laptop image paths in what the user pastes into a
+// Package paste finds laptop file paths in what the user pastes into a
 // session, so they can be replaced by copies on the box.
 package paste
 

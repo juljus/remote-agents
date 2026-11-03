@@ -46,10 +46,10 @@ func TestLinkArgv(t *testing.T) {
 	}
 }
 
-func TestPasteArgv(t *testing.T) {
-	got := PasteArgv("ssh", testBox)
+func TestPasteFilesArgv(t *testing.T) {
+	got := PasteFilesArgv("ssh", testBox)
 	want := append(append([]string{"ssh"}, commonOptions...), "-T", "box",
-		`exec "$HOME/.local/share/ra-test/bin/remote-agents-box" paste-store`)
+		`exec "$HOME/.local/share/ra-test/bin/remote-agents-box" paste-files`)
 	if !slices.Equal(got, want) {
 		t.Fatalf("argv =\n%q\nwant\n%q", got, want)
 	}

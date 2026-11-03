@@ -1,8 +1,12 @@
 package session
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -13,15 +17,56 @@ import (
 	"remote-agents/internal/pastefile"
 )
 
-// fakeBox is an ssh that runs attach for the session and pasteStore for an upload.
-func fakeBox(t *testing.T, attach, pasteStore string) string {
+// fakeBox is an ssh that runs attach for the session and pasteFiles for an upload.
+func fakeBox(t *testing.T, attach, pasteFiles string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ssh")
-	script := "#!/bin/sh\nfor a; do last=\"$a\"; done\ncase \"$last\" in\n*paste-store*) " + pasteStore + " ;;\n*) " + attach + " ;;\nesac\n"
+	script := "#!/bin/sh\nfor a; do last=\"$a\"; done\ncase \"$last\" in\n*paste-files*) " + pasteFiles + " ;;\n*) " + attach + " ;;\nesac\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// boxReplies is a box's side of paste-files for the fake ssh: it answers
+// onBox, keeps what the laptop sends in received, and once the laptop's side
+// ends sends stored as the paths of the uploads.
+func boxReplies(received string, onBox string, stored ...string) string {
+	var frames strings.Builder
+	for _, p := range stored {
+		fmt.Fprintf(&frames, "%d\n%s", len(p), p)
+	}
+	return fmt.Sprintf(`printf '%d\n%s'; cat > '%s'; printf '%%s' '%s'`, len(onBox), onBox, received, frames.String())
+}
+
+// received reads what the laptop sent the fake box: its query and its uploads as name, content pairs.
+func received(t *testing.T, path string) ([]string, [][2]string) {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	r := pastefile.NewReader(f)
+	query, err := r.Query()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uploads [][2]string
+	for {
+		name, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			return query, uploads
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := r.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		uploads = append(uploads, [2]string{string(name), string(data)})
+	}
 }
 
 var onePixelPNG = []byte{
@@ -32,34 +77,70 @@ var onePixelPNG = []byte{
 // echoLine is a session that reports the first line of input it reads.
 const echoLine = `echo ready; IFS= read -r line; printf 'got[%s]\n' "$line"`
 
-func TestPastedLaptopImageGoesToTheBoxUnderItsBoxPath(t *testing.T) {
+func TestPastedLaptopFilesTheBoxLacksGoToItUnderTheirBoxPaths(t *testing.T) {
 	h := newPTY(t)
 	dir := t.TempDir()
 	shot := filepath.Join(dir, "my shot.png")
 	if err := os.WriteFile(shot, onePixelPNG, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	uploaded := filepath.Join(dir, "uploaded")
-	ssh := fakeBox(t, echoLine+`; exit 0`, `cat > '`+uploaded+`'; echo /home/agent/.local/state/ra-test/pasted/abc.png`)
+	onBox := filepath.Join(dir, "on box.txt")
+	if err := os.WriteFile(onBox, []byte("shared"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receivedAt := filepath.Join(dir, "received")
+	ssh := fakeBox(t, echoLine+`; exit 0`, boxReplies(receivedAt, "01", "/home/agent/.local/state/ra-test/pasted/abc/my shot.png"))
 	done := start(testOptions(ssh, h))
 	h.waitFor(t, "ready")
-	paste := "\x1b[200~" + strings.ReplaceAll(shot, " ", `\ `) + "\x1b[201~"
-	if _, err := h.master.Write([]byte(paste + "\n")); err != nil {
+	typed := strings.ReplaceAll(shot, " ", `\ `) + " /nonexistent/box.pdf " + strings.ReplaceAll(onBox, " ", `\ `)
+	if _, err := h.master.Write([]byte("\x1b[200~" + typed + "\x1b[201~\n")); err != nil {
 		t.Fatal(err)
 	}
 	if r := wait(t, done); r.err != nil || r.code != 0 {
 		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
 	}
-	if want := "got[\x1b[200~/home/agent/.local/state/ra-test/pasted/abc.png\x1b[201~]"; !strings.Contains(h.output(), want) {
+	want := "got[\x1b[200~/home/agent/.local/state/ra-test/pasted/abc/my\\ shot.png /nonexistent/box.pdf " + strings.ReplaceAll(onBox, " ", `\ `) + "\x1b[201~]"
+	if !strings.Contains(h.output(), want) {
 		t.Fatalf("output %q lacks %q", h.output(), want)
 	}
-	f, err := os.Open(uploaded)
-	if err != nil {
+	query, uploads := received(t, receivedAt)
+	if !slices.Equal(query, []string{shot, onBox}) {
+		t.Fatalf("query %q", query)
+	}
+	if len(uploads) != 1 || uploads[0] != [2]string{"my shot.png", string(onePixelPNG)} {
+		t.Fatalf("uploads %q", uploads)
+	}
+}
+
+func TestPastedPathsThatCannotUploadStayAsTypedAndSayWhy(t *testing.T) {
+	h := newPTY(t)
+	dir := t.TempDir()
+	folder := filepath.Join(dir, "folder")
+	if err := os.Mkdir(folder, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
-	if got, err := pastefile.NewReader(f).Next(); err != nil || string(got) != string(onePixelPNG) {
-		t.Fatalf("uploaded %q, %v", got, err)
+	big := filepath.Join(dir, "big.zip")
+	if err := os.WriteFile(big, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(big, pastefile.MaxSize+1); err != nil {
+		t.Fatal(err)
+	}
+	receivedAt := filepath.Join(dir, "received")
+	ssh := fakeBox(t, echoLine+`; sleep 1; exit 0`, boxReplies(receivedAt, "00"))
+	done := start(testOptions(ssh, h))
+	h.waitFor(t, "ready")
+	paste := "\x1b[200~" + folder + " " + big + "\x1b[201~"
+	if _, err := h.master.Write([]byte(paste + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor(t, "got["+paste+"]")
+	h.waitFor(t, "not uploaded: folder is a directory; big.zip is over 100 MB")
+	if r := wait(t, done); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if _, uploads := received(t, receivedAt); len(uploads) != 0 {
+		t.Fatalf("uploaded %q", uploads)
 	}
 }
 
@@ -69,17 +150,22 @@ func TestAFailedUploadShowsWhyAndPastesThePathUnchanged(t *testing.T) {
 	if err := os.WriteFile(shot, onePixelPNG, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ssh := fakeBox(t, echoLine+`; sleep 1; exit 0`, `cat >/dev/null; echo "remote-agents-box: disk full" >&2; exit 1`)
+	ssh := fakeBox(t, echoLine+`; sleep 1; exit 0`, `echo "remote-agents-box: disk full" >&2; exit 1`)
 	opts := testOptions(ssh, h)
 	var logged []string
 	opts.Logf = func(format string, args ...any) { logged = append(logged, format) }
 	done := start(opts)
 	h.waitFor(t, "ready")
 	paste := "\x1b[200~" + shot + "\x1b[201~"
+	sent := time.Now()
 	if _, err := h.master.Write([]byte(paste + "\n")); err != nil {
 		t.Fatal(err)
 	}
 	h.waitFor(t, "got["+paste+"]")
+	// The box ending the exchange must not wait out ssh's I/O grace.
+	if elapsed := time.Since(sent); elapsed > time.Second {
+		t.Fatalf("the failed upload held the paste for %s", elapsed)
+	}
 	h.waitFor(t, "disk full")
 	if r := wait(t, done); r.err != nil {
 		t.Fatal(r.err)
@@ -117,7 +203,7 @@ func TestKeystrokesAfterAPasteWaitForItsUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 	ssh := fakeBox(t, `echo ready; IFS= read -r a; IFS= read -r b; printf 'got[%s][%s]\n' "$a" "$b"; exit 0`,
-		`cat >/dev/null; sleep 0.5; echo /box/p.png`)
+		`printf '1\n0'; cat >/dev/null; sleep 0.5; printf '10\n/box/p.png'`)
 	done := start(testOptions(ssh, h))
 	h.waitFor(t, "ready")
 	if _, err := h.master.Write([]byte("\x1b[200~" + shot + "\x1b[201~")); err != nil {
