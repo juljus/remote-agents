@@ -534,6 +534,42 @@ func TestSwitchingAwayFromAnUnverifiedLogin(t *testing.T) {
 	})
 }
 
+func TestASwitchThatWroteOnlyTheLoginIsNeverGuessed(t *testing.T) {
+	f := newFixture(t)
+	cfg := filepath.Dir(f.paths.SecureDir) + "/cfg"
+	if err := os.Mkdir(cfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.paths.GlobalConfig = cfg + "/.claude.json"
+	f.vault.Store.Paths = f.paths
+	f.seed("work", f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+	f.seed("home", f.login("home", 1, time.Hour, 20*24*time.Hour), account("home"))
+	f.setLive(f.login("work", 2, time.Hour, 20*24*time.Hour), account("work"))
+	f.markLast("work")
+	// The account write fails after the login write: its lock cannot be taken.
+	if err := os.Chmod(cfg, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.vault.Use(ctx, "home"); err == nil {
+		t.Fatal("Use succeeded")
+	}
+	if err := os.Chmod(cfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if f.liveTokens().RefreshToken != "fake-refresh-home-1" || f.liveEmail() != "work@example.com" {
+		t.Fatalf("live %+v %s", f.liveTokens(), f.liveEmail())
+	}
+	// A session then rotates the login, and its access token is refused.
+	f.setLive(f.login("home", 2, 2*time.Hour, 20*24*time.Hour), account("work"))
+	f.api.revoke("fake-access-home-2")
+	if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "no saved account is known to be it") {
+		t.Fatalf("err = %v", err)
+	}
+	if f.entryTokens("work").RefreshToken != "fake-refresh-work-2" {
+		t.Fatalf("work %+v", f.entryTokens("work"))
+	}
+}
+
 func TestUseRefusesALoginThatChangedWhileItWorked(t *testing.T) {
 	f := newFixture(t)
 	f.seed("work", f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))

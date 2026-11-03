@@ -133,20 +133,24 @@ func (v Vault) Use(ctx context.Context, name string) (switched bool, err error) 
 		if err != nil {
 			return err
 		}
-		err = v.Store.WithLive(ctx, l.read, func(tx claudeauth.LiveTx) error {
+		return v.Store.WithLive(ctx, l.read, func(tx claudeauth.LiveTx) error {
 			// The login is still the one read, so it is the latest to keep.
 			if l.state == liveGuessed {
 				if err := v.writeEntry(s, l.active, entry{Login: *l.read.Login, Account: s.entries[l.active].Account}); err != nil {
 					return err
 				}
 			}
-			return tx.Replace(login, s.entries[name].Account)
+			// Marked first: a switch that stops after the login write leaves
+			// an account the mark does not name, so its login is never guessed.
+			if err := v.markSwitched(name); err != nil {
+				return err
+			}
+			if err := tx.Replace(login, s.entries[name].Account); err != nil {
+				return err
+			}
+			switched = true
+			return nil
 		})
-		if err != nil {
-			return err
-		}
-		switched = true
-		return v.markSwitched(name)
 	})
 	return switched, err
 }
