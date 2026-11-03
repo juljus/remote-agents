@@ -83,6 +83,29 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   to exit on that stop is killed, which ends the session for an attached wrapper. A Codex lost
   before its first turn has no session yet and starts again.
 
+## Claude accounts
+
+The box can hold several Claude logins and switch between them; a switch applies to every
+session at once, running ones included, from their next request to Claude.
+
+- `rclaude account` lists the accounts with their 5-hour and weekly usage and switches to the
+  one you pick. `rclaude account list` prints the table; `list --json` is the form for scripts.
+- `rclaude account use <name>` switches without asking.
+- `rclaude account save <name>` names the login the box has now; do this first.
+- `rclaude account add <name>` logs in to another account: Claude's `auth login` runs on the
+  box and opens its page in the laptop browser. Run it again for an account that was signed out.
+- `rclaude account remove <name>` forgets an account other than the active one.
+
+Claude Code keeps the box's login in `~/.claude/.credentials.json` (`claudeAiOauth`) and
+`~/.claude.json` (`oauthAccount`), or under `$CLAUDE_CONFIG_DIR`. A switch replaces only those
+two keys, the way Claude Code itself does under its own locks; running sessions notice the
+changed file. The other accounts wait in `~/.config/remote-agents/accounts/claude/<name>.json`
+(mode 0600, directory 0700) on the box. Refresh tokens change with every refresh, so each
+account command first copies the live login back to its account, and a daily timer
+(`remote-agents-accounts-refresh.timer`) refreshes logins nobody uses a week before they would
+expire. Usage comes from `api.anthropic.com/api/oauth/usage`, the endpoint Claude Code's `/usage`
+reads; it is undocumented, so a change in its shape shows as an error in the listing.
+
 ## Security model
 
 The box account is trusted with the laptop: anyone who can act as the box user can read and set
