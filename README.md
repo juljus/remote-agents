@@ -58,6 +58,11 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   `--continue` or the resume picker the id comes from the SessionStart hook cmux injects; outside
   cmux only `rclaude --resume <id>` gets the line, since a new session may never have started.
 - `remote-agents ls` lists sessions on the box; `remote-agents attach <session>` reattaches.
+- Pasting or dragging laptop files into a session uploads each one the box lacks to
+  `~/.local/state/remote-agents/pasted/<sha256>/<name>` and pastes that path instead, so Claude can
+  read it and attaches images. A path that exists on the box stays as typed: the box's own file
+  wins. Directories and files over 100 MB are not uploaded; a notice on the bottom row says so.
+  Copies go 7 days after their last paste.
 - While the link is down, Ctrl+C detaches; the session keeps running.
 - A session ends when Claude exits. If the box loses it instead, say the shpool daemon stops,
   `rclaude` reconnects and resumes the same Claude session; a Claude that takes over 10 seconds
