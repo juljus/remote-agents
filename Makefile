@@ -14,11 +14,12 @@ test:
 lint:
 	go vet ./... && go vet -tags e2e ./e2e && staticcheck ./... && shellcheck box/install.sh box/bootstrap/*.sh box/bootstrap/host/*.sh box/bootstrap/user/*.sh scripts/deploy-box.sh testdata/fake-claude
 
-# Installs the laptop binary and its rclaude entry point. Loads nothing.
+# Installs the laptop binary and its rclaude and rcodex entry points. Loads nothing.
 install: build plist
 	install -d $(BINDIR) $(LOGDIR)
 	install -m 0755 bin/remote-agents $(BINDIR)/remote-agents
 	ln -sfn remote-agents $(BINDIR)/rclaude
+	ln -sfn remote-agents $(BINDIR)/rcodex
 
 plist:
 	install -d bin

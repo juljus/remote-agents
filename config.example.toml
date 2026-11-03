@@ -14,3 +14,9 @@ kind = "claude"
 # Go before the arguments of every rclaude. Join option values with "=" (--model=opus):
 # Claude reads a separate value of some options as a list that would take your prompt.
 # args = ["--dangerously-skip-permissions"]
+
+[agents.codex]                      # run with rcodex
+command = "codex"
+kind = "codex"
+# Go before the arguments of every rcodex; join option values with "=" (--model=gpt-5).
+# args = ["--yolo"]

@@ -4,6 +4,15 @@
 // relays them to the laptop, where they run in the wrapper's cmux terminal.
 package cmuxcodex
 
+import (
+	"errors"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"remote-agents/internal/hookexec"
+)
+
 // PIDEnvVar names the process cmux follows as the Codex agent; on the laptop
 // that is the wrapper.
 const PIDEnvVar = "CMUX_CODEX_PID"
@@ -40,4 +49,36 @@ func Argvs() [][]string {
 		out[i] = h.Argv
 	}
 	return out
+}
+
+// launchEnvPrefix starts the variables in which an agent wrapper describes
+// its launch to cmux. Inherited from an outer agent, they describe that one.
+const launchEnvPrefix = "CMUX_AGENT_LAUNCH_"
+
+// NewExecutor runs, in the wrapper's cmux terminal, the hooks a Codex on the
+// box relays; environ is the wrapper's environment and pid its process.
+// Outside cmux there is nothing to relay to, and it returns nil.
+func NewExecutor(environ []string, pid int) (*hookexec.Executor, error) {
+	base := make([]string, 0, len(environ))
+	env := map[string]string{}
+	for _, kv := range environ {
+		k, v, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(k, launchEnvPrefix) || k == "CMUX_CUSTOM_CLAUDE_PATH" {
+			continue
+		}
+		base = append(base, kv)
+		if strings.HasPrefix(k, "CMUX_") {
+			env[k] = v
+		}
+	}
+	if env["CMUX_SURFACE_ID"] == "" {
+		return nil, nil
+	}
+	cli := env["CMUX_BUNDLED_CLI_PATH"]
+	if !filepath.IsAbs(cli) {
+		return nil, errors.New("cmux set no absolute CMUX_BUNDLED_CLI_PATH, the cmux CLI its Codex hooks run")
+	}
+	env[hookexec.BinEnvVar] = cli
+	env[PIDEnvVar] = strconv.Itoa(pid)
+	return &hookexec.Executor{BaseEnv: base, Env: func([]string) map[string]string { return env }, Allowed: Argvs()}, nil
 }

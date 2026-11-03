@@ -26,8 +26,8 @@ import (
 	"golang.org/x/term"
 
 	"remote-agents/internal/agentcli"
-	"remote-agents/internal/claudeargs"
 	"remote-agents/internal/cmuxcapture"
+	"remote-agents/internal/cmuxcodex"
 	"remote-agents/internal/config"
 	"remote-agents/internal/control"
 	"remote-agents/internal/entrypoint"
@@ -160,7 +160,8 @@ func runAgent(agentName string, args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	plan, err := claudeargs.Analyze(append(slices.Clone(agent.Args), args...), uuid.NewString)
+	cli := agent.CLI()
+	plan, err := cli.Analyze(append(slices.Clone(agent.Args), args...), uuid.NewString)
 	if err != nil {
 		return 1, err
 	}
@@ -168,9 +169,9 @@ func runAgent(agentName string, args []string) (int, error) {
 		return runCommand(e, agent, plan.Args)
 	}
 
-	entry := entrypoint.Name(agentName)
+	resumeCommand := resumeCommandOf(agentName, cli)
 	sessionID := plan.SessionID
-	hint := entry + " --resume " + sessionID
+	hint := resumeCommand(sessionID)
 	if sessionID == "" {
 		sessionID = uuid.NewString()
 	}
@@ -178,13 +179,13 @@ func runAgent(agentName string, args []string) (int, error) {
 	if plan.SessionID == "" {
 		hint = "remote-agents attach " + name
 	}
-	agentArgs, hooks, err := cmuxHooks(e, agentName, plan.Args)
+	agentArgs, hooks, err := cmuxHooks(e, agentName, agent.Kind, plan.Args)
 	if err != nil {
 		return 1, err
 	}
-	claude := &spec.Agent{Resume: append([]string{agent.Command}, claudeargs.ResumeBase(agentArgs)...)}
+	followed := &spec.Agent{Resume: append([]string{agent.Command}, cli.ResumeBase(agentArgs)...)}
 	if plan.Resumes {
-		claude.Resumes = plan.SessionID
+		followed.Resumes = plan.SessionID
 	}
 	s := spec.Spec{
 		Mode:      spec.ModeSession,
@@ -194,16 +195,34 @@ func runAgent(agentName string, args []string) (int, error) {
 		Argv:      append([]string{agent.Command}, agentArgs...),
 		Env:       terminalEnv(),
 		HookRelay: hooks != nil,
-		Claude:    claude,
 	}
-	return runSession(e, s, hint, hooks, entry, resume.NewTracker(plan.SessionID, plan.Resumes))
+	switch agent.Kind {
+	case config.KindClaude:
+		s.Claude = followed
+	case config.KindCodex:
+		s.Codex = followed
+	}
+	return runSession(e, s, hint, hooks, resume.NewTracker(plan.SessionID, plan.Resumes, resumeCommand))
 }
 
-// cmuxHooks returns the agent arguments with cmux's hook settings added and,
-// when running inside cmux, the executor for the hooks the box relays back.
-func cmuxHooks(e env, agentName string, args []string) ([]string, *hookexec.Executor, error) {
+// resumeCommandOf gives the laptop command line that resumes a session of the agent.
+func resumeCommandOf(agentName string, cli agentcli.CLI) func(id string) string {
+	return func(id string) string {
+		return strings.Join(append([]string{entrypoint.Name(agentName)}, cli.ResumeArgs(id)...), " ")
+	}
+}
+
+// cmuxHooks returns the agent arguments with cmux's hooks added and, when
+// running inside cmux, the executor for the hooks the box relays back. cmux's
+// claude wrapper picks Claude's hooks; Codex's are the ones cmux installs
+// for it, which the box adds itself.
+func cmuxHooks(e env, agentName string, kind config.Kind, args []string) ([]string, *hookexec.Executor, error) {
 	if e.cfg.Cmux == nil {
 		return args, nil, nil
+	}
+	if kind == config.KindCodex {
+		hooks, err := cmuxcodex.NewExecutor(os.Environ(), os.Getpid())
+		return args, hooks, err
 	}
 	entry, err := agentEntry(agentName)
 	if err != nil {
@@ -253,7 +272,7 @@ func requireDaemon(e env) (control.Client, error) {
 
 // runSession prints how to resume the session on the box after the agent
 // exits; tracker follows its id through the hooks the box relays.
-func runSession(e env, s spec.Spec, hint string, hooks *hookexec.Executor, entry string, tracker *resume.Tracker) (int, error) {
+func runSession(e env, s spec.Spec, hint string, hooks *hookexec.Executor, tracker *resume.Tracker) (int, error) {
 	ctl, err := requireDaemon(e)
 	if err != nil {
 		return 1, err
@@ -277,7 +296,7 @@ func runSession(e env, s spec.Spec, hint string, hooks *hookexec.Executor, entry
 	}()
 	opts := session.Options{
 		SSH: e.ssh, Box: e.box(), Spec: s, ReattachHint: hint, Triggers: trig,
-		ExitHint: func() string { return tracker.Hint(entry) },
+		ExitHint: tracker.Hint,
 		Stdin:    os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Logf: logger.Printf,
 	}
 	if hooks != nil {
@@ -320,16 +339,20 @@ func attach(name string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	agentName, _, ok := strings.Cut(name, "-")
-	if !ok {
-		return 1, fmt.Errorf("session name %q has no agent prefix", name)
+	agentName, err := spec.AgentOf(name)
+	if err != nil {
+		return 1, err
 	}
-	_, hooks, err := cmuxHooks(e, agentName, nil)
+	agent, err := e.cfg.Agent(agentName)
+	if err != nil {
+		return 1, err
+	}
+	_, hooks, err := cmuxHooks(e, agentName, agent.Kind, nil)
 	if err != nil {
 		return 1, err
 	}
 	s := spec.Spec{Mode: spec.ModeReattach, Session: name, RunID: uuid.NewString()}
-	return runSession(e, s, "remote-agents attach "+name, hooks, entrypoint.Name(agentName), resume.NewTracker("", false))
+	return runSession(e, s, "remote-agents attach "+name, hooks, resume.NewTracker("", false, resumeCommandOf(agentName, agent.CLI())))
 }
 
 // runCommand runs a one-shot agent invocation without shpool or reconnects.
