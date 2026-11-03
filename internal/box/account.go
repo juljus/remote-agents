@@ -93,18 +93,18 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 	return vault.KeepFresh(ctx, stdio.Stdout)
 }
 
-func claudeVault(l boxlayout.Layout, lookupEnv func(string) (string, bool)) (accounts.Vault, error) {
+func claudeVault(l boxlayout.Layout, lookupEnv func(string) (string, bool)) (accounts.ClaudeVault, error) {
 	for _, key := range claudeauth.EnvVars {
 		if _, set := lookupEnv(key); set {
-			return accounts.Vault{}, fmt.Errorf("%s is set, and the box's sessions may not see it: set claude_config_dir in %s instead", key, l.AccountsConfig())
+			return accounts.ClaudeVault{}, fmt.Errorf("%s is set, and the box's sessions may not see it: set claude_config_dir in %s instead", key, l.AccountsConfig())
 		}
 	}
 	cfg, err := LoadAccountsConfig(l)
 	if err != nil {
-		return accounts.Vault{}, err
+		return accounts.ClaudeVault{}, err
 	}
 	store := claudeauth.Store{Paths: cfg.Paths, Endpoints: cfg.Endpoints, Client: &http.Client{}, Now: time.Now}
-	return accounts.Vault{Dir: l.AccountsDir("claude"), Store: store}, nil
+	return accounts.ClaudeVault{Dir: l.AccountsDir("claude"), Store: store}, nil
 }
 
 // signInClaude runs the spec's sign-in command, Claude Code's `auth login`,

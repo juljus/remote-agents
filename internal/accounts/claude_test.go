@@ -112,7 +112,7 @@ type fixture struct {
 	t     *testing.T
 	api   *fakeAnthropic
 	paths claudeauth.Paths
-	vault Vault
+	vault ClaudeVault
 	// live holds every refresh token the box's login had: none may ever be presented.
 	live []string
 }
@@ -122,7 +122,7 @@ func newFixture(t *testing.T) *fixture {
 	api, ep := newFakeAnthropic(t)
 	paths := claudeauth.Paths{ConfigDir: home + "/.claude", SecureDir: home + "/.claude", GlobalConfig: home + "/.claude.json"}
 	store := claudeauth.Store{Paths: paths, Endpoints: ep, Client: http.DefaultClient, Now: func() time.Time { return t0 }}
-	f := &fixture{t: t, api: api, paths: paths, vault: Vault{Dir: home + "/.config/remote-agents/accounts/claude", Store: store}}
+	f := &fixture{t: t, api: api, paths: paths, vault: ClaudeVault{Dir: home + "/.config/remote-agents/accounts/claude", Store: store}}
 	if err := os.MkdirAll(paths.SecureDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -172,10 +172,10 @@ func (f *fixture) setLive(login, acct string) {
 
 func (f *fixture) seed(name, login, acct string) {
 	f.t.Helper()
-	if err := f.vault.ensureDir(); err != nil {
+	if err := f.vault.files().ensureDir(); err != nil {
 		f.t.Fatal(err)
 	}
-	if err := os.WriteFile(f.vault.entryPath(name), []byte(`{"claudeAiOauth":`+login+`,"oauthAccount":`+acct+`}`), 0o600); err != nil {
+	if err := os.WriteFile(f.vault.files().entryPath(name), []byte(`{"claudeAiOauth":`+login+`,"oauthAccount":`+acct+`}`), 0o600); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -183,7 +183,7 @@ func (f *fixture) seed(name, login, acct string) {
 // markLast records name as the account the vault last switched to.
 func (f *fixture) markLast(name string) {
 	f.t.Helper()
-	if err := f.vault.ensureDir(); err != nil {
+	if err := f.vault.files().ensureDir(); err != nil {
 		f.t.Fatal(err)
 	}
 	if err := f.vault.markSwitched(name); err != nil {
@@ -237,7 +237,7 @@ func (f *fixture) entryTokens(name string) tokenView {
 	var e struct {
 		OAuth tokenView `json:"claudeAiOauth"`
 	}
-	data, err := os.ReadFile(f.vault.entryPath(name))
+	data, err := os.ReadFile(f.vault.files().entryPath(name))
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestUseSavesTheLiveLoginThenSwitchesTheBox(t *testing.T) {
 	if switched, err := f.vault.Use(ctx, "home"); err != nil || switched {
 		t.Fatalf("Use of the active account = %v, %v", switched, err)
 	}
-	for _, p := range []string{f.vault.Dir, f.vault.entryPath("work")} {
+	for _, p := range []string{f.vault.Dir, f.vault.files().entryPath("work")} {
 		info, err := os.Stat(p)
 		if err != nil {
 			t.Fatal(err)
@@ -494,7 +494,7 @@ func TestAnEntryHoldingTheBoxsLoginIsNeverRefreshed(t *testing.T) {
 func TestAnIncompleteEntryIsRefused(t *testing.T) {
 	f := newFixture(t)
 	f.setLive(f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
-	if err := f.vault.ensureDir(); err != nil {
+	if err := f.vault.files().ensureDir(); err != nil {
 		t.Fatal(err)
 	}
 	for _, body := range []string{
@@ -503,7 +503,7 @@ func TestAnIncompleteEntryIsRefused(t *testing.T) {
 		`{"claudeAiOauth":` + f.login("home", 2, time.Hour, 20*24*time.Hour) + `,"oauthAccount":` + account("home") + `,"x":1}`,
 		`{"claudeAiOauth":` + f.login("home", 3, time.Hour, 20*24*time.Hour) + `,"oauthAccount":` + account("home") + `} {}`,
 	} {
-		if err := os.WriteFile(f.vault.entryPath("home"), []byte(body), 0o600); err != nil {
+		if err := os.WriteFile(f.vault.files().entryPath("home"), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := f.vault.Usage(ctx); err == nil || !strings.Contains(err.Error(), "account home") {
@@ -754,7 +754,7 @@ func TestAddingTheBoxsOwnAccount(t *testing.T) {
 
 func TestAddRemovesSignInDirsACrashLeft(t *testing.T) {
 	f := newFixture(t)
-	if err := f.vault.ensureDir(); err != nil {
+	if err := f.vault.files().ensureDir(); err != nil {
 		t.Fatal(err)
 	}
 	old, recent := filepath.Join(f.vault.Dir, ".login-old"), filepath.Join(f.vault.Dir, ".login-recent")
@@ -815,7 +815,7 @@ func TestRemoveKeepsTheActiveAccount(t *testing.T) {
 	if err := f.vault.Remove(ctx, "home"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(f.vault.entryPath("home")); !os.IsNotExist(err) {
+	if _, err := os.Stat(f.vault.files().entryPath("home")); !os.IsNotExist(err) {
 		t.Fatalf("home entry left: %v", err)
 	}
 	if err := f.vault.Remove(ctx, "home"); err == nil {

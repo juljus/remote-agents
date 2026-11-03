@@ -439,7 +439,7 @@ func pickAccount(e env, kind string) (int, error) {
 	if err := accounts.Render(os.Stdout, listing, time.Now()); err != nil {
 		return 1, err
 	}
-	name, err := accounts.Choose(os.Stdin, os.Stdout, listing)
+	name, err := accounts.Choose(os.Stdin, os.Stdout, listing, "r"+kind)
 	if err != nil {
 		return 1, err
 	}

@@ -10,11 +10,12 @@ import (
 )
 
 // Choose asks which account to switch to, by its number in Render's table
-// or by name. It returns "" when the answer keeps the active account.
-func Choose(in io.Reader, out io.Writer, l Listing) (string, error) {
+// or by name; cli is the command that adds accounts. It returns "" when the
+// answer keeps the active account.
+func Choose(in io.Reader, out io.Writer, l Listing, cli string) (string, error) {
 	named := l.Named()
 	if len(named) == 0 {
-		return "", errors.New("no saved accounts; add one with `rclaude account add <name>`")
+		return "", fmt.Errorf("no saved accounts; add one with `%s account add <name>`", cli)
 	}
 	keep := "keeps the current login"
 	if active := l.Active(); active != "" {

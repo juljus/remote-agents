@@ -21,7 +21,7 @@ func TestChoose(t *testing.T) {
 	}
 	for _, c := range cases {
 		var out bytes.Buffer
-		got, err := Choose(strings.NewReader(c.in), &out, l)
+		got, err := Choose(strings.NewReader(c.in), &out, l, "rclaude")
 		if got != c.want || (err == nil) != (c.err == "") || (err != nil && !strings.Contains(err.Error(), c.err)) {
 			t.Errorf("%q: got %q, %v", c.in, got, err)
 		}
@@ -29,7 +29,7 @@ func TestChoose(t *testing.T) {
 			t.Errorf("prompt %q", out.String())
 		}
 	}
-	if _, err := Choose(strings.NewReader("1\n"), &bytes.Buffer{}, Listing{Accounts: []Row{{Active: true}}}); err == nil || !strings.Contains(err.Error(), "account add") {
+	if _, err := Choose(strings.NewReader("1\n"), &bytes.Buffer{}, Listing{Accounts: []Row{{Active: true}}}, "rcodex"); err == nil || !strings.Contains(err.Error(), "rcodex account add") {
 		t.Fatalf("no accounts: %v", err)
 	}
 }
