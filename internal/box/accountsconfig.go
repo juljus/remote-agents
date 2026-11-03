@@ -24,9 +24,10 @@ type AccountsConfig struct {
 }
 
 type rawAccountsConfig struct {
-	// ClaudeConfigDir is the one dir Claude Code keeps the login in, as
-	// CLAUDE_CONFIG_DIR would point it; it defaults to ~/.claude only for
-	// the production install, so a test install never reaches the real login.
+	// ClaudeConfigDir is the one dir Claude Code keeps a test install's
+	// login in, as CLAUDE_CONFIG_DIR would point it. Test installs must set
+	// it, so they never reach the real login, and the production install
+	// may not: its sessions use ~/.claude.
 	ClaudeConfigDir *string `toml:"claude_config_dir"`
 	// TokenURL and APIURL point at a stand-in server for tests, on loopback only.
 	TokenURL *string `toml:"token_url"`
@@ -34,7 +35,7 @@ type rawAccountsConfig struct {
 }
 
 // LoadAccountsConfig reads the install's accounts.toml; an absent file means
-// Claude Code's defaults, for the production install only.
+// Claude Code's defaults, which only the production install may use.
 func LoadAccountsConfig(l boxlayout.Layout) (AccountsConfig, error) {
 	path := l.AccountsConfig()
 	data, err := os.ReadFile(path)
@@ -65,14 +66,19 @@ func ParseAccountsConfig(data []byte, l boxlayout.Layout) (AccountsConfig, error
 	cfg := AccountsConfig{Endpoints: claudeauth.DefaultEndpoints}
 	var err error
 	switch {
-	case raw.ClaudeConfigDir != nil && !filepath.IsAbs(*raw.ClaudeConfigDir):
-		return AccountsConfig{}, fmt.Errorf("claude_config_dir must be absolute, got %q", *raw.ClaudeConfigDir)
-	case raw.ClaudeConfigDir != nil:
-		cfg.Paths, err = claudeauth.PathsIn(*raw.ClaudeConfigDir)
-	case l.Name != boxlayout.DefaultName:
+	case l.Name == boxlayout.DefaultName && raw.ClaudeConfigDir != nil:
+		return AccountsConfig{}, fmt.Errorf("claude_config_dir is for test installs only: the %s install's sessions use ~/.claude", l.Name)
+	case l.Name == boxlayout.DefaultName:
+		cfg.Paths, err = claudeauth.DefaultPaths(l.Home)
+	case raw.ClaudeConfigDir == nil:
 		return AccountsConfig{}, fmt.Errorf("install %s needs claude_config_dir: only the %s install may use ~/.claude", l.Name, boxlayout.DefaultName)
 	default:
-		cfg.Paths, err = claudeauth.DefaultPaths(l.Home)
+		var dir string
+		dir, err = testConfigDir(*raw.ClaudeConfigDir, l.Home)
+		if err != nil {
+			return AccountsConfig{}, fmt.Errorf("claude_config_dir: %w", err)
+		}
+		cfg.Paths, err = claudeauth.PathsIn(dir)
 	}
 	if err != nil {
 		return AccountsConfig{}, err
@@ -90,6 +96,32 @@ func ParseAccountsConfig(data []byte, l boxlayout.Layout) (AccountsConfig, error
 		*set.field = *set.raw
 	}
 	return cfg, nil
+}
+
+// testConfigDir resolves a test install's Claude Code config dir, which
+// must exist and must not be the real login's: ~/.claude holds its
+// credentials, and home its global config.
+func testConfigDir(dir, home string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("must be absolute, got %q", dir)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	for _, loginDir := range []string{home, filepath.Join(home, ".claude")} {
+		loginResolved, err := filepath.EvalSymlinks(loginDir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if resolved == loginResolved {
+			return "", fmt.Errorf("%s is the real login's dir %s", dir, loginDir)
+		}
+	}
+	return resolved, nil
 }
 
 // loopbackURL admits only a test server on the box itself, so no setting

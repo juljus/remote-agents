@@ -114,10 +114,11 @@ refreshes the inactive logins a week before they would expire. Usage comes from
 login's account from `/api/oauth/profile`; both are undocumented, so a change in their shape
 shows as an error.
 
-Account commands refuse `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`, since the
-sessions may not see the same values. To use another config dir, set
-`claude_config_dir = "<dir>"` in `~/.config/remote-agents/accounts.toml` on the box; installs
-other than `remote-agents` must set it, so a test install never reaches the real login.
+Account commands use `~/.claude`, as the sessions do, and refuse `CLAUDE_CONFIG_DIR` and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, which the sessions may not see. A test install never
+reaches that login: it must set `claude_config_dir = "<dir>"` in its
+`~/.config/<install>/accounts.toml`, a dir other than `~/.claude` and `~`, and only the
+`remote-agents` install refreshes saved logins.
 
 ## Security model
 

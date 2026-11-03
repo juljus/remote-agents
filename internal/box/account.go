@@ -24,14 +24,18 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 	if len(args) < 2 || args[0] != "claude" {
 		return errors.New(AccountUsage)
 	}
-	vault, err := claudeVault(l, lookupEnv)
-	if err != nil {
-		return err
-	}
 	verb, rest := args[1], args[2:]
 	need := map[string]int{"list": 0, "use": 1, "save": 1, "remove": 1, "add": 2, "keep-fresh": 0}
 	if n, ok := need[verb]; !ok || len(rest) != n {
 		return errors.New(AccountUsage)
+	}
+	// Refreshing saved logins on a timer is the production install's job alone.
+	if verb == "keep-fresh" && l.Name != boxlayout.DefaultName {
+		return fmt.Errorf("keep-fresh runs in only the %s install", boxlayout.DefaultName)
+	}
+	vault, err := claudeVault(l, lookupEnv)
+	if err != nil {
+		return err
 	}
 	switch verb {
 	case "list":

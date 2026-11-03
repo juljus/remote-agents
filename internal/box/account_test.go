@@ -28,6 +28,10 @@ printf '{"oauthAccount":{"accountUuid":"acc-home","organizationUuid":"org-home",
 
 func TestAccountAddsASignInAndListsItsUsage(t *testing.T) {
 	l := testLayout(t)
+	l.Name = "remote-agents-test"
+	if err := os.Mkdir(filepath.Join(l.Home, "cfg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	work := t.TempDir()
 	script := filepath.Join(work, "claude")
 	if err := os.WriteFile(script, []byte(fakeSignIn), 0o755); err != nil {
@@ -96,25 +100,65 @@ func TestAccountsConfigKeepsTestInstallsOffTheRealLogin(t *testing.T) {
 	if err != nil || cfg.Paths.SecureDir != home+"/.claude" || cfg.Endpoints != claudeauth.DefaultEndpoints {
 		t.Fatalf("production default %+v, %v", cfg, err)
 	}
+	// The production install's sessions use ~/.claude, so its account commands do too.
+	if _, err := ParseAccountsConfig([]byte(`claude_config_dir = "/t/cfg"`), prod); err == nil || !strings.Contains(err.Error(), "for test installs only") {
+		t.Fatalf("production install with a dir: %v", err)
+	}
 	test := boxlayout.Layout{Home: home, Name: "remote-agents-e2e"}
 	if _, err := ParseAccountsConfig(nil, test); err == nil || !strings.Contains(err.Error(), "needs claude_config_dir") {
 		t.Fatalf("test install without a dir: %v", err)
 	}
-	cfg, err = ParseAccountsConfig([]byte("claude_config_dir = \"/t/cfg\"\ntoken_url = \"http://127.0.0.1:9/token\"\napi_url = \"http://[::1]:9\"\n"), test)
-	if err != nil || cfg.Paths.GlobalConfig != "/t/cfg/.claude.json" || cfg.Endpoints.TokenURL != "http://127.0.0.1:9/token" || cfg.Endpoints.APIBase != "http://[::1]:9" {
+	dir := filepath.Join(home, "cfg")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = ParseAccountsConfig(fmt.Appendf(nil, "claude_config_dir = %q\ntoken_url = \"http://127.0.0.1:9/token\"\napi_url = \"http://[::1]:9\"\n", dir), test)
+	if err != nil || cfg.Paths.GlobalConfig != resolved+"/.claude.json" || cfg.Endpoints.TokenURL != "http://127.0.0.1:9/token" || cfg.Endpoints.APIBase != "http://[::1]:9" {
 		t.Fatalf("test install %+v, %v", cfg, err)
+	}
+	if err := os.Mkdir(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".claude"), filepath.Join(home, "link")); err != nil {
+		t.Fatal(err)
 	}
 	for _, bad := range []string{
 		`claude_config_dir = "rel"`,
-		`token_url = "https://127.0.0.1:1"`,
-		`api_url = "http://example.com"`,
-		`api_url = "http://10.0.0.1:80"`,
-		`api_url = "http://127.0.0.1@evil.example"`,
-		`frob = 1`,
+		fmt.Sprintf(`claude_config_dir = %q`, filepath.Join(home, "missing")),
+		fmt.Sprintf(`claude_config_dir = %q`, filepath.Join(home, ".claude")),
+		fmt.Sprintf(`claude_config_dir = %q`, filepath.Join(home, "link")),
+		fmt.Sprintf(`claude_config_dir = %q`, home+"/"),
+		fmt.Sprintf("claude_config_dir = %q\ntoken_url = \"https://127.0.0.1:1\"", dir),
+		fmt.Sprintf("claude_config_dir = %q\napi_url = \"http://example.com\"", dir),
+		fmt.Sprintf("claude_config_dir = %q\napi_url = \"http://10.0.0.1:80\"", dir),
+		fmt.Sprintf("claude_config_dir = %q\napi_url = \"http://127.0.0.1@evil.example\"", dir),
+		fmt.Sprintf("claude_config_dir = %q\nfrob = 1", dir),
 	} {
-		if _, err := ParseAccountsConfig([]byte(bad), prod); err == nil {
+		if _, err := ParseAccountsConfig([]byte(bad), test); err == nil {
 			t.Errorf("%s parsed", bad)
 		}
+	}
+	for _, bad := range []string{`token_url = "https://127.0.0.1:1"`, `frob = 1`} {
+		if _, err := ParseAccountsConfig([]byte(bad), prod); err == nil {
+			t.Errorf("%s parsed for production", bad)
+		}
+	}
+}
+
+func TestKeepFreshRunsOnlyInTheProductionInstall(t *testing.T) {
+	l := testLayout(t)
+	l.Name = "remote-agents-e2e"
+	if err := os.Mkdir(filepath.Join(l.Home, "cfg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeAccountsConfig(t, l, fmt.Sprintf("claude_config_dir = %q\n", filepath.Join(l.Home, "cfg")))
+	lookup := func(string) (string, bool) { return "", false }
+	if err := Account(context.Background(), l, []string{"claude", "keep-fresh"}, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), "runs in only the remote-agents install") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
