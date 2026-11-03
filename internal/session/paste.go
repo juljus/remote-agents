@@ -70,15 +70,17 @@ type uploaded struct {
 	refused  []error
 }
 
-// upload runs one paste-files exchange with the box over ssh.
+// upload runs one paste-files exchange with the box over ssh. It returns
+// once the box has sent where the uploads landed; the box prunes old pastes
+// after that, and a failure there is logged.
 func upload(ctx context.Context, opts Options, files []paste.File) (uploaded, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
 	stall := time.AfterFunc(stallTimeout, func() { cancel(errStalled) })
-	defer stall.Stop()
 	// ssh reads its stdin straight from the pipe, so its exit is not held up by a copy waiting on the laptop.
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
+		stall.Stop()
+		cancel(nil)
 		return uploaded{}, err
 	}
 	stdoutR, stdoutW := io.Pipe()
@@ -90,31 +92,45 @@ func upload(ctx context.Context, opts Options, files []paste.File) (uploaded, er
 		stdoutW.CloseWithError(errBoxEnded)
 		stdinR.Close()
 		stdinW.Close()
+		stall.Stop()
+		cancel(nil)
 		ran <- res
 	}()
 	up, err := exchange(movingWriter{stdinW, stall}, movingReader{stdoutR, stall}, files)
-	if err != nil {
-		cancel(nil)
-	}
 	// ssh's exit waits on its output reaching a reader.
 	stdoutR.Close()
+	if err == nil {
+		go func() {
+			if failed := boxFailure(ctx, <-ran, opts, &stderr); failed != nil {
+				opts.Logf("%s: the box stored a paste, then failed: %v", opts.Spec.Session, failed)
+			}
+		}()
+		return up, nil
+	}
+	cancel(nil)
 	res := <-ran
-	boxEnded := errors.Is(err, errBoxEnded) || errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed)
-	switch {
-	case err != nil && !boxEnded:
-		return uploaded{}, err
-	case res.Err != nil:
-		return uploaded{}, res.Err
-	case errors.Is(context.Cause(ctx), errStalled):
-		return uploaded{}, fmt.Errorf("the upload to %s stalled for %s", opts.Box.Host, stallTimeout)
-	case res.Transport:
-		return uploaded{}, fmt.Errorf("uploading to %s: %s", opts.Box.Host, res.Detail)
-	case res.ExitCode != 0:
-		return uploaded{}, fmt.Errorf("box: %s", strings.TrimPrefix(strings.TrimSpace(stderr.String()), "remote-agents-box: "))
-	case err != nil:
+	if !errors.Is(err, errBoxEnded) && !errors.Is(err, syscall.EPIPE) && !errors.Is(err, os.ErrClosed) {
 		return uploaded{}, err
 	}
-	return up, nil
+	if failed := boxFailure(ctx, res, opts, &stderr); failed != nil {
+		return uploaded{}, failed
+	}
+	return uploaded{}, err
+}
+
+// boxFailure says how the box's side of an exchange failed, or nil when it ended well.
+func boxFailure(ctx context.Context, res reconnect.Result, opts Options, stderr *bytes.Buffer) error {
+	switch {
+	case res.Err != nil:
+		return res.Err
+	case errors.Is(context.Cause(ctx), errStalled):
+		return fmt.Errorf("the upload to %s stalled for %s", opts.Box.Host, stallTimeout)
+	case res.Transport:
+		return fmt.Errorf("uploading to %s: %s", opts.Box.Host, res.Detail)
+	case res.ExitCode != 0:
+		return fmt.Errorf("box: %s", strings.TrimPrefix(strings.TrimSpace(stderr.String()), "remote-agents-box: "))
+	}
+	return nil
 }
 
 // exchange is the laptop's side of paste-files: it asks the box which of

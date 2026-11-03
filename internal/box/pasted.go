@@ -23,16 +23,14 @@ const pastedTTL = 7 * 24 * time.Hour
 // PasteFiles is the box's side of paste-files. It answers which of the
 // laptop's queried paths are on the box, keeps each file the laptop then
 // sends as pasted/<content hash>/<name>, and once the laptop's side ends
-// writes the path of each. Pastes made more than pastedTTL ago go first;
-// pasting the same content again keeps its dir. The prune and each file's
+// writes the path of each. Then pastes made more than pastedTTL ago go; the
+// laptop has all it needs by then. Pasting the same content again keeps its
+// dir. The prune and each file's
 // store hold the pasted lock, so a prune never removes a file another store
 // just kept; receiving the laptop's upload does not, so a stalled upload
 // holds up no other.
 func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) error {
 	if err := createPastedDir(l); err != nil {
-		return err
-	}
-	if err := prunePasted(l, now); err != nil {
 		return err
 	}
 	frames := pastefile.NewReader(r)
@@ -69,7 +67,7 @@ func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) err
 			return err
 		}
 	}
-	return nil
+	return prunePasted(l, now)
 }
 
 // onTheBox reports whether path names anything on the box, as the agent would find it.

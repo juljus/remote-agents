@@ -338,6 +338,31 @@ func TestPasteFilesReportsProgressWhileItReceives(t *testing.T) {
 	}
 }
 
+func TestPasteFilesSendsItsRepliesBeforeWaitingOnThePrune(t *testing.T) {
+	l := testLayout(t)
+	if err := os.MkdirAll(filepath.Dir(l.PastedLock()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	held := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = withFlock(l.PastedLock(), func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	defer close(release)
+	answered := make(chan struct{})
+	go func() { _ = PasteFiles(l, exchange(t, []string{"/l/x"}), firstLine{stored: answered}, time.Now()) }()
+	select {
+	case <-answered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the answer waited on the pasted lock")
+	}
+}
+
 func TestAStalledPasteFilesUploadDoesNotHoldUpOthers(t *testing.T) {
 	l := testLayout(t)
 	stalled, feed := io.Pipe()

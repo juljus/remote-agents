@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -276,6 +277,42 @@ func TestProgressFromTheBoxKeepsASlowUploadAlive(t *testing.T) {
 func TestTheLaptopReadsProgressWhileItSends(t *testing.T) {
 	// More progress than the pipes hold, before the box reads any upload.
 	progressPaste(t, `printf '1\n0'; awk 'BEGIN { for (i = 0; i < 200000; i++) printf "0\n" }'; cat >/dev/null; printf '10\n/box/p.png'`)
+}
+
+func TestAPasteGoesOnWhileTheBoxFinishesUp(t *testing.T) {
+	h := newPTY(t)
+	shot := filepath.Join(t.TempDir(), "a.png")
+	if err := os.WriteFile(shot, onePixelPNG, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ssh := fakeBox(t, echoLine+`; sleep 3; exit 0`,
+		`printf '1\n0'; cat >/dev/null; printf '10\n/box/p.png'; sleep 2; echo "remote-agents-box: pruning: disk error" >&2; exit 1`)
+	opts := testOptions(ssh, h)
+	var mu sync.Mutex
+	var logged []string
+	opts.Logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	done := start(opts)
+	h.waitFor(t, "ready")
+	sent := time.Now()
+	if _, err := h.master.Write([]byte("\x1b[200~" + shot + "\x1b[201~\n")); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor(t, "got[\x1b[200~/box/p.png\x1b[201~]")
+	if elapsed := time.Since(sent); elapsed > time.Second {
+		t.Fatalf("the paste waited %s on the box's exit", elapsed)
+	}
+	if r := wait(t, done); r.err != nil {
+		t.Fatal(r.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.ContainsFunc(logged, func(l string) bool { return strings.Contains(l, "disk error") }) {
+		t.Fatalf("the box's late failure was not logged: %q", logged)
+	}
 }
 
 func TestTheSessionSeesTheTerminalSizeAndItsChanges(t *testing.T) {
