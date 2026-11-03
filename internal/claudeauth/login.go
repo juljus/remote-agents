@@ -23,6 +23,7 @@ type tokens struct {
 	RefreshTokenExpiresAt *int64   `json:"refreshTokenExpiresAt"`
 	Scopes                []string `json:"scopes"`
 	ClientID              *string  `json:"clientId"`
+	SubscriptionType      *string  `json:"subscriptionType"`
 }
 
 func parseLogin(raw []byte) (Login, error) {

@@ -44,36 +44,38 @@ func (s Store) WithLive(ctx context.Context, fn func(LiveTx) error) error {
 	})
 }
 
+// save writes a refreshed live login even once ctx ends: the server has rotated it.
+func (tx LiveTx) save(l Login) error {
+	return writeLogin(context.WithoutCancel(tx.ctx), tx.store.Paths, l)
+}
+
 // Context is the context WithLive was called with.
 func (tx LiveTx) Context() context.Context { return tx.ctx }
 
 func (tx LiveTx) Read() (Live, error) { return readLive(tx.store.Paths) }
 
 // Replace makes l and a the login of every Claude Code on the box: each
-// running one reads the new credentials before its next request.
+// running one reads the new credentials before its next request. Once the
+// credentials changed, the account follows even if ctx ends.
 func (tx LiveTx) Replace(l Login, a Account) error {
-	if err := writeLogin(tx.store.Paths, l); err != nil {
+	if err := writeLogin(tx.ctx, tx.store.Paths, l); err != nil {
 		return err
 	}
-	return tx.ReplaceAccount(a)
+	return writeAccount(context.WithoutCancel(tx.ctx), tx.store.Paths, a)
 }
 
 // ReplaceAccount sets only the global config's oauthAccount.
-func (tx LiveTx) ReplaceAccount(a Account) error {
-	ctx, cancel := context.WithTimeout(tx.ctx, lockWait)
-	defer cancel()
-	return writeAccount(ctx, tx.store.Paths, a)
-}
+func (tx LiveTx) ReplaceAccount(a Account) error { return writeAccount(tx.ctx, tx.store.Paths, a) }
 
 // Fresh is the live login l with an access token Claude Code would still
 // use, refreshing and saving it first if needed, as Claude Code would.
 func (tx LiveTx) Fresh(l Login) (Login, error) {
-	return tx.store.Fresh(tx.ctx, l, func(next Login) error { return writeLogin(tx.store.Paths, next) })
+	return tx.store.Fresh(tx.ctx, l, tx.save)
 }
 
 // Refresh trades the live login l's refresh token for new tokens and saves them.
 func (tx LiveTx) Refresh(l Login) (Login, error) {
-	return tx.store.Refresh(tx.ctx, l, func(next Login) error { return writeLogin(tx.store.Paths, next) })
+	return tx.store.Refresh(tx.ctx, l, tx.save)
 }
 
 // Fresh is l with an access token Claude Code would still use. When it
@@ -90,6 +92,11 @@ func (s Store) Fresh(ctx context.Context, l Login, save func(Login) error) (Logi
 // token still works, saving them as Fresh does.
 func (s Store) Refresh(ctx context.Context, l Login, save func(Login) error) (Login, error) {
 	return refresh(ctx, s.Client, s.Endpoints, l, s.Now, save)
+}
+
+// Identity is whom l's access token signs in as, by the server's word.
+func (s Store) Identity(ctx context.Context, l Login) (Identity, error) {
+	return fetchIdentity(ctx, s.Client, s.Endpoints, l)
 }
 
 // Usage reads how much of its plan limits l's account has used.

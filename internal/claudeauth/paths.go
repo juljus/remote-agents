@@ -61,4 +61,6 @@ func (p Paths) refreshLocks() ([2]string, error) {
 	return [2]string{filepath.Join(p.SecureDir, ".oauth_refresh.lock"), real + ".lock"}, nil
 }
 
+func (p Paths) storageWriteLock() string { return filepath.Join(p.SecureDir, ".storage-write.lock") }
+
 func (p Paths) globalConfigLock() string { return p.GlobalConfig + ".lock" }

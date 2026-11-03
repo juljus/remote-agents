@@ -223,7 +223,7 @@ func TestFreshRefreshesAnExpiringLoginAsClaudeCodeDoes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"grant_type": "refresh_token", "refresh_token": "fake-refresh-1", "client_id": ClientID, "scope": "user:inference user:profile"}
+	want := map[string]string{"grant_type": "refresh_token", "refresh_token": "fake-refresh-1", "client_id": ClientID, "scope": "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins"}
 	if len(ts.requests) != 1 || fmt.Sprint(ts.requests[0]) != fmt.Sprint(want) {
 		t.Fatalf("requests %v", ts.requests)
 	}
@@ -266,8 +266,133 @@ func TestRefreshSavesARotatedRefreshTokenEvenFromAnIncompleteReply(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "rotated refresh token was saved") {
 		t.Fatalf("err = %v", err)
 	}
-	if len(saved) != 1 || saved[0].tokens.RefreshToken != "fake-refresh-2" || saved[0].tokens.AccessToken != "" || !saved[0].accessExpired(t0) {
+	// The old access token stays: an empty one would read as signed out to Claude Code.
+	if len(saved) != 1 || saved[0].tokens.RefreshToken != "fake-refresh-2" || saved[0].tokens.AccessToken != "fake-access-1" || !saved[0].accessExpired(t0) {
 		t.Fatalf("saved %d logins", len(saved))
+	}
+}
+
+func TestRefreshAsksForTheScopesClaudeCodeAsksFor(t *testing.T) {
+	cases := []struct {
+		login string
+		want  []string
+	}{
+		// A claude.ai login: Claude Code's scopes plus the project scopes it holds, then its own on invalid_scope.
+		{`{"accessToken":"a","refreshToken":"r","expiresAt":0,"scopes":["user:inference","user:projects:read","org:x"]}`,
+			[]string{"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins user:projects:read", "user:inference user:projects:read org:x"}},
+		// One with a client id of its own asks for what it holds.
+		{`{"accessToken":"a","refreshToken":"r","expiresAt":0,"scopes":["user:inference"],"clientId":"c"}`, []string{"user:inference"}},
+		// Without the inference scope Claude Code does not ask again.
+		{`{"accessToken":"a","refreshToken":"r","expiresAt":0,"scopes":[],"subscriptionType":"max"}`,
+			[]string{"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins"}},
+	}
+	for _, c := range cases {
+		ts := newTokenServer(t, func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"invalid_scope"}`)
+		})
+		s := testStore(t, Endpoints{TokenURL: ts.URL})
+		_, err := s.Refresh(context.Background(), mustLogin(t, c.login), func(Login) error { return nil })
+		if !errors.Is(err, errInvalidScope) {
+			t.Fatalf("err = %v", err)
+		}
+		var got []string
+		for _, r := range ts.requests {
+			got = append(got, r["scope"])
+		}
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("%s asked for\n%q\nwant\n%q", c.login, got, c.want)
+		}
+	}
+}
+
+func TestIdentityReadsTheProfileStrictly(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/oauth/profile" || r.Header.Get("Authorization") != "Bearer fake-access-1" || r.Header.Get("Cache-Control") != "no-cache" {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+	s := testStore(t, Endpoints{APIBase: srv.URL})
+	body = `{"account":{"uuid":"acc-a","email":"a@example.com"},"organization":{"uuid":"org-a"},"application":{}}`
+	id, err := s.Identity(context.Background(), mustLogin(t, loginJSON("1", t0)))
+	if err != nil || id != (Identity{"acc-a", "org-a"}) {
+		t.Fatalf("identity %+v, %v", id, err)
+	}
+	for _, bad := range []string{`{"account":{"uuid":"acc-a"}}`, `{"account":{},"organization":{"uuid":"o"}}`, `[]`} {
+		body = bad
+		if _, err := s.Identity(context.Background(), mustLogin(t, loginJSON("1", t0))); err == nil || !strings.Contains(err.Error(), "changed shape") {
+			t.Errorf("%s: %v", bad, err)
+		}
+	}
+	if _, err := s.Identity(context.Background(), mustLogin(t, loginJSON("2", t0))); err == nil || !strings.Contains(err.Error(), "profile endpoint answered 401") {
+		t.Fatalf("refused token: %v", err)
+	}
+}
+
+func TestReplaceWaitsForClaudeCodesCredentialsWrite(t *testing.T) {
+	s := testStore(t, Endpoints{})
+	writeLive(t, s, loginJSON("a", t0), accountJSON("a"))
+	// A Claude Code process is saving an MCP token.
+	if err := os.Mkdir(s.Paths.storageWriteLock(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- s.WithLive(context.Background(), func(tx LiveTx) error {
+			return tx.Replace(mustLogin(t, loginJSON("b", t0)), mustAccount(t, accountJSON("b")))
+		})
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if data, _ := os.ReadFile(s.Paths.Credentials()); strings.Contains(string(data), "fake-access-b") {
+		t.Fatal("wrote while Claude Code held its write lock")
+	}
+	if err := os.Remove(s.Paths.storageWriteLock()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(s.Paths.Credentials()); !strings.Contains(string(data), "fake-access-b") {
+		t.Fatal("credentials not replaced")
+	}
+}
+
+func TestReplaceWritesThroughASymlinkedConfigAndRefusesSymlinkedCredentials(t *testing.T) {
+	s := testStore(t, Endpoints{})
+	writeLive(t, s, loginJSON("a", t0), accountJSON("a"))
+	real := s.Paths.GlobalConfig + ".real"
+	if err := os.Rename(s.Paths.GlobalConfig, real); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, s.Paths.GlobalConfig); err != nil {
+		t.Fatal(err)
+	}
+	err := s.WithLive(context.Background(), func(tx LiveTx) error { return tx.ReplaceAccount(mustAccount(t, accountJSON("b"))) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(s.Paths.GlobalConfig); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink replaced: %v", err)
+	}
+	if data, _ := os.ReadFile(real); !strings.Contains(string(data), "acc-b") {
+		t.Fatalf("config not written through the link:\n%s", data)
+	}
+	creds := s.Paths.Credentials() + ".real"
+	if err := os.Rename(s.Paths.Credentials(), creds); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(creds, s.Paths.Credentials()); err != nil {
+		t.Fatal(err)
+	}
+	err = s.WithLive(context.Background(), func(tx LiveTx) error {
+		return tx.Replace(mustLogin(t, loginJSON("b", t0)), mustAccount(t, accountJSON("b")))
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -281,6 +406,7 @@ func TestRefreshErrorsNameTheCauseButNoToken(t *testing.T) {
 		{429, `{"error":"rate_limited"}`, "token endpoint answered 429 (rate_limited)"},
 		{500, `oops fake-refresh-1`, "token endpoint answered 500"},
 		{200, `{"access_token":"x"}`, "lacks access_token or expires_in"},
+		{400, `{"error":"invalid_scope"}`, errInvalidScope.Error()},
 		{200, `[]`, "not the JSON object"},
 	}
 	for _, c := range cases {

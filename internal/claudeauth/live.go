@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"remote-agents/internal/atomicfile"
 )
 
@@ -66,35 +67,51 @@ func readObjectFile(path string) (object, error) {
 }
 
 // writeLogin replaces claudeAiOauth and keeps every other key, such as
-// mcpOAuth; the caller holds the refresh lock.
-func writeLogin(p Paths, l Login) error {
-	creds, err := readObjectFile(p.Credentials())
-	if err != nil {
-		return err
-	}
-	raw, err := json.Marshal(l)
-	if err != nil {
-		return err
-	}
-	data, err := creds.with("claudeAiOauth", raw).marshal("")
-	if err != nil {
-		return err
-	}
-	return atomicfile.Write(p.Credentials(), data, credentialsMode)
+// mcpOAuth, under the lock Claude Code takes for each write of the file; the
+// caller holds the refresh lock.
+func writeLogin(ctx context.Context, p Paths, l Login) error {
+	ctx, cancel := context.WithTimeout(ctx, lockWait)
+	defer cancel()
+	return withLocks(ctx, []string{p.storageWriteLock()}, storageWriteLockTiming, func() error {
+		// Claude Code refuses a symlinked credentials file, so it is never one of ours.
+		if info, err := os.Lstat(p.Credentials()); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink, which Claude Code refuses", p.Credentials())
+		}
+		creds, err := readObjectFile(p.Credentials())
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(l)
+		if err != nil {
+			return err
+		}
+		data, err := creds.with("claudeAiOauth", raw).marshal("")
+		if err != nil {
+			return err
+		}
+		return atomicfile.Write(p.Credentials(), data, credentialsMode)
+	})
 }
 
-// writeAccount replaces oauthAccount under Claude Code's global config lock.
-// The config must exist: Claude Code writes it on its first start.
+// writeAccount replaces oauthAccount under Claude Code's global config lock,
+// in the file a symlinked config points to. The config must exist: Claude
+// Code writes it on its first start.
 func writeAccount(ctx context.Context, p Paths, a Account) error {
+	ctx, cancel := context.WithTimeout(ctx, lockWait)
+	defer cancel()
 	return withLocks(ctx, []string{p.globalConfigLock()}, configLockTiming, func() error {
-		info, err := os.Stat(p.GlobalConfig)
+		path, err := filepath.EvalSymlinks(p.GlobalConfig)
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("%s is missing: start Claude Code once first", p.GlobalConfig)
 		}
 		if err != nil {
 			return err
 		}
-		config, err := readObjectFile(p.GlobalConfig)
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		config, err := readObjectFile(path)
 		if err != nil {
 			return err
 		}
@@ -106,6 +123,6 @@ func writeAccount(ctx context.Context, p Paths, a Account) error {
 		if err != nil {
 			return err
 		}
-		return atomicfile.Write(p.GlobalConfig, data, info.Mode().Perm())
+		return atomicfile.Write(path, data, info.Mode().Perm())
 	})
 }

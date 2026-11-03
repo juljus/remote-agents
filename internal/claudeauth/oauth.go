@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -25,10 +26,10 @@ var DefaultEndpoints = Endpoints{TokenURL: "https://platform.claude.com/v1/oauth
 
 const ClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-// Claude Code's timeouts for a token refresh and a usage read.
+// Claude Code's timeouts for a token refresh and for its profile and usage reads.
 const (
 	refreshTimeout = 30 * time.Second
-	usageTimeout   = 10 * time.Second
+	readTimeout    = 10 * time.Second
 )
 
 // oauthBeta is the anthropic-beta value Claude Code sends with OAuth tokens.
@@ -46,21 +47,57 @@ type tokenReply struct {
 	Scope                 *string  `json:"scope"`
 }
 
+// Claude Code 2.1.317 asks a claude.ai login without a client id of its own
+// for its current scopes, plus the project scopes the login holds; when the
+// server refuses those it asks again for the scopes the login holds.
+var (
+	defaultScopes = []string{"user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload", "user:plugins"}
+	keptScopes    = []string{"user:projects:read", "user:projects:write"}
+)
+
+const inferenceScope = "user:inference"
+
+// refreshScopes are the scopes Claude Code asks for first, and whether it
+// asks again for the held ones when the server refuses them.
+func (t tokens) refreshScopes() (scopes []string, retry bool) {
+	if t.ClientID != nil || (!slices.Contains(t.Scopes, inferenceScope) && t.SubscriptionType == nil) {
+		return t.Scopes, false
+	}
+	scopes = slices.Clone(defaultScopes)
+	for _, s := range t.Scopes {
+		if slices.Contains(keptScopes, s) && !slices.Contains(scopes, s) {
+			scopes = append(scopes, s)
+		}
+	}
+	return scopes, slices.Contains(t.Scopes, inferenceScope)
+}
+
+// errInvalidScope is the server refusing the scopes asked for, before it rotated anything.
+var errInvalidScope = errors.New("token endpoint refused the scopes asked for")
+
 // refresh trades l's refresh token for new tokens as Claude Code does. The
 // server retires the old refresh token once it answers, so save receives
 // every login the server issued before refresh returns, even an incomplete one.
 func refresh(ctx context.Context, client *http.Client, ep Endpoints, l Login, now func() time.Time, save func(Login) error) (Login, error) {
-	t := l.tokens
-	if t.RefreshToken == "" {
+	if l.tokens.RefreshToken == "" {
 		return Login{}, ErrRefreshRefused
 	}
+	scopes, retry := l.tokens.refreshScopes()
+	next, err := requestTokens(ctx, client, ep, l, scopes, now, save)
+	if errors.Is(err, errInvalidScope) && retry {
+		next, err = requestTokens(ctx, client, ep, l, l.tokens.Scopes, now, save)
+	}
+	return next, err
+}
+
+func requestTokens(ctx context.Context, client *http.Client, ep Endpoints, l Login, scopes []string, now func() time.Time, save func(Login) error) (Login, error) {
 	clientID := ClientID
-	if t.ClientID != nil {
-		clientID = *t.ClientID
+	if l.tokens.ClientID != nil {
+		clientID = *l.tokens.ClientID
 	}
 	body, err := json.Marshal(map[string]string{
-		"grant_type": "refresh_token", "refresh_token": t.RefreshToken,
-		"client_id": clientID, "scope": strings.Join(t.Scopes, " "),
+		"grant_type": "refresh_token", "refresh_token": l.tokens.RefreshToken,
+		"client_id": clientID, "scope": strings.Join(scopes, " "),
 	})
 	if err != nil {
 		return Login{}, err
@@ -90,7 +127,7 @@ func refresh(ctx context.Context, client *http.Client, ep Endpoints, l Login, no
 	if err := json.Unmarshal(data, &reply); err != nil {
 		return Login{}, fmt.Errorf("token endpoint reply is not the JSON object it was: %w", err)
 	}
-	next, complete, err := l.refreshed(reply, issuedAt)
+	next, complete, err := l.refreshed(reply, scopes, issuedAt)
 	if err != nil {
 		return Login{}, err
 	}
@@ -106,7 +143,7 @@ func refresh(ctx context.Context, client *http.Client, ep Endpoints, l Login, no
 // refreshed is l with reply's tokens, as Claude Code merges them: an absent
 // refresh token or refresh expiry keeps the old one, an absent scope means
 // the scopes asked for. complete is false when the reply had no usable access token.
-func (l Login) refreshed(reply tokenReply, issuedAt time.Time) (next Login, complete bool, err error) {
+func (l Login) refreshed(reply tokenReply, asked []string, issuedAt time.Time) (next Login, complete bool, err error) {
 	complete = reply.AccessToken != nil && *reply.AccessToken != "" && reply.ExpiresIn != nil && *reply.ExpiresIn > 0
 	if !complete && (reply.RefreshToken == nil || *reply.RefreshToken == l.tokens.RefreshToken) {
 		return Login{}, false, errors.New("token endpoint reply lacks access_token or expires_in")
@@ -115,10 +152,11 @@ func (l Login) refreshed(reply tokenReply, issuedAt time.Time) (next Login, comp
 		key   string
 		value any
 	}
-	// Without an access token Claude Code refreshes the login before using it.
-	updates := []update{{"accessToken", ""}, {"expiresAt", 0}}
+	// An expired login keeps its old access token: Claude Code refreshes it
+	// before use, while an empty one would read as signed out.
+	updates := []update{{"expiresAt", 0}, {"scopes", asked}}
 	if complete {
-		updates = []update{{"accessToken", *reply.AccessToken}, {"expiresAt", issuedAt.UnixMilli() + int64(*reply.ExpiresIn*1000)}}
+		updates = []update{{"accessToken", *reply.AccessToken}, {"expiresAt", issuedAt.UnixMilli() + int64(*reply.ExpiresIn*1000)}, {"scopes", asked}}
 	}
 	if reply.RefreshToken != nil {
 		updates = append(updates, update{"refreshToken", *reply.RefreshToken})
@@ -150,13 +188,70 @@ func refreshError(status int, body []byte) error {
 	var e struct {
 		Error string `json:"error"`
 	}
-	if json.Unmarshal(body, &e) == nil && e.Error == "invalid_grant" {
-		return ErrRefreshRefused
+	if json.Unmarshal(body, &e) != nil {
+		return fmt.Errorf("token endpoint answered %d", status)
 	}
-	if e.Error != "" {
+	switch {
+	case e.Error == "invalid_grant":
+		return ErrRefreshRefused
+	case status == http.StatusBadRequest && e.Error == "invalid_scope":
+		return errInvalidScope
+	case e.Error != "":
 		return fmt.Errorf("token endpoint answered %d (%s)", status, e.Error)
 	}
 	return fmt.Errorf("token endpoint answered %d", status)
+}
+
+// fetchIdentity asks the server whom l's access token signs in as, through
+// the profile endpoint Claude Code reads; it too is undocumented, so a reply
+// without the ids read here is an error.
+func fetchIdentity(ctx context.Context, client *http.Client, ep Endpoints, l Login) (Identity, error) {
+	data, err := get(ctx, client, ep, "/api/oauth/profile", l, "profile", "Cache-Control", "no-cache")
+	if err != nil {
+		return Identity{}, err
+	}
+	var reply struct {
+		Account *struct {
+			UUID string `json:"uuid"`
+		} `json:"account"`
+		Organization *struct {
+			UUID string `json:"uuid"`
+		} `json:"organization"`
+	}
+	if err := json.Unmarshal(data, &reply); err != nil {
+		return Identity{}, fmt.Errorf("profile reply changed shape: %w", err)
+	}
+	if reply.Account == nil || reply.Account.UUID == "" || reply.Organization == nil || reply.Organization.UUID == "" {
+		return Identity{}, errors.New("profile reply changed shape: no account or organization uuid")
+	}
+	return Identity{AccountUUID: reply.Account.UUID, OrganizationUUID: reply.Organization.UUID}, nil
+}
+
+// get reads an OAuth API path with l's access token and the one extra
+// header Claude Code sends for it.
+func get(ctx context.Context, client *http.Client, ep Endpoints, path string, l Login, what, header, value string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(ep.APIBase, "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+l.tokens.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(header, value)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("reading the %s: %w", what, err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("reading the %s: %w", what, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s endpoint answered %d", what, resp.StatusCode)
+	}
+	return data, nil
 }
 
 // Window is one usage limit window.
@@ -177,26 +272,9 @@ type Usage struct {
 // fetchUsage reads /api/oauth/usage, an endpoint Anthropic does not document:
 // a reply without the fields read here is an error, never a default.
 func fetchUsage(ctx context.Context, client *http.Client, ep Endpoints, l Login) (Usage, error) {
-	ctx, cancel := context.WithTimeout(ctx, usageTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(ep.APIBase, "/")+"/api/oauth/usage", nil)
+	data, err := get(ctx, client, ep, "/api/oauth/usage", l, "usage", "anthropic-beta", oauthBeta)
 	if err != nil {
 		return Usage{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+l.tokens.AccessToken)
-	req.Header.Set("anthropic-beta", oauthBeta)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return Usage{}, fmt.Errorf("reading usage: %w", err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return Usage{}, fmt.Errorf("reading usage: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return Usage{}, fmt.Errorf("usage endpoint answered %d", resp.StatusCode)
 	}
 	return parseUsage(data)
 }

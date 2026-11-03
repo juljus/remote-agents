@@ -18,6 +18,8 @@ type lockTiming struct{ stale, update time.Duration }
 var (
 	// Claude Code's OAuth refresh lock.
 	refreshLockTiming = lockTiming{stale: 60 * time.Second, update: 5 * time.Second}
+	// Claude Code's lock around every read-modify-write of .credentials.json.
+	storageWriteLockTiming = lockTiming{stale: 15 * time.Second, update: 7500 * time.Millisecond}
 	// proper-lockfile's defaults, which Claude Code's global config lock uses.
 	configLockTiming = lockTiming{stale: 10 * time.Second, update: 5 * time.Second}
 )
