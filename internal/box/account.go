@@ -6,23 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/netip"
-	"net/url"
 	"os/exec"
-	"slices"
-	"strings"
 	"time"
 
 	"remote-agents/internal/accounts"
 	"remote-agents/internal/boxlayout"
 	"remote-agents/internal/claudeauth"
 	"remote-agents/internal/spec"
-)
-
-// Endpoint overrides, for tests against stand-in servers on the box.
-const (
-	TokenURLEnvVar = "REMOTE_AGENTS_CLAUDE_TOKEN_URL"
-	APIURLEnvVar   = "REMOTE_AGENTS_CLAUDE_API_URL"
 )
 
 const AccountUsage = "usage: remote-agents-box account claude list | use <name> | save <name> | remove <name> | add <name> <exec spec> | keep-fresh"
@@ -82,13 +72,13 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 			return fmt.Errorf("add needs an exec spec, got mode %q", s.Mode)
 		}
 		signIn := func(dir string) error { return signInClaude(l, s, base, dir, stdio) }
-		err = vault.Add(ctx, rest[0], signIn)
-		if errors.Is(err, accounts.ErrAddedLive) {
-			fmt.Fprintf(stdio.Stdout, "%s is the box's login already; it stays as it is\n", rest[0])
-			return nil
-		}
+		saved, err := vault.Add(ctx, rest[0], signIn)
 		if err != nil {
 			return err
+		}
+		if !saved {
+			fmt.Fprintf(stdio.Stdout, "%s is the box's login already; it stays as it is\n", rest[0])
+			return nil
 		}
 		fmt.Fprintf(stdio.Stdout, "saved the new login as %s; switch to it with: rclaude account use %s\n", rest[0], rest[0])
 		return nil
@@ -97,37 +87,17 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 }
 
 func claudeVault(l boxlayout.Layout, lookupEnv func(string) (string, bool)) (accounts.Vault, error) {
-	paths, err := claudeauth.PathsFromEnv(lookupEnv, l.Home)
+	for _, key := range claudeauth.EnvVars {
+		if _, set := lookupEnv(key); set {
+			return accounts.Vault{}, fmt.Errorf("%s is set, and the box's sessions may not see it: set claude_config_dir in %s instead", key, l.AccountsConfig())
+		}
+	}
+	cfg, err := LoadAccountsConfig(l)
 	if err != nil {
 		return accounts.Vault{}, err
 	}
-	ep := claudeauth.DefaultEndpoints
-	for key, field := range map[string]*string{TokenURLEnvVar: &ep.TokenURL, APIURLEnvVar: &ep.APIBase} {
-		u, ok := lookupEnv(key)
-		if !ok {
-			continue
-		}
-		if err := loopbackURL(u); err != nil {
-			return accounts.Vault{}, fmt.Errorf("%s: %w", key, err)
-		}
-		*field = u
-	}
-	store := claudeauth.Store{Paths: paths, Endpoints: ep, Client: &http.Client{}, Now: time.Now}
+	store := claudeauth.Store{Paths: cfg.Paths, Endpoints: cfg.Endpoints, Client: &http.Client{}, Now: time.Now}
 	return accounts.Vault{Dir: l.AccountsDir("claude"), Store: store}, nil
-}
-
-// loopbackURL admits only a test server on the box itself, so no setting
-// can send a login's tokens anywhere else.
-func loopbackURL(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return err
-	}
-	ip, err := netip.ParseAddr(u.Hostname())
-	if u.Scheme != "http" || (u.Hostname() != "localhost" && (err != nil || !ip.IsLoopback())) {
-		return fmt.Errorf("%q is not an http URL on a loopback address", raw)
-	}
-	return nil
 }
 
 // signInClaude runs the spec's sign-in command, Claude Code's `auth login`,
@@ -138,7 +108,7 @@ func signInClaude(l boxlayout.Layout, s spec.Spec, base []string, dir string, st
 	if err != nil {
 		return err
 	}
-	env = withoutEnv(env, "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+	// The base environment sets none of claudeauth.EnvVars: claudeVault refuses them.
 	env = append(env, "CLAUDE_CONFIG_DIR="+dir)
 	cmd := exec.Command(path, s.Argv[1:]...)
 	cmd.Args[0] = s.Argv[0]
@@ -148,15 +118,4 @@ func signInClaude(l boxlayout.Layout, s spec.Spec, base []string, dir string, st
 		return fmt.Errorf("signing in: %w", err)
 	}
 	return nil
-}
-
-func withoutEnv(env []string, keys ...string) []string {
-	out := make([]string, 0, len(env))
-	for _, kv := range env {
-		k, _, _ := strings.Cut(kv, "=")
-		if !slices.Contains(keys, k) {
-			out = append(out, kv)
-		}
-	}
-	return out
 }

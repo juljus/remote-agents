@@ -125,6 +125,11 @@ func (l Layout) AccountsDir(kind string) string {
 	return filepath.Join(l.Home, ".config", l.Name, "accounts", kind)
 }
 
+// AccountsConfig is where account commands find Claude Code's login.
+func (l Layout) AccountsConfig() string {
+	return filepath.Join(l.Home, ".config", l.Name, "accounts.toml")
+}
+
 // SessionConfig is how the box runs each session.
 func (l Layout) SessionConfig() string {
 	return filepath.Join(l.Home, ".config", l.Name, "session.toml")

@@ -77,8 +77,20 @@ ln -sfn ../bin/remote-agents-box "$SHARE/hookbin/cmux"
 changed="$(install_file "$STAGE/shpool.toml" "$CONFIG/shpool.toml" 0644)"
 [[ -z "$changed" ]] || echo "installed shpool.toml (the daemon reloads it)"
 
+# Only the production install (boxlayout.DefaultName) keeps saved Claude
+# logins fresh: a test install's account commands never touch the real
+# login, and it runs no timer.
+units=(shpool.socket shpool.service)
+if [[ "$NAME" == remote-agents ]]; then
+  units+=(accounts-refresh.service accounts-refresh.timer)
+elif [[ -e "$UNITS/$REFRESH.timer" ]]; then
+  systemctl --user disable --now "$REFRESH.timer" >/dev/null
+  rm -f "$UNITS/$REFRESH.timer" "$UNITS/$REFRESH.service"
+  systemctl --user daemon-reload
+  echo "removed $REFRESH.timer: only the production install runs it"
+fi
 units_changed=""
-for unit in shpool.socket shpool.service accounts-refresh.service accounts-refresh.timer; do
+for unit in "${units[@]}"; do
   sed "s/@NAME@/$NAME/g" "$STAGE/systemd/$unit.in" > "$STAGE/systemd/$NAME-$unit"
   units_changed+="$(install_file "$STAGE/systemd/$NAME-$unit" "$UNITS/$NAME-$unit" 0644)"
 done
@@ -86,7 +98,10 @@ if [[ -n "$units_changed" ]]; then
   systemctl --user daemon-reload
   echo "installed systemd units"
 fi
-systemctl --user enable --now "$SOCKET" "$REFRESH.timer" >/dev/null
+systemctl --user enable --now "$SOCKET" >/dev/null
+if [[ "$NAME" == remote-agents ]]; then
+  systemctl --user enable --now "$REFRESH.timer" >/dev/null
+fi
 
 if [[ ! -x "$HOME/.local/bin/claude" ]]; then
   curl -fsSL https://claude.ai/install.sh | bash

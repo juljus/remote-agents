@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"remote-agents/internal/accounts"
+	"remote-agents/internal/boxlayout"
+	"remote-agents/internal/claudeauth"
 	"remote-agents/internal/spec"
 )
 
@@ -46,19 +48,19 @@ func TestAccountAddsASignInAndListsItsUsage(t *testing.T) {
 		}
 	}))
 	defer api.Close()
-	env := map[string]string{"CLAUDE_CONFIG_DIR": filepath.Join(l.Home, "cfg"), "CLAUDE_SECURESTORAGE_CONFIG_DIR": filepath.Join(l.Home, "cfg"), APIURLEnvVar: api.URL}
-	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	writeAccountsConfig(t, l, fmt.Sprintf("claude_config_dir = %q\napi_url = %q\n", filepath.Join(l.Home, "cfg"), api.URL))
+	lookup := func(string) (string, bool) { return "", false }
 	token, err := spec.Spec{Mode: spec.ModeExec, Workdir: work, Argv: []string{script, "auth", "login"}}.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
 	stdio := IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}
-	base := []string{"HOME=" + l.Home, "CLAUDE_CONFIG_DIR=/elsewhere", "CLAUDE_SECURESTORAGE_CONFIG_DIR=/elsewhere"}
+	base := []string{"HOME=" + l.Home}
 	if err := Account(context.Background(), l, []string{"claude", "add", "home", token}, stdio, base, lookup); err != nil {
 		t.Fatalf("add: %v\n%s", err, out.String())
 	}
-	if !strings.Contains(out.String(), "args=auth login browser="+filepath.Join(l.Shims(), "xdg-open")+" secure=unset") {
+	if !strings.Contains(out.String(), "args=auth login browser="+filepath.Join(l.Shims(), "xdg-open")+" secure=unset") || !strings.Contains(out.String(), "saved the new login as home") {
 		t.Fatalf("sign-in ran as:\n%s", out.String())
 	}
 	if info, err := os.Stat(filepath.Join(l.AccountsDir("claude"), "home.json")); err != nil || info.Mode().Perm() != 0o600 {
@@ -77,17 +79,51 @@ func TestAccountAddsASignInAndListsItsUsage(t *testing.T) {
 	}
 }
 
-func TestAccountEndpointsOnlyPointAtTheBoxItself(t *testing.T) {
-	l := testLayout(t)
-	for _, u := range []string{"https://127.0.0.1:1", "http://example.com", "http://10.0.0.1:80"} {
-		lookup := func(k string) (string, bool) { return u, k == TokenURLEnvVar }
-		if err := Account(context.Background(), l, []string{"claude", "list"}, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), "loopback") {
-			t.Errorf("%s: %v", u, err)
+func writeAccountsConfig(t *testing.T, l boxlayout.Layout, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(l.AccountsConfig()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l.AccountsConfig(), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAccountsConfigKeepsTestInstallsOffTheRealLogin(t *testing.T) {
+	home := t.TempDir()
+	prod := boxlayout.Layout{Home: home, Name: boxlayout.DefaultName}
+	cfg, err := ParseAccountsConfig(nil, prod)
+	if err != nil || cfg.Paths.SecureDir != home+"/.claude" || cfg.Endpoints != claudeauth.DefaultEndpoints {
+		t.Fatalf("production default %+v, %v", cfg, err)
+	}
+	test := boxlayout.Layout{Home: home, Name: "remote-agents-e2e"}
+	if _, err := ParseAccountsConfig(nil, test); err == nil || !strings.Contains(err.Error(), "needs claude_config_dir") {
+		t.Fatalf("test install without a dir: %v", err)
+	}
+	cfg, err = ParseAccountsConfig([]byte("claude_config_dir = \"/t/cfg\"\ntoken_url = \"http://127.0.0.1:9/token\"\napi_url = \"http://[::1]:9\"\n"), test)
+	if err != nil || cfg.Paths.GlobalConfig != "/t/cfg/.claude.json" || cfg.Endpoints.TokenURL != "http://127.0.0.1:9/token" || cfg.Endpoints.APIBase != "http://[::1]:9" {
+		t.Fatalf("test install %+v, %v", cfg, err)
+	}
+	for _, bad := range []string{
+		`claude_config_dir = "rel"`,
+		`token_url = "https://127.0.0.1:1"`,
+		`api_url = "http://example.com"`,
+		`api_url = "http://10.0.0.1:80"`,
+		`api_url = "http://127.0.0.1@evil.example"`,
+		`frob = 1`,
+	} {
+		if _, err := ParseAccountsConfig([]byte(bad), prod); err == nil {
+			t.Errorf("%s parsed", bad)
 		}
 	}
-	for _, u := range []string{"http://127.0.0.1:8080/token", "http://localhost:1", "http://[::1]:2"} {
-		if err := loopbackURL(u); err != nil {
-			t.Errorf("%s: %v", u, err)
+}
+
+func TestAccountRefusesClaudeConfigDirsFromTheEnvironment(t *testing.T) {
+	l := testLayout(t)
+	for _, key := range claudeauth.EnvVars {
+		lookup := func(k string) (string, bool) { return "/x", k == key }
+		if err := Account(context.Background(), l, []string{"claude", "list"}, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), key+" is set") {
+			t.Errorf("%s: %v", key, err)
 		}
 	}
 }
