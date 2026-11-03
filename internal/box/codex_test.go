@@ -13,7 +13,9 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"remote-agents/internal/boxlayout"
 	"remote-agents/internal/cmuxcodex"
+	"remote-agents/internal/jsonfile"
 	"remote-agents/internal/reaper"
 	"remote-agents/internal/spec"
 )
@@ -298,5 +300,46 @@ func TestCodexTrustHashKeepsShellQuotesAndSlashesVerbatim(t *testing.T) {
 	got, err := codexTrustHash(codexHook{event: "SessionStart", command: cmd, timeout: 10})
 	if err != nil || got != "sha256:"+sha256Hex(want) {
 		t.Fatalf("hash = %q, %v", got, err)
+	}
+}
+
+// writeHooks records that the agent in shpool session name reports agentSession.
+func writeHooks(t *testing.T, l boxlayout.Layout, name, agentSession string) {
+	t.Helper()
+	if err := os.MkdirAll(l.ActivityDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := jsonfile.Write(l.HookState(name), reaper.HookState{AgentSession: agentSession}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Codex names a new session only once it runs, so the shpool session it runs
+// in has another name than a later resume of it asks for.
+func TestAResumeAttachesWhereItsSessionAlreadyRuns(t *testing.T) {
+	l := testLayout(t)
+	const running = "codex-bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	writeHooks(t, l, running, codexSession)
+	writeHooks(t, l, "fakecodex-cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee", codexSession)
+	sessions := []shpoolSession{{Name: "fakecodex-cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee"}, {Name: running}}
+	s := codexSpec("/w")
+	s.Session = "codex-" + codexSession
+	s.Codex.Resumes = codexSession
+	got, err := attachTarget(l, s, sessions)
+	if err != nil || got.Session != running {
+		t.Fatalf("target = %q, %v; want %s", got.Session, err, running)
+	}
+	for name, mutate := range map[string]func(*spec.Spec){
+		"not a resume":            func(s *spec.Spec) { s.Codex.Resumes = "" },
+		"its own name runs":       func(s *spec.Spec) { s.Session = running },
+		"another session resumes": func(s *spec.Spec) { s.Codex.Resumes = "01a1a1e4-0000-7753-927c-b59c2ec2f926" },
+	} {
+		s := codexSpec("/w")
+		s.Session = "codex-" + codexSession
+		s.Codex.Resumes = codexSession
+		mutate(&s)
+		if got, err := attachTarget(l, s, sessions); err != nil || got.Session != s.Session {
+			t.Fatalf("%s: target = %q, %v; want %s", name, got.Session, err, s.Session)
+		}
 	}
 }

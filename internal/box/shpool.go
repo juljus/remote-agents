@@ -67,6 +67,15 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 	if s.Mode != spec.ModeSession && s.Mode != spec.ModeReattach {
 		return 1, fmt.Errorf("attach needs a session or reattach spec, got mode %q", s.Mode)
 	}
+	if agent := s.Followed(); agent != nil && agent.Resumes != "" {
+		sessions, err := listSessions(l)
+		if err != nil {
+			return 1, err
+		}
+		if s, err = attachTarget(l, s, sessions); err != nil {
+			return 1, err
+		}
+	}
 	token, err := s.Encode()
 	if err != nil {
 		return 1, err
@@ -139,6 +148,33 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 			return spec.ExitTakenOver, nil
 		}
 	}
+}
+
+// attachTarget is where a run that resumes an agent session attaches: the
+// shpool session of the same agent that already runs it, if one does under
+// another name, as a session the agent named itself once it started does.
+func attachTarget(l boxlayout.Layout, s spec.Spec, sessions []shpoolSession) (spec.Spec, error) {
+	agent, err := spec.AgentOf(s.Session)
+	if err != nil {
+		return spec.Spec{}, err
+	}
+	if slices.ContainsFunc(sessions, func(r shpoolSession) bool { return r.Name == s.Session }) {
+		return s, nil
+	}
+	for _, r := range sessions {
+		if owner, err := spec.AgentOf(r.Name); err != nil || owner != agent {
+			continue
+		}
+		hooks, err := reaper.ReadHookState(l.HookState(r.Name))
+		if err != nil {
+			return spec.Spec{}, err
+		}
+		if hooks.AgentSession == s.Followed().Resumes {
+			s.Session = r.Name
+			return s, nil
+		}
+	}
+	return s, nil
 }
 
 func scopeInstance() string { return strings.ToLower(rand.Text()[:8]) }
