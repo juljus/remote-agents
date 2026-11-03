@@ -164,19 +164,31 @@ func exchange(t *testing.T, query []string, uploads ...[2]string) *bytes.Buffer 
 // replies reads the box's answer to a query of n paths and the stored paths after it.
 func replies(t *testing.T, out *bytes.Buffer, n int) ([]bool, []string) {
 	t.Helper()
+	onBox, stored, _ := repliesWithProgress(t, out, n)
+	return onBox, stored
+}
+
+// repliesWithProgress is replies that also counts the progress frames.
+func repliesWithProgress(t *testing.T, out *bytes.Buffer, n int) ([]bool, []string, int) {
+	t.Helper()
 	r := pastefile.NewReader(out)
 	onBox, err := r.Answer(n)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var stored []string
+	progress := 0
 	for {
 		path, err := r.Next()
 		if errors.Is(err, io.EOF) {
-			return onBox, stored
+			return onBox, stored, progress
 		}
 		if err != nil {
 			t.Fatal(err)
+		}
+		if len(path) == 0 {
+			progress++
+			continue
 		}
 		stored = append(stored, string(path))
 	}
@@ -314,28 +326,15 @@ func TestPastingContentAgainRestoresACopyTheAgentChanged(t *testing.T) {
 	}
 }
 
-func TestPasteFilesAnswersBeforeWaitingOnThePastedLock(t *testing.T) {
+func TestPasteFilesReportsProgressWhileItReceives(t *testing.T) {
 	l := testLayout(t)
-	if err := os.MkdirAll(filepath.Dir(l.PastedLock()), 0o700); err != nil {
+	big := strings.Repeat("x", 2*pastefile.ProgressEvery+1)
+	var out bytes.Buffer
+	if err := PasteFiles(l, exchange(t, []string{"/l/a", "/l/b"}, [2]string{"a", big}, [2]string{"b", "small"}), &out, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	held := make(chan struct{})
-	release := make(chan struct{})
-	go func() {
-		_ = withFlock(l.PastedLock(), func() error {
-			close(held)
-			<-release
-			return nil
-		})
-	}()
-	<-held
-	defer close(release)
-	answered := make(chan struct{})
-	go func() { _ = PasteFiles(l, exchange(t, []string{"/l/x"}), firstLine{stored: answered}, time.Now()) }()
-	select {
-	case <-answered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the answer waited on the pasted lock")
+	if _, stored, progress := repliesWithProgress(t, &out, 2); progress != 2 || len(stored) != 2 {
+		t.Fatalf("progress %d, stored %q", progress, stored)
 	}
 }
 

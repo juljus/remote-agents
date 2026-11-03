@@ -5,7 +5,9 @@
 // In paste-files the laptop sends a query of the pasted paths and the box
 // answers which of them it has; the laptop then sends a name frame and a
 // content frame for each file to store, and once the laptop's side ends the
-// box sends a frame with the path of each stored file. paste-store, which
+// box sends a frame with the path of each stored file. While it receives, the
+// box sends an empty frame for each ProgressEvery bytes, so the laptop can
+// tell a slow link from a stalled one. paste-store, which
 // laptops built before paste-files use, takes image content frames and
 // answers a line per stored image.
 package pastefile
@@ -22,6 +24,9 @@ import (
 
 // MaxSize bounds one pasted file.
 const MaxSize = 100 << 20
+
+// ProgressEvery is how many received bytes the box reports with each empty frame.
+const ProgressEvery = 256 << 10
 
 // SniffLen is how much of a file ImageExt needs.
 const SniffLen = 512

@@ -119,7 +119,8 @@ func upload(ctx context.Context, opts Options, files []paste.File) (uploaded, er
 
 // exchange is the laptop's side of paste-files: it asks the box which of
 // files it has, sends those it lacks that can go, ends its side and reads
-// where they landed.
+// where they landed. The box's progress, read while the files go, keeps the
+// stall timer off.
 func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, error) {
 	paths := make([]string, len(files))
 	for i, f := range files {
@@ -134,6 +135,13 @@ func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, erro
 		return uploaded{}, err
 	}
 	var up uploaded
+	var srcs []*os.File
+	defer func() {
+		for _, src := range srcs {
+			// Closing a file opened only for reading loses nothing.
+			_ = src.Close()
+		}
+	}()
 	for i, f := range files {
 		if onBox[i] {
 			continue
@@ -147,29 +155,52 @@ func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, erro
 			up.refused = append(up.refused, err)
 			continue
 		}
-		err = send(w, f, src)
-		if closeErr := src.Close(); err == nil {
-			err = closeErr
-		}
-		if err != nil {
+		up.sent = append(up.sent, f)
+		srcs = append(srcs, src)
+	}
+	stored := make(chan storedResult, 1)
+	go func() {
+		paths, err := readStored(frames, len(up.sent))
+		stored <- storedResult{paths, err}
+	}()
+	for i, f := range up.sent {
+		if err := send(w, f, srcs[i]); err != nil {
 			return uploaded{}, err
 		}
-		up.sent = append(up.sent, f)
 	}
 	if err := w.Close(); err != nil {
 		return uploaded{}, err
 	}
-	for range up.sent {
+	res := <-stored
+	if res.err != nil {
+		return uploaded{}, res.err
+	}
+	up.boxPaths = res.paths
+	return up, nil
+}
+
+type storedResult struct {
+	paths []string
+	err   error
+}
+
+// readStored reads the paths of n stored files, passing over the progress frames before them.
+func readStored(frames *pastefile.Reader, n int) ([]string, error) {
+	var paths []string
+	for len(paths) < n {
 		path, err := frames.Next()
 		if err != nil {
-			return uploaded{}, fmt.Errorf("reading where the uploads landed: %w", err)
+			return nil, fmt.Errorf("reading where the uploads landed: %w", err)
+		}
+		if len(path) == 0 {
+			continue
 		}
 		if !strings.HasPrefix(string(path), "/") {
-			return uploaded{}, fmt.Errorf("the box stored an upload at %q", path)
+			return nil, fmt.Errorf("the box stored an upload at %q", path)
 		}
-		up.boxPaths = append(up.boxPaths, string(path))
+		paths = append(paths, string(path))
 	}
-	return up, nil
+	return paths, nil
 }
 
 // send writes f's base name and its content, read from src, to the box.

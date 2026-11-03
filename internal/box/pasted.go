@@ -23,12 +23,18 @@ const pastedTTL = 7 * 24 * time.Hour
 // PasteFiles is the box's side of paste-files. It answers which of the
 // laptop's queried paths are on the box, keeps each file the laptop then
 // sends as pasted/<content hash>/<name>, and once the laptop's side ends
-// writes the path of each. Once it has answered, pastes made more than
-// pastedTTL ago go; pasting the same content again keeps its dir. The prune and each file's
+// writes the path of each. Pastes made more than pastedTTL ago go first;
+// pasting the same content again keeps its dir. The prune and each file's
 // store hold the pasted lock, so a prune never removes a file another store
 // just kept; receiving the laptop's upload does not, so a stalled upload
 // holds up no other.
 func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) error {
+	if err := createPastedDir(l); err != nil {
+		return err
+	}
+	if err := prunePasted(l, now); err != nil {
+		return err
+	}
 	frames := pastefile.NewReader(r)
 	paths, err := frames.Query()
 	if err != nil {
@@ -43,13 +49,6 @@ func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) err
 	if err := pastefile.WriteAnswer(w, onBox); err != nil {
 		return err
 	}
-	// The laptop holds the user's typing until it has the answer; the prune can wait.
-	if err := createPastedDir(l); err != nil {
-		return err
-	}
-	if err := prunePasted(l, now); err != nil {
-		return err
-	}
 	var stored []string
 	for {
 		name, err := frames.Next()
@@ -59,7 +58,7 @@ func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) err
 		if err != nil {
 			return err
 		}
-		path, err := receivePasted(l, frames, string(name), now)
+		path, err := receivePasted(l, frames, string(name), w, now)
 		if err != nil {
 			return err
 		}
@@ -88,8 +87,9 @@ func onTheBox(path string) (bool, error) {
 	return false, fmt.Errorf("looking up %s: %w", path, err)
 }
 
-// receivePasted streams the next file of frames into the pasted dir and keeps it as name.
-func receivePasted(l boxlayout.Layout, frames *pastefile.Reader, name string, now time.Time) (string, error) {
+// receivePasted streams the next file of frames into the pasted dir, reporting
+// progress to w, and keeps it as name.
+func receivePasted(l boxlayout.Layout, frames *pastefile.Reader, name string, w io.Writer, now time.Time) (string, error) {
 	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, '/') {
 		return "", fmt.Errorf("pasted file name %q is not one file name", name)
 	}
@@ -98,7 +98,7 @@ func receivePasted(l boxlayout.Layout, frames *pastefile.Reader, name string, no
 		return "", fmt.Errorf("creating pasted file: %w", err)
 	}
 	sum := sha256.New()
-	if err := frames.CopyNext(io.MultiWriter(tmp, sum)); err != nil {
+	if err := frames.CopyNext(io.MultiWriter(tmp, sum, &progress{w: w})); err != nil {
 		return "", errors.Join(fmt.Errorf("receiving %s: %w", name, err), tmp.Close(), os.Remove(tmp.Name()))
 	}
 	if err := tmp.Close(); err != nil {
@@ -131,6 +131,23 @@ func keepPasted(dir, tmp, sum, name string, now time.Time) (string, error) {
 	return path, nil
 }
 
+// progress writes an empty frame to w each time another pastefile.ProgressEvery bytes pass through it.
+type progress struct {
+	w        io.Writer
+	received int64
+}
+
+func (p *progress) Write(b []byte) (int, error) {
+	before := p.received / pastefile.ProgressEvery
+	p.received += int64(len(b))
+	if p.received/pastefile.ProgressEvery > before {
+		if err := pastefile.WriteFrame(p.w, nil); err != nil {
+			return 0, fmt.Errorf("reporting progress: %w", err)
+		}
+	}
+	return len(b), nil
+}
+
 // removeIfThere removes path unless it is gone already.
 func removeIfThere(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -144,6 +161,7 @@ func prunePasted(l boxlayout.Layout, now time.Time) error {
 	return withFlock(l.PastedLock(), func() error { return pruneOlderThan(l.PastedDir(), pastedTTL, now, os.RemoveAll) })
 }
 
+// createPastedDir creates the pasted dir unless it is there.
 func createPastedDir(l boxlayout.Layout) error {
 	if err := os.MkdirAll(l.PastedDir(), 0o700); err != nil {
 		return fmt.Errorf("creating pasted dir: %w", err)

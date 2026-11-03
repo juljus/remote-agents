@@ -244,6 +244,40 @@ func TestAStalledUploadFailsThePaste(t *testing.T) {
 	failedPaste(t, `printf '1\n0'; sleep 5`, "stalled")
 }
 
+// progressPaste pastes a 1 MB laptop file into a session whose box runs
+// pasteFiles, and waits for the paste to reach the session as /box/p.png.
+func progressPaste(t *testing.T, pasteFiles string) {
+	t.Helper()
+	h := newPTY(t)
+	shot := filepath.Join(t.TempDir(), "a.png")
+	if err := os.WriteFile(shot, append(onePixelPNG, make([]byte, 1<<20)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ssh := fakeBox(t, echoLine+`; exit 0`, pasteFiles)
+	done := start(testOptions(ssh, h))
+	h.waitFor(t, "ready")
+	if _, err := h.master.Write([]byte("\x1b[200~" + shot + "\x1b[201~\n")); err != nil {
+		t.Fatal(err)
+	}
+	if r := wait(t, done); r.err != nil || r.code != 0 {
+		t.Fatalf("Run = %d, %v; output %q", r.code, r.err, h.output())
+	}
+	if want := "got[\x1b[200~/box/p.png\x1b[201~]"; !strings.Contains(h.output(), want) {
+		t.Fatalf("output %q lacks %q", h.output(), want)
+	}
+}
+
+func TestProgressFromTheBoxKeepsASlowUploadAlive(t *testing.T) {
+	defer func(was time.Duration) { stallTimeout = was }(stallTimeout)
+	stallTimeout = 300 * time.Millisecond
+	progressPaste(t, `printf '1\n0'; cat >/dev/null; for i in 1 2 3 4 5 6 7 8; do sleep 0.1; printf '0\n'; done; printf '10\n/box/p.png'`)
+}
+
+func TestTheLaptopReadsProgressWhileItSends(t *testing.T) {
+	// More progress than the pipes hold, before the box reads any upload.
+	progressPaste(t, `printf '1\n0'; awk 'BEGIN { for (i = 0; i < 200000; i++) printf "0\n" }'; cat >/dev/null; printf '10\n/box/p.png'`)
+}
+
 func TestTheSessionSeesTheTerminalSizeAndItsChanges(t *testing.T) {
 	h := newPTY(t)
 	ssh := fakeBox(t, `trap 'echo "size $(stty size)"' WINCH; echo "size $(stty size)"; IFS= read -r line; exit 0`, `exit 9`)
