@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -139,6 +140,9 @@ func parseEntry(data []byte) (entry, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&raw); err != nil {
 		return entry{}, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return entry{}, errors.New("data after the JSON object")
 	}
 	if raw.Login == nil || raw.Account == nil {
 		return entry{}, errors.New("lacks claudeAiOauth or oauthAccount")

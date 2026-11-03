@@ -501,6 +501,7 @@ func TestAnIncompleteEntryIsRefused(t *testing.T) {
 		`{"claudeAiOauth":` + f.login("home", 1, time.Hour, 20*24*time.Hour) + `}`,
 		`{"oauthAccount":` + account("home") + `,"claudeAiOauth":null}`,
 		`{"claudeAiOauth":` + f.login("home", 2, time.Hour, 20*24*time.Hour) + `,"oauthAccount":` + account("home") + `,"x":1}`,
+		`{"claudeAiOauth":` + f.login("home", 3, time.Hour, 20*24*time.Hour) + `,"oauthAccount":` + account("home") + `} {}`,
 	} {
 		if err := os.WriteFile(f.vault.entryPath("home"), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
