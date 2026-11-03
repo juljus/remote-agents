@@ -1,0 +1,302 @@
+package box
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/pelletier/go-toml/v2"
+
+	"remote-agents/internal/cmuxcodex"
+	"remote-agents/internal/reaper"
+	"remote-agents/internal/spec"
+)
+
+// cmux 0.64.17 trusts its own Stop hook for Codex by this hash; Codex 0.166
+// computes the same from the hook's declaration.
+const (
+	cmuxStopCommand = `cmux_cli="${CMUX_BUNDLED_CLI_PATH:-}"; if [ -z "$cmux_cli" ] || [ ! -x "$cmux_cli" ]; then cmux_cli="$(command -v cmux 2>/dev/null || true)"; fi; if [ -n "$CMUX_SURFACE_ID" ] && [ "$CMUX_CODEX_HOOKS_DISABLED" != "1" ] && [ -n "$cmux_cli" ]; then { if [ -n "${CMUX_SOCKET_PATH:-}" ]; then "$cmux_cli" --socket "$CMUX_SOCKET_PATH" hooks codex stop; else "$cmux_cli" hooks codex stop; fi; } || echo '{}'; else echo '{}'; fi`
+	cmuxStopHash    = "sha256:3e746383de27a92b00122a59378d18810543e95de4d66d88ee4429cd2c9e019e"
+)
+
+func TestCodexTrustHashMatchesCodex(t *testing.T) {
+	got, err := codexTrustHash(codexHook{event: "Stop", command: cmuxStopCommand, timeout: 5})
+	if err != nil || got != cmuxStopHash {
+		t.Fatalf("hash = %q, %v; want %q", got, err, cmuxStopHash)
+	}
+}
+
+func TestCodexTrustHashRefusesCommandsItCannotEncodeAsCodexDoes(t *testing.T) {
+	for _, command := range []string{"a\tb", "café", "a\x00"} {
+		if _, err := codexTrustHash(codexHook{event: "Stop", command: command, timeout: 5}); err == nil {
+			t.Fatalf("hash of %q accepted", command)
+		}
+	}
+}
+
+type codexGroup struct {
+	Hooks []struct {
+		Type    string `toml:"type"`
+		Command string `toml:"command"`
+		Timeout int    `toml:"timeout"`
+	} `toml:"hooks"`
+}
+
+// codexOverride reads the hooks override a launch passes Codex.
+func codexOverride(t *testing.T, argv []string) map[string]any {
+	t.Helper()
+	i := slices.Index(argv, "-c")
+	if i < 0 || !strings.HasPrefix(argv[i+1], "hooks=") {
+		t.Fatalf("no hooks override in %q", argv)
+	}
+	var doc map[string]any
+	if err := toml.Unmarshal([]byte(argv[i+1]), &doc); err != nil {
+		t.Fatalf("override is not TOML: %v\n%s", err, argv[i+1])
+	}
+	return doc["hooks"].(map[string]any)
+}
+
+func groupsOf(t *testing.T, hooks map[string]any, event string) []codexGroup {
+	t.Helper()
+	data, err := toml.Marshal(map[string]any{"g": hooks[event]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		G []codexGroup `toml:"g"`
+	}
+	if err := toml.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.G
+}
+
+// checkTrusted asserts that every hook the override declares is trusted by
+// the hash Codex computes for it, under the key Codex looks it up by.
+func checkTrusted(t *testing.T, hooks map[string]any) {
+	t.Helper()
+	state := hooks["state"].(map[string]any)
+	n := 0
+	for event := range hooks {
+		if event == "state" {
+			continue
+		}
+		for g, group := range groupsOf(t, hooks, event) {
+			h := group.Hooks[0]
+			want, err := codexTrustHash(codexHook{event: event, command: h.Command, timeout: h.Timeout})
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := codexHookKey(event, g)
+			entry, ok := state[key].(map[string]any)
+			if !ok || entry["trusted_hash"] != want {
+				t.Fatalf("state[%q] = %v, want trusted_hash %q", key, state[key], want)
+			}
+			n++
+		}
+	}
+	if len(state) != n {
+		t.Fatalf("state has %d entries for %d hooks", len(state), n)
+	}
+}
+
+func TestCodexHooksReportEveryEventToTheBox(t *testing.T) {
+	l := testLayout(t)
+	argv, err := withCodexHooks(l, []string{"codex", "resume", "x"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(argv[:4], []string{"codex", "--no-daemon", "--enable", "hooks"}) || !slices.Equal(argv[6:], []string{"resume", "x"}) {
+		t.Fatalf("argv = %q", argv)
+	}
+	hooks := codexOverride(t, argv)
+	for _, event := range reaper.CodexHookEvents {
+		groups := groupsOf(t, hooks, event)
+		if len(groups) != 1 || groups[0].Hooks[0].Command != shellQuote(l.Binary())+" activity" || groups[0].Hooks[0].Type != "command" {
+			t.Fatalf("%s hooks = %+v", event, groups)
+		}
+	}
+	if len(hooks) != len(reaper.CodexHookEvents)+1 {
+		t.Fatalf("hooks = %v", hooks)
+	}
+	checkTrusted(t, hooks)
+}
+
+func TestCodexHooksRelayCmuxsHooksToTheLaptop(t *testing.T) {
+	l := testLayout(t)
+	argv, err := withCodexHooks(l, []string{"codex"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := codexOverride(t, argv)
+	cmux := shellQuote(filepath.Join(l.HookBin(), "cmux"))
+	for _, h := range cmuxcodex.Hooks {
+		groups := groupsOf(t, hooks, h.Event)
+		last := groups[len(groups)-1].Hooks[0]
+		if last.Command != cmux+" "+strings.Join(h.Argv, " ") {
+			t.Fatalf("%s relays %q", h.Event, last.Command)
+		}
+	}
+	// Each event runs the box's hook as well as cmux's.
+	if groups := groupsOf(t, hooks, "SessionStart"); len(groups) != 2 || !strings.HasSuffix(groups[0].Hooks[0].Command, " activity") {
+		t.Fatalf("SessionStart hooks = %+v", groups)
+	}
+	checkTrusted(t, hooks)
+}
+
+// Codex refuses --no-daemon given twice at the same level.
+func TestCodexHooksKeepAGivenNoDaemon(t *testing.T) {
+	argv, err := withCodexHooks(testLayout(t), []string{"codex", "--no-daemon", "hi"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(strings.Join(argv, "\n"), "--no-daemon"); n != 1 {
+		t.Fatalf("argv = %q", argv)
+	}
+}
+
+func lockFile(t *testing.T, path string) func() {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	return func() { f.Close() }
+}
+
+const codexSession = "01a1a1e4-7eb1-7753-927c-b59c2ec2f926"
+
+func TestCodexHeldFollowsTheSessionsWriterLock(t *testing.T) {
+	home := t.TempDir()
+	if held, err := codexHeld(home, codexSession); err != nil || held {
+		t.Fatalf("held = %v, %v before any Codex ran", held, err)
+	}
+	locks := filepath.Join(home, "thread-writer-locks")
+	unlock := lockFile(t, filepath.Join(locks, codexSession+".lock"))
+	if err := os.WriteFile(filepath.Join(locks, ".coordination.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := codexHeld(home, codexSession); err != nil || !held {
+		t.Fatalf("held = %v, %v while locked", held, err)
+	}
+	if held, err := codexHeld(home, "01a1a1e4-0000-7753-927c-b59c2ec2f926"); err != nil || held {
+		t.Fatalf("another session held = %v, %v", held, err)
+	}
+	unlock()
+	if held, err := codexHeld(home, codexSession); err != nil || held {
+		t.Fatalf("held = %v, %v after the writer exited", held, err)
+	}
+}
+
+func TestAwaitCodexReleaseWaitsForTheWriter(t *testing.T) {
+	home := t.TempDir()
+	locks := filepath.Join(home, "thread-writer-locks")
+	unlock := lockFile(t, filepath.Join(locks, codexSession+".lock"))
+	if err := os.WriteFile(filepath.Join(locks, ".coordination.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		unlock()
+	}()
+	var logged []string
+	start := time.Now()
+	if err := awaitRelease(codexSession, 5*time.Second, codexProbe(home, codexSession), recordLog(&logged)); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < 300*time.Millisecond || len(logged) != 2 {
+		t.Fatalf("returned after %s, logged %q", time.Since(start), logged)
+	}
+}
+
+// A Codex taking or giving up a session lock holds the coordination lock meanwhile.
+func TestCodexHeldRetriesWhileACodexCoordinates(t *testing.T) {
+	home := t.TempDir()
+	unlock := lockFile(t, filepath.Join(home, "thread-writer-locks", ".coordination.lock"))
+	defer unlock()
+	if _, unsure, err := codexProbe(home, codexSession)(); err != nil || unsure == nil {
+		t.Fatalf("probe = %v, %v; want unsure", unsure, err)
+	}
+}
+
+func TestCodexHomeFollowsCodexHome(t *testing.T) {
+	l := testLayout(t)
+	if got := codexHome(l, nil); got != filepath.Join(l.Home, ".codex") {
+		t.Fatalf("default home = %q", got)
+	}
+	if got := codexHome(l, []string{"CODEX_HOME=/elsewhere"}); got != "/elsewhere" {
+		t.Fatalf("home = %q", got)
+	}
+}
+
+func codexSpec(work string) spec.Spec {
+	s := sessionSpec(work, "codex", "--yolo")
+	s.Session = "codex-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	s.Codex = &spec.Agent{Resume: []string{"codex", "--yolo"}}
+	return s
+}
+
+// Codex has written a session's rollout by the time its hooks report it.
+func TestARelaunchResumesTheCodexSessionTheHooksReported(t *testing.T) {
+	l := testLayout(t)
+	s := codexSpec("/w")
+	missing := filepath.Join(t.TempDir(), "rollout.jsonl")
+	lostLaunch(t, l, s, runRecord{}, reaper.HookState{AgentSession: codexSession, Transcript: missing})
+	if _, lost, err := resumeLostLaunch(l, &s, noLog); err != nil || !lost {
+		t.Fatal(err)
+	}
+	if !slices.Equal(s.Argv, []string{"codex", "--yolo", "resume", codexSession}) {
+		t.Fatalf("argv = %q", s.Argv)
+	}
+}
+
+func TestReattachTargetResumesAReapedCodexRun(t *testing.T) {
+	s := codexSpec("/w")
+	target, err := reattachTarget(reapedSessionRecord{Reason: reaper.ReapedIdle, AgentSession: codexSession, Spec: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(target.Argv, []string{"codex", "--yolo", "resume", codexSession}) || target.Codex.Resumes != codexSession {
+		t.Fatalf("target = %+v", target)
+	}
+	cmd, err := resumeCommand(reapedSessionRecord{AgentSession: codexSession, Spec: s})
+	if err != nil || cmd != "rcodex resume "+codexSession {
+		t.Fatalf("resume command = %q, %v", cmd, err)
+	}
+}
+
+func TestTakesSessionPerKind(t *testing.T) {
+	if got := (codexKind{}).takesSession([]string{"--no-daemon", "resume", codexSession}); got != codexSession {
+		t.Fatalf("codex takes %q", got)
+	}
+	if got := (claudeKind{}).takesSession([]string{"--session-id", commandSession}); got != commandSession {
+		t.Fatalf("claude takes %q", got)
+	}
+}
+
+func sha256Hex(data string) string {
+	sum := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(sum[:])
+}
+
+// The trust identity is the declaration with sorted keys and nothing escaped beyond JSON's minimum.
+func TestCodexTrustHashKeepsShellQuotesAndSlashesVerbatim(t *testing.T) {
+	cmd := `'/home/a b/x' activity <"&">`
+	want := `{"event_name":"session_start","hooks":[{"async":false,"command":"'/home/a b/x' activity <\"&\">","timeout":10,"type":"command"}]}`
+	got, err := codexTrustHash(codexHook{event: "SessionStart", command: cmd, timeout: 10})
+	if err != nil || got != "sha256:"+sha256Hex(want) {
+		t.Fatalf("hash = %q, %v", got, err)
+	}
+}

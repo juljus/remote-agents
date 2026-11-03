@@ -40,19 +40,30 @@ type Spec struct {
 	Env     map[string]string `json:"env,omitempty"`
 	// HookRelay routes the agent's cmux hook commands to the laptop.
 	HookRelay bool `json:"hook_relay,omitempty"`
-	// Claude is set when the agent is Claude Code: the box then watches its
-	// activity, may end it while detached and idle, and resumes it after that.
-	Claude *Claude `json:"claude,omitempty"`
+	// Claude or Codex is set when the agent is Claude Code or Codex: the box
+	// then follows its session, may end it while detached and idle, and
+	// resumes it after that.
+	Claude *Agent `json:"claude,omitempty"`
+	Codex  *Agent `json:"codex,omitempty"`
 }
 
-type Claude struct {
-	// Resume is the command line that, followed by --resume <id>, resumes the session.
+type Agent struct {
+	// Resume is the command line that, followed by the agent's resume
+	// arguments for an id (--resume <id>, resume <id>), resumes the session.
 	Resume []string `json:"resume"`
-	// Resumes is the Claude session id this run resumes, or "".
+	// Resumes is the agent session id this run resumes, or "".
 	Resumes string `json:"resumes,omitempty"`
 }
 
-func (c *Claude) validate() error {
+// Followed is the agent whose session the box follows, or nil.
+func (s Spec) Followed() *Agent {
+	if s.Claude != nil {
+		return s.Claude
+	}
+	return s.Codex
+}
+
+func (c *Agent) validate() error {
 	if len(c.Resume) == 0 || c.Resume[0] == "" {
 		return errors.New("empty resume command")
 	}
@@ -119,8 +130,11 @@ func (s Spec) Validate() error {
 		if err := s.validateAttempt(); err != nil {
 			return err
 		}
-		if s.Claude != nil {
-			if err := s.Claude.validate(); err != nil {
+		if s.Claude != nil && s.Codex != nil {
+			return errors.New("a session spec follows one agent, not Claude and Codex")
+		}
+		if a := s.Followed(); a != nil {
+			if err := a.validate(); err != nil {
 				return err
 			}
 		}
@@ -137,12 +151,12 @@ func (s Spec) Validate() error {
 				return fmt.Errorf("invalid run id %q: %w", s.RunID, err)
 			}
 		}
-		if len(s.Argv) != 0 || s.Claude != nil {
+		if len(s.Argv) != 0 || s.Followed() != nil {
 			return errors.New("reattach spec must not carry a command")
 		}
 		return nil
 	case ModeExec:
-		if s.Session != "" || s.RunID != "" || s.Attempt != 0 || s.Claude != nil {
+		if s.Session != "" || s.RunID != "" || s.Attempt != 0 || s.Followed() != nil {
 			return errors.New("exec spec must not name a session")
 		}
 		return s.validateRun()

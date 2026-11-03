@@ -17,7 +17,7 @@ func validSession() Spec {
 		Argv:      []string{"claude", "--session-id", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "it's \"quoted\" $HOME"},
 		Env:       map[string]string{"TERM": "xterm-256color"},
 		HookRelay: true,
-		Claude: &Claude{
+		Claude: &Agent{
 			Resume:  []string{"claude", "--dangerously-skip-permissions"},
 			Resumes: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
 		},
@@ -59,6 +59,14 @@ func TestValidate(t *testing.T) {
 		"exec attempt": func(s *Spec) {
 			s.Mode, s.Session, s.RunID, s.Claude, s.Attempt = ModeExec, "", "", nil, 1
 		},
+		"claude and codex": func(s *Spec) { s.Codex = &Agent{Resume: []string{"codex"}} },
+		"reattach codex": func(s *Spec) {
+			s.Mode, s.Argv, s.RunID, s.Claude, s.Codex = ModeReattach, nil, "", nil, &Agent{Resume: []string{"codex"}}
+		},
+		"exec codex": func(s *Spec) {
+			s.Mode, s.Session, s.RunID, s.Attempt, s.Claude, s.Codex = ModeExec, "", "", 0, nil, &Agent{Resume: []string{"codex"}}
+		},
+		"bad codex resumes":   func(s *Spec) { s.Claude, s.Codex = nil, &Agent{Resume: []string{"codex"}, Resumes: "x"} },
 		"reattach bad run id": func(s *Spec) { s.Mode, s.Argv, s.Claude, s.RunID = ModeReattach, nil, nil, "nope" },
 		"attempt without run": func(s *Spec) { s.Mode, s.Argv, s.Claude, s.RunID, s.Attempt = ModeReattach, nil, nil, "", 2 },
 	}
@@ -73,6 +81,21 @@ func TestValidate(t *testing.T) {
 				t.Fatalf("Encode accepted an invalid spec")
 			}
 		})
+	}
+}
+
+func TestValidCodexSession(t *testing.T) {
+	s := validSession()
+	s.Session = "codex-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	s.Argv = []string{"codex", "resume", "01a1a1e4-7eb1-7753-927c-b59c2ec2f926"}
+	s.Claude, s.Codex = nil, &Agent{Resume: []string{"codex", "--yolo"}, Resumes: "01a1a1e4-7eb1-7753-927c-b59c2ec2f926"}
+	enc, err := s.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	out, err := Decode(enc)
+	if err != nil || !reflect.DeepEqual(s, out) {
+		t.Fatalf("round trip = %+v, %v", out, err)
 	}
 }
 

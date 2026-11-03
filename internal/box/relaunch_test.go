@@ -180,12 +180,12 @@ func TestTheWatcherKeepsTheRunRecordCurrent(t *testing.T) {
 	}
 }
 
-func TestAgentSessionsDirFollowsClaudeConfigDir(t *testing.T) {
+func TestClaudeSessionsDirFollowsClaudeConfigDir(t *testing.T) {
 	l := boxlayout.Layout{Home: "/home/agent", Name: boxlayout.DefaultName}
-	if got := agentSessionsDir(l, []string{"HOME=/home/agent"}); got != "/home/agent/.claude/sessions" {
+	if got := claudeSessionsDir(l, []string{"HOME=/home/agent"}); got != "/home/agent/.claude/sessions" {
 		t.Fatalf("default = %q", got)
 	}
-	if got := agentSessionsDir(l, []string{"CLAUDE_CONFIG_DIR=/cfg"}); got != "/cfg/sessions" {
+	if got := claudeSessionsDir(l, []string{"CLAUDE_CONFIG_DIR=/cfg"}); got != "/cfg/sessions" {
 		t.Fatalf("with CLAUDE_CONFIG_DIR = %q", got)
 	}
 }
@@ -219,10 +219,10 @@ func TestAwaitReleaseIgnoresClaudesThatDoNotHoldTheSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logged []string
-	if err := awaitRelease(dir, liveProcs, heldSession, time.Second, recordLog(&logged)); err != nil || len(logged) != 0 {
+	if err := awaitRelease(heldSession, time.Second, claudeProbe(dir, liveProcs, heldSession), recordLog(&logged)); err != nil || len(logged) != 0 {
 		t.Fatalf("await = %v, logged %q", err, logged)
 	}
-	if err := awaitRelease(filepath.Join(dir, "missing"), liveProcs, heldSession, time.Second, noLog); err != nil {
+	if err := awaitRelease(heldSession, time.Second, claudeProbe(filepath.Join(dir, "missing"), liveProcs, heldSession), noLog); err != nil {
 		t.Fatalf("no registry: %v", err)
 	}
 }
@@ -236,7 +236,7 @@ func TestAwaitReleaseWaitsForTheHolderToExit(t *testing.T) {
 	}()
 	var logged []string
 	start := time.Now()
-	if err := awaitRelease(dir, liveProcs, heldSession, 5*time.Second, recordLog(&logged)); err != nil {
+	if err := awaitRelease(heldSession, 5*time.Second, claudeProbe(dir, liveProcs, heldSession), recordLog(&logged)); err != nil {
 		t.Fatal(err)
 	}
 	if time.Since(start) < 300*time.Millisecond {
@@ -251,7 +251,7 @@ func TestAwaitReleaseFailsNamingAHolderThatStays(t *testing.T) {
 	dir := t.TempDir()
 	register(t, dir, 10, heldSession, "100")
 	var logged []string
-	err := awaitRelease(dir, liveProcs, heldSession, 300*time.Millisecond, recordLog(&logged))
+	err := awaitRelease(heldSession, 300*time.Millisecond, claudeProbe(dir, liveProcs, heldSession), recordLog(&logged))
 	if err == nil || !strings.Contains(err.Error(), "pid 10") || !strings.Contains(err.Error(), heldSession) {
 		t.Fatalf("await = %v", err)
 	}
@@ -271,7 +271,7 @@ func TestAwaitReleaseRereadsARegistrationCaughtMidWrite(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		os.WriteFile(path, []byte(written), 0o600)
 	}()
-	if err := awaitRelease(dir, liveProcs, heldSession, 5*time.Second, noLog); err != nil {
+	if err := awaitRelease(heldSession, 5*time.Second, claudeProbe(dir, liveProcs, heldSession), noLog); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -282,7 +282,7 @@ func TestAwaitReleaseSkipsAnUnreadableRegistrationOfAnExitedClaude(t *testing.T)
 	if err := os.WriteFile(filepath.Join(dir, "12.json"), []byte(`{"pid":12,"sess`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := awaitRelease(dir, liveProcs, heldSession, time.Second, noLog); err != nil {
+	if err := awaitRelease(heldSession, time.Second, claudeProbe(dir, liveProcs, heldSession), noLog); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -292,7 +292,7 @@ func TestAwaitReleaseFailsOnARegistrationThatStaysUnreadable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "11.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := awaitRelease(dir, liveProcs, heldSession, 300*time.Millisecond, noLog); err == nil || !strings.Contains(err.Error(), "11.json") {
+	if err := awaitRelease(heldSession, 300*time.Millisecond, claudeProbe(dir, liveProcs, heldSession), noLog); err == nil || !strings.Contains(err.Error(), "11.json") {
 		t.Fatalf("await = %v", err)
 	}
 }
@@ -300,7 +300,7 @@ func TestAwaitReleaseFailsOnARegistrationThatStaysUnreadable(t *testing.T) {
 func TestAwaitReleaseRejectsARegistrationWithoutAStartTime(t *testing.T) {
 	dir := t.TempDir()
 	register(t, dir, 10, heldSession, "")
-	if err := awaitRelease(dir, liveProcs, heldSession, time.Second, noLog); err == nil {
+	if err := awaitRelease(heldSession, time.Second, claudeProbe(dir, liveProcs, heldSession), noLog); err == nil {
 		t.Fatal("a registration that cannot be told from a reused pid was accepted")
 	}
 }

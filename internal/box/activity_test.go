@@ -33,14 +33,14 @@ func TestActivitySettingsRunTheBoxBinaryForEveryEvent(t *testing.T) {
 	if err := json.Unmarshal([]byte(argv[2]), &settings); err != nil {
 		t.Fatal(err)
 	}
-	for _, event := range reaper.HookEvents {
+	for _, event := range reaper.ClaudeHookEvents {
 		m := settings.Hooks[event]
 		if len(m) != 1 || len(m[0].Hooks) != 1 || m[0].Hooks[0].Type != "command" ||
 			m[0].Hooks[0].Command != activityCommand {
 			t.Fatalf("%s hooks = %+v", event, m)
 		}
 	}
-	if len(settings.Hooks) != len(reaper.HookEvents) {
+	if len(settings.Hooks) != len(reaper.ClaudeHookEvents) {
 		t.Fatalf("hooks = %+v", settings.Hooks)
 	}
 }
@@ -106,7 +106,7 @@ func TestActivityHooksJoinTheSettingsClaudeApplies(t *testing.T) {
 				!slices.Equal(got["PreToolUse"], []string{"cmux hooks claude pre-tool-use"}) {
 				t.Fatalf("hooks = %v", got)
 			}
-			for _, event := range reaper.HookEvents {
+			for _, event := range reaper.ClaudeHookEvents {
 				if !slices.Contains(got[event], activityCommand) {
 					t.Fatalf("%s hooks = %v", event, got[event])
 				}
@@ -203,7 +203,7 @@ func TestReapedRecordIsTakenOnce(t *testing.T) {
 
 func claudeSpec(work string) spec.Spec {
 	s := sessionSpec(work, "claude", "--session-id", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
-	s.Claude = &spec.Claude{Resume: []string{"claude", "--dangerously-skip-permissions"}}
+	s.Claude = &spec.Agent{Resume: []string{"claude", "--dangerously-skip-permissions"}}
 	return s
 }
 

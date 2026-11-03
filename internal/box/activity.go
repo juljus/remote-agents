@@ -73,7 +73,7 @@ func activitySettings(l boxlayout.Layout, base []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encoding activity hooks: %w", err)
 	}
-	for _, event := range reaper.HookEvents {
+	for _, event := range reaper.ClaudeHookEvents {
 		hooks[event] = append(hooks[event], ours)
 	}
 	if settings["hooks"], err = json.Marshal(hooks); err != nil {
@@ -215,21 +215,26 @@ func takeReaped(l boxlayout.Layout, agentSession string) (reaper.Reason, error) 
 // reattachTarget is the run an attach by name of a reaped session resumes.
 func reattachTarget(rec reapedSessionRecord) (spec.Spec, error) {
 	s := rec.Spec
-	if s.Claude == nil {
+	agent := s.Followed()
+	if agent == nil {
 		return spec.Spec{}, fmt.Errorf("reaped session %s has no resume command", s.Session)
 	}
-	s.Argv = slices.Concat(s.Claude.Resume, []string{"--resume", rec.AgentSession})
-	s.Claude.Resumes = rec.AgentSession
+	s.Argv = resumeArgv(s, rec.AgentSession)
+	agent.Resumes = rec.AgentSession
 	return s, s.Validate()
 }
 
 // resumeCommand is the laptop command that resumes a reaped session.
 func resumeCommand(rec reapedSessionRecord) (string, error) {
-	agent, err := spec.AgentOf(rec.Spec.Session)
+	name, err := spec.AgentOf(rec.Spec.Session)
 	if err != nil {
 		return "", err
 	}
-	return entrypoint.Name(agent) + " --resume " + rec.AgentSession, nil
+	kind, agent := followed(rec.Spec)
+	if agent == nil {
+		return "", fmt.Errorf("reaped session %s has no resume command", rec.Spec.Session)
+	}
+	return strings.Join(slices.Concat([]string{entrypoint.Name(name)}, kind.resumeArgs(rec.AgentSession)), " "), nil
 }
 
 func endedWhy(r reaper.Reason) string {

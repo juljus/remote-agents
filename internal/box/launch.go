@@ -7,13 +7,11 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
 
 	"remote-agents/internal/boxlayout"
-	"remote-agents/internal/claudeargs"
 	"remote-agents/internal/jsonfile"
 	"remote-agents/internal/reaper"
 	"remote-agents/internal/spec"
@@ -144,14 +142,15 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	if ended && (m.Reason == "" || s.Claude == nil) {
+	kind, agent := followed(s)
+	if ended && (m.Reason == "" || agent == nil) {
 		fmt.Fprintf(stdio.Stderr, "remote-agents: session %s ended while the link was down (exit code %d)\n", s.Session, m.ExitCode)
 		return m.ExitCode
 	}
 	logf := sessionLog(l, s.Session, stdio.Stderr)
 	var rec runRecord
 	resumedLost := false
-	if s.Claude != nil {
+	if agent != nil {
 		if rec, resumedLost, err = resumeLostLaunch(l, &s, logf); err != nil {
 			return fail(err)
 		}
@@ -169,13 +168,13 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 		return fail(err)
 	}
 	var w *watcher
-	if s.Claude != nil {
-		if id, _ := claudeargs.SessionOf(s.Argv[1:]); id != "" {
-			if err := awaitRelease(agentSessionsDir(l, env), os.DirFS("/proc"), id, releaseWait, logf); err != nil {
+	if agent != nil {
+		if id := kind.takesSession(s.Argv[1:]); id != "" {
+			if err := awaitRelease(id, releaseWait, kind.holder(l, env, id), logf); err != nil {
 				return fail(err)
 			}
 		}
-		if s.Argv, err = withActivityHooks(l, s.Argv, s.Workdir); err != nil {
+		if s.Argv, err = kind.withHooks(l, s); err != nil {
 			return fail(err)
 		}
 		if w, err = newWatcher(l, s.Session, s.RunID, rec, now); err != nil {
@@ -219,16 +218,17 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 // run's marker says so, and reports the reap a resume of it follows.
 func resumeAfterReap(l boxlayout.Layout, s *spec.Spec, m marker, ended bool) (reaper.Reason, error) {
 	if ended {
-		s.Argv = slices.Concat(s.Claude.Resume, []string{"--resume", m.AgentSession})
+		s.Argv = resumeArgv(*s, m.AgentSession)
 		if _, err := takeReaped(l, m.AgentSession); err != nil {
 			return "", err
 		}
 		return m.Reason, nil
 	}
-	if s.Claude == nil || s.Claude.Resumes == "" {
+	agent := s.Followed()
+	if agent == nil || agent.Resumes == "" {
 		return "", nil
 	}
-	return takeReaped(l, s.Claude.Resumes)
+	return takeReaped(l, agent.Resumes)
 }
 
 // runChild runs the agent until it exits. With a watcher, the agent is ended

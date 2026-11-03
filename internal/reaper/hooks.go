@@ -13,8 +13,12 @@ import (
 	"remote-agents/internal/jsonfile"
 )
 
-// HookEvents are the Claude Code hooks whose reports HookState follows.
-var HookEvents = []string{"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "SubagentStop", "Notification"}
+// ClaudeHookEvents and CodexHookEvents are the hooks of Claude Code and of
+// Codex whose reports HookState follows.
+var (
+	ClaudeHookEvents = []string{"SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "SubagentStop", "Notification"}
+	CodexHookEvents  = []string{"SessionStart", "UserPromptSubmit", "Stop", "Interrupt", "PermissionRequest"}
+)
 
 // waitingNotifications are the notifications Claude sends when it stops to wait for its user.
 var waitingNotifications = []string{"permission_prompt", "elicitation_dialog"}
@@ -58,7 +62,7 @@ func (h HookState) Apply(raw []byte, now time.Time) (HookState, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return h, fmt.Errorf("parsing hook payload: %w", err)
 	}
-	if !slices.Contains(HookEvents, p.Event) {
+	if !slices.Contains(ClaudeHookEvents, p.Event) && !slices.Contains(CodexHookEvents, p.Event) {
 		return h, fmt.Errorf("unexpected hook event %q", p.Event)
 	}
 	if p.SessionID != "" {
@@ -70,12 +74,14 @@ func (h HookState) Apply(raw []byte, now time.Time) (HookState, error) {
 	switch p.Event {
 	case "UserPromptSubmit":
 		h.TurnStarted, h.WaitingSince = now.UnixMilli(), 0
-	case "Stop", "StopFailure":
+	case "Stop", "StopFailure", "Interrupt":
 		h.TurnEnded, h.WaitingSince = now.UnixMilli(), 0
 	case "Notification":
 		if slices.Contains(waitingNotifications, p.Notification) {
 			h.WaitingSince = now.UnixMilli()
 		}
+	case "PermissionRequest":
+		h.WaitingSince = now.UnixMilli()
 	}
 	if p.BackgroundTasks != nil {
 		h.BackgroundTasks = 0
@@ -122,7 +128,8 @@ func RecordHook(path string, raw []byte, now time.Time) error {
 }
 
 // Interrupted reports whether the transcript tail shows the user interrupting
-// a turn at or after since; Claude sends no Stop hook for an interrupted turn.
+// a turn at or after since; Claude sends no Stop hook for an interrupted
+// turn. Codex reports it with its Interrupt hook.
 func Interrupted(tail []byte, since time.Time) bool {
 	for _, line := range bytes.Split(tail, []byte("\n")) {
 		var e struct {

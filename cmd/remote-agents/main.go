@@ -182,7 +182,7 @@ func runAgent(agentName string, args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	claude := &spec.Claude{Resume: append([]string{agent.Command}, claudeargs.ResumeBase(agentArgs)...)}
+	claude := &spec.Agent{Resume: append([]string{agent.Command}, claudeargs.ResumeBase(agentArgs)...)}
 	if plan.Resumes {
 		claude.Resumes = plan.SessionID
 	}

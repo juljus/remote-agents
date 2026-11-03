@@ -123,10 +123,11 @@ func Running(proc fs.FS, pid int, startTime uint64) (bool, error) {
 	return !p.Zombie && p.StartTime == startTime, nil
 }
 
-// toolShell reports a shell Claude Code's Bash tool runs a command in.
+// toolShell reports a shell that Claude Code's Bash tool or Codex's shell
+// tool runs a command in: both source a snapshot of the user's shell first.
 func toolShell(args []string) bool {
 	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "-c" && strings.Contains(args[i+1], "/.claude/shell-snapshots/snapshot-") {
+		if args[i] == "-c" && (strings.Contains(args[i+1], "/.claude/shell-snapshots/snapshot-") || strings.Contains(args[i+1], "/shell_snapshots/")) {
 			return true
 		}
 	}

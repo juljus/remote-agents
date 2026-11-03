@@ -101,6 +101,28 @@ func TestHookStateFollowsWaitingOnTheUser(t *testing.T) {
 	}
 }
 
+func TestHookStateFollowsCodexTurns(t *testing.T) {
+	var h HookState
+	h = apply(t, h, t0, `{"hook_event_name":"SessionStart","session_id":"c1","transcript_path":"/p/rollout-c1.jsonl","source":"startup","cwd":"/w","model":"m","permission_mode":"default"}`)
+	h = apply(t, h, t0.Add(time.Second), `{"hook_event_name":"UserPromptSubmit","session_id":"c1","turn_id":"t1","transcript_path":"/p/rollout-c1.jsonl"}`)
+	if h.AgentSession != "c1" || h.Transcript != "/p/rollout-c1.jsonl" || !h.TurnOpen() {
+		t.Fatalf("after prompt: %+v", h)
+	}
+	h = apply(t, h, t0.Add(2*time.Second), `{"hook_event_name":"PermissionRequest","session_id":"c1","turn_id":"t1","tool_name":"Bash","tool_input":{}}`)
+	if h.WaitingSince != t0.Add(2*time.Second).UnixMilli() {
+		t.Fatalf("permission request: %+v", h)
+	}
+	// Codex reports an interrupted turn, which then has no Stop.
+	h = apply(t, h, t0.Add(3*time.Second), `{"hook_event_name":"Interrupt","session_id":"c1","turn_id":"t1","transcript_path":null}`)
+	if h.TurnOpen() || h.WaitingSince != 0 || h.Transcript != "/p/rollout-c1.jsonl" {
+		t.Fatalf("interrupt: %+v", h)
+	}
+	h = apply(t, h, t0.Add(4*time.Second), `{"hook_event_name":"UserPromptSubmit","session_id":"c1"}`)
+	if h = apply(t, h, t0.Add(5*time.Second), `{"hook_event_name":"Stop","session_id":"c1","last_assistant_message":null}`); h.TurnOpen() {
+		t.Fatalf("stop: %+v", h)
+	}
+}
+
 func TestHookStateRejectsUnknownPayloads(t *testing.T) {
 	for _, p := range []string{`not json`, `{"hook_event_name":"PreToolUse"}`, `{}`} {
 		if _, err := (HookState{}).Apply([]byte(p), t0); err == nil {
@@ -186,6 +208,9 @@ func readFixture(t *testing.T, procs map[int]fakeProc) []Proc {
 	return list
 }
 
+// Codex sources its shell snapshot before each command, under the variables the snapshot must not replay.
+var codexToolShellArgs = []string{"/bin/bash", "-c", "__CODEX_SNAPSHOT_OVERRIDE_SET_0=x\nif . '/home/agent/.codex/shell_snapshots/01a1a1e4.1793717490813164000.sh' >/dev/null 2>&1; then :; fi\nexec '/bin/bash' -c 'sleep 25'"}
+
 var toolShellArgs = []string{"/bin/bash", "-c", "source /home/agent/.claude/shell-snapshots/snapshot-bash-1-x.sh 2>/dev/null || true && sleep 25"}
 
 func with(base map[int]fakeProc, extra map[int]fakeProc) map[int]fakeProc {
@@ -259,6 +284,10 @@ func TestToolShells(t *testing.T) {
 	})
 	if n := ToolShells(readFixture(t, shell), agent); n != 1 {
 		t.Fatalf("tool shell count = %d, want 1", n)
+	}
+	codex := with(session, map[int]fakeProc{200: {"bash", "S", agent, 0, codexToolShellArgs, 0, 0}})
+	if n := ToolShells(readFixture(t, codex), agent); n != 1 {
+		t.Fatalf("Codex tool shell count = %d, want 1", n)
 	}
 	nested := with(session, map[int]fakeProc{200: {"bash", "S", 102, 0, toolShellArgs, 0, 0}})
 	if n := ToolShells(readFixture(t, nested), agent); n != 1 {

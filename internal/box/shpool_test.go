@@ -75,19 +75,24 @@ func TestFormatSessions(t *testing.T) {
 func TestFormatReapedShowsRecentReapsWithTheirResumeCommand(t *testing.T) {
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	rec := func(name, id string, r reaper.Reason, ago time.Duration) reapedSessionRecord {
-		return reapedSessionRecord{Reason: r, AgentSession: id, At: now.Add(-ago).UnixMilli(), Spec: spec.Spec{Session: name}}
+		s := spec.Spec{Session: name, Claude: &spec.Agent{Resume: []string{"claude"}}}
+		if strings.HasPrefix(name, "codex-") {
+			s.Claude, s.Codex = nil, &spec.Agent{Resume: []string{"codex"}}
+		}
+		return reapedSessionRecord{Reason: r, AgentSession: id, At: now.Add(-ago).UnixMilli(), Spec: s}
 	}
 	var out bytes.Buffer
 	err := formatReaped(&out, []reapedSessionRecord{
 		rec("claude-11111111-bbbb-4ccc-8ddd-eeeeeeeeeeee", "aaa", reaper.ReapedIdle, time.Hour),
 		rec("fakeclaude-22222222-bbbb-4ccc-8ddd-eeeeeeeeeeee", "bbb", reaper.ReapedCap, 2*time.Hour),
 		rec("claude-33333333-bbbb-4ccc-8ddd-eeeeeeeeeeee", "ccc", reaper.ReapedIdle, 8*24*time.Hour),
+		rec("codex-44444444-bbbb-4ccc-8ddd-eeeeeeeeeeee", "ddd", reaper.ReapedIdle, 3*time.Hour),
 	}, now, time.UTC)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
-	for _, want := range []string{"REAPED", "2026-10-27 11:00  idle               rclaude --resume aaa", "detached too long  rfakeclaude --resume bbb"} {
+	for _, want := range []string{"REAPED", "2026-10-27 11:00  idle               rclaude --resume aaa", "detached too long  rfakeclaude --resume bbb", "idle               rcodex resume ddd"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in:\n%s", want, got)
 		}
