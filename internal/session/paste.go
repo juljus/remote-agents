@@ -29,6 +29,8 @@ var finishLimit = time.Minute
 
 var errFinishLimit = errors.New("the box took too long to finish up")
 
+var errAttemptEnded = errors.New("the attempt ended")
+
 // errBoxEnded is what the exchange reads once ssh has exited; its writes fail
 // with EPIPE, or ErrClosed once the pipe is closed under them.
 var errBoxEnded = errors.New("the box ended the exchange early")
@@ -85,7 +87,7 @@ type uploaded struct {
 // that failed.
 func upload(ctx context.Context, opts Options, files []paste.File, lateFailure func(error)) (uploaded, error) {
 	sshCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
-	stopFollowing := context.AfterFunc(ctx, func() { cancel(context.Cause(ctx)) })
+	stopFollowing := context.AfterFunc(ctx, func() { cancel(errAttemptEnded) })
 	stall := time.AfterFunc(stallTimeout, func() { cancel(errStalled) })
 	// ssh reads its stdin straight from the pipe, so its exit is not held up by a copy waiting on the laptop.
 	stdinR, stdinW, err := os.Pipe()
@@ -114,13 +116,18 @@ func upload(ctx context.Context, opts Options, files []paste.File, lateFailure f
 	stdoutR.Close()
 	if err == nil {
 		stall.Stop()
-		// When the attempt ended first, ssh is going down with it and the paste is dropped.
-		attemptEnded := !stopFollowing()
+		stopFollowing()
 		finish := time.AfterFunc(finishLimit, func() { cancel(errFinishLimit) })
 		go func() {
 			res := <-ran
 			finish.Stop()
-			if failed := boxFailure(sshCtx, res, opts, &stderr); failed != nil && !attemptEnded {
+			failed := boxFailure(sshCtx, res, opts, &stderr)
+			switch {
+			case failed == nil:
+				opts.Logf("%s: the box finished up after a paste", opts.Spec.Session)
+			// The attempt ended before the paste was through; its drop is logged with it.
+			case errors.Is(failed, errAttemptEnded):
+			default:
 				lateFailure(failed)
 			}
 		}()
@@ -137,21 +144,25 @@ func upload(ctx context.Context, opts Options, files []paste.File, lateFailure f
 	return uploaded{}, err
 }
 
-// boxFailure says how the box's side of an exchange failed, or nil when it ended well.
+// boxFailure says how the box's side of an exchange failed, or nil when it
+// ended well. Only a cancelled ssh has its cancel's cause to blame.
 func boxFailure(ctx context.Context, res reconnect.Result, opts Options, stderr *bytes.Buffer) error {
+	cause := context.Cause(ctx)
 	switch {
 	case res.Err != nil:
 		return res.Err
-	case errors.Is(context.Cause(ctx), errStalled):
-		return fmt.Errorf("the upload to %s stalled for %s", opts.Box.Host, stallTimeout)
-	case errors.Is(context.Cause(ctx), errFinishLimit):
-		return fmt.Errorf("the box took over %s to finish", finishLimit)
-	case res.Transport:
-		return fmt.Errorf("uploading to %s: %s", opts.Box.Host, res.Detail)
-	case res.ExitCode != 0:
+	case !res.Transport && res.ExitCode != 0:
 		return fmt.Errorf("box: %s", strings.TrimPrefix(strings.TrimSpace(stderr.String()), "remote-agents-box: "))
+	case !res.Transport:
+		return nil
+	case errors.Is(cause, errStalled):
+		return fmt.Errorf("the upload to %s stalled for %s", opts.Box.Host, stallTimeout)
+	case errors.Is(cause, errFinishLimit):
+		return fmt.Errorf("the box took over %s to finish", finishLimit)
+	case errors.Is(cause, errAttemptEnded):
+		return errAttemptEnded
 	}
-	return nil
+	return fmt.Errorf("uploading to %s: %s", opts.Box.Host, res.Detail)
 }
 
 // exchange is the laptop's side of paste-files: it asks the box which of

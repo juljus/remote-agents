@@ -332,6 +332,17 @@ func (l *logRecorder) holding(s string) []string {
 	return out
 }
 
+func (l *logRecorder) waitFor(t *testing.T, s string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(l.holding(s)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("never logged %q", s)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // lateBox is a paste-files box that stores one upload at /box/p.png, then runs finish.
 func lateBox(finish string) string {
 	return `printf '1\n0'; cat >/dev/null; printf '10\n/box/p.png'; ` + finish
@@ -381,18 +392,10 @@ func TestTheAttemptEndingLeavesTheBoxToFinishUp(t *testing.T) {
 	if r := wait(t, done); r.err != nil {
 		t.Fatal(r.err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if _, err := os.Stat(finished); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the box was stopped before it finished up")
-		}
-		time.Sleep(50 * time.Millisecond)
+	logs.waitFor(t, "the box finished up after a paste")
+	if _, err := os.Stat(finished); err != nil {
+		t.Fatalf("the box was stopped before it finished up: %v", err)
 	}
-	// The wait's own goroutine logs right after ssh exits.
-	time.Sleep(200 * time.Millisecond)
 	if failed := logs.holding("failed"); len(failed) != 0 {
 		t.Fatalf("logged %q", failed)
 	}
@@ -405,11 +408,12 @@ func TestAPasteThatArrivedIsNoStallWhileTheBoxFinishesUp(t *testing.T) {
 	finished := filepath.Join(t.TempDir(), "finished")
 	var logs logRecorder
 	done := pasteOnce(t, h, echoLine+`; sleep 2; exit 0`, lateBox(`sleep 1; touch '`+finished+`'`), &logs)
+	logs.waitFor(t, "the box finished up after a paste")
+	if _, err := os.Stat(finished); err != nil {
+		t.Fatalf("the box was stopped before it finished up: %v", err)
+	}
 	if r := wait(t, done); r.err != nil {
 		t.Fatal(r.err)
-	}
-	if _, err := os.Stat(finished); err != nil {
-		t.Fatalf("the box was stopped before it finished up: %v; logged %q", err, logs.lines)
 	}
 }
 
