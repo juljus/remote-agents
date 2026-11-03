@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,12 +27,14 @@ type fakeAnthropic struct {
 	mu        sync.Mutex
 	valid     map[string]string // refresh token -> account tag
 	usage     map[string]string // access token -> usage reply
+	tags      map[string]string // access token -> account tag
 	next      int
 	refreshes []string // tags refreshed, in order
+	onRefresh func()
 }
 
 func newFakeAnthropic(t *testing.T) (*fakeAnthropic, claudeauth.Endpoints) {
-	f := &fakeAnthropic{valid: map[string]string{}, usage: map[string]string{}}
+	f := &fakeAnthropic{valid: map[string]string{}, usage: map[string]string{}, tags: map[string]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]string
@@ -41,6 +44,9 @@ func newFakeAnthropic(t *testing.T) (*fakeAnthropic, claudeauth.Endpoints) {
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.onRefresh != nil {
+			f.onRefresh()
+		}
 		tag, ok := f.valid[req["refresh_token"]]
 		if !ok {
 			w.WriteHeader(http.StatusBadRequest)
@@ -53,6 +59,16 @@ func newFakeAnthropic(t *testing.T) (*fakeAnthropic, claudeauth.Endpoints) {
 		// The server numbers what it issues from 101, apart from the tests' own logins.
 		access, refresh := f.issue(tag, 100+f.next)
 		fmt.Fprintf(w, `{"access_token":%q,"refresh_token":%q,"expires_in":28800,"refresh_token_expires_in":2592000,"scope":"user:inference user:profile"}`, access, refresh)
+	})
+	mux.HandleFunc("GET /api/oauth/profile", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		tag, ok := f.tags[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprintf(w, `{"account":{"uuid":"acc-%[1]s","email":"%[1]s@example.com"},"organization":{"uuid":"org-%[1]s"}}`, tag)
 	})
 	mux.HandleFunc("GET /api/oauth/usage", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -73,6 +89,7 @@ func newFakeAnthropic(t *testing.T) (*fakeAnthropic, claudeauth.Endpoints) {
 func (f *fakeAnthropic) issue(tag string, n int) (access, refresh string) {
 	access, refresh = fmt.Sprintf("fake-access-%s-%d", tag, n), fmt.Sprintf("fake-refresh-%s-%d", tag, n)
 	f.valid[refresh] = tag
+	f.tags[access] = tag
 	f.usage[access] = fmt.Sprintf(`{"five_hour":{"utilization":%d,"resets_at":"2026-11-03T15:00:00+00:00"},"seven_day":null}`, len(tag)*10)
 	return access, refresh
 }
@@ -210,9 +227,6 @@ func TestUseSavesTheLiveLoginThenSwitchesTheBox(t *testing.T) {
 	if got := f.liveTokens(); got.RefreshToken != "fake-refresh-home-1" || f.liveEmail() != "home@example.com" {
 		t.Fatalf("live is %s for %s", got.RefreshToken, f.liveEmail())
 	}
-	if _, err := os.Stat(f.vault.journalPath()); !os.IsNotExist(err) {
-		t.Fatalf("journal left: %v", err)
-	}
 	if switched, err := f.vault.Use(ctx, "home"); err != nil || switched {
 		t.Fatalf("Use of the active account = %v, %v", switched, err)
 	}
@@ -231,7 +245,7 @@ func TestUseRefusesToDropAnUnnamedLogin(t *testing.T) {
 	f := newFixture(t)
 	f.setLive(f.login("stray", 1, time.Hour, 20*24*time.Hour), account("stray"))
 	f.seed("home", f.login("home", 1, time.Hour, 20*24*time.Hour), account("home"))
-	if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "stray@example.com under no name") {
+	if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "logged in to stray@example.com; keep that login") {
 		t.Fatalf("err = %v", err)
 	}
 	if f.liveTokens().RefreshToken != "fake-refresh-stray-1" {
@@ -243,7 +257,7 @@ func TestUseRefusesToDropAnUnnamedLogin(t *testing.T) {
 	if err := f.vault.Save(ctx, "stray"); err != nil {
 		t.Fatalf("saving again: %v", err)
 	}
-	if err := f.vault.Save(ctx, "other"); err == nil || !strings.Contains(err.Error(), "already saved as stray") {
+	if err := f.vault.Save(ctx, "other"); err == nil || !strings.Contains(err.Error(), "saved as stray already") {
 		t.Fatalf("second name: %v", err)
 	}
 	if _, err := f.vault.Use(ctx, "home"); err != nil {
@@ -273,39 +287,62 @@ func TestUseRefreshesAnExpiredTargetAndRefusesASignedOutOne(t *testing.T) {
 	}
 }
 
-func TestAnInterruptedSwitchIsFinishedByTheNextCommand(t *testing.T) {
-	cases := map[string]struct {
-		live     func(f *fixture) string
-		wantLive string
-	}{
-		"before the credentials": {func(f *fixture) string { return f.login("work", 2, time.Hour, 20*24*time.Hour) }, "fake-refresh-home-1"},
-		// Claude Code refreshed the home login it already had.
-		"after the credentials": {func(f *fixture) string { return f.login("home", 7, time.Hour, 20*24*time.Hour) }, "fake-refresh-home-7"},
+func TestTheServerSaysWhichEntryTheLiveLoginIs(t *testing.T) {
+	f := newFixture(t)
+	f.seed("work", f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+	f.seed("home", f.login("home", 1, time.Hour, 20*24*time.Hour), account("home"))
+	// The box runs home's rotated login, but the account record says work: a
+	// switch cut short, or a session writing back a stale profile read.
+	f.setLive(f.login("home", 2, time.Hour, 20*24*time.Hour), account("work"))
+	l, err := f.vault.Usage(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name, c := range cases {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t)
-			live := c.live(f)
-			work := f.login("work", 2, time.Hour, 20*24*time.Hour)
-			if strings.Contains(live, "work") {
-				work = live
-			}
-			f.seed("work", work, account("work"))
-			f.seed("home", f.login("home", 1, time.Hour, 20*24*time.Hour), account("home"))
-			f.setLive(live, account("work"))
-			if err := f.vault.writeJournal(journal{From: "work", To: "home"}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := f.vault.Usage(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if got := f.liveTokens().RefreshToken; got != c.wantLive || f.liveEmail() != "home@example.com" {
-				t.Fatalf("live %s for %s", got, f.liveEmail())
-			}
-			if f.entryTokens("work").RefreshToken != "fake-refresh-work-2" {
-				t.Fatalf("work entry %+v", f.entryTokens("work"))
-			}
-		})
+	if l.Active() != "home" || f.liveEmail() != "home@example.com" {
+		t.Fatalf("active %q, record %s", l.Active(), f.liveEmail())
+	}
+	if f.entryTokens("home").RefreshToken != "fake-refresh-home-2" || f.entryTokens("work").RefreshToken != "fake-refresh-work-1" {
+		t.Fatalf("home %+v, work %+v", f.entryTokens("home"), f.entryTokens("work"))
+	}
+}
+
+func TestInactiveAccountsRefreshWithoutClaudeCodesLock(t *testing.T) {
+	f := newFixture(t)
+	f.setLive(f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+	f.seed("work", f.login("work", 0, time.Hour, 20*24*time.Hour), account("work"))
+	f.seed("home", f.login("home", 1, -time.Hour, 20*24*time.Hour), account("home"))
+	var held []bool
+	f.api.onRefresh = func() {
+		_, err := os.Stat(filepath.Join(f.paths.SecureDir, ".oauth_refresh.lock"))
+		held = append(held, err == nil)
+	}
+	if _, err := f.vault.Usage(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(held) != "[false]" {
+		t.Fatalf("Claude Code's lock held during the refreshes: %v", held)
+	}
+}
+
+func TestASignedOutBoxLoginCanBeReplaced(t *testing.T) {
+	f := newFixture(t)
+	f.seed("work", f.login("work", 1, time.Hour, 20*24*time.Hour), account("work"))
+	// Claude Code cleared the login after the server refused it, and kept its record.
+	f.setLive(`{"accessToken":"","refreshToken":"","expiresAt":0}`, account("work"))
+	signIn := func(dir string) error {
+		if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(`{"claudeAiOauth":`+f.login("work", 5, time.Hour, 20*24*time.Hour)+`}`), 0o600); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(`{"oauthAccount":`+account("work")+`}`), 0o600)
+	}
+	if err := f.vault.Add(ctx, "work", signIn); err != nil {
+		t.Fatal(err)
+	}
+	if switched, err := f.vault.Use(ctx, "work"); err != nil || !switched {
+		t.Fatalf("Use = %v, %v", switched, err)
+	}
+	if f.liveTokens().RefreshToken != "fake-refresh-work-5" {
+		t.Fatalf("live %+v", f.liveTokens())
 	}
 }
 
@@ -331,10 +368,10 @@ func TestUsageListsEveryAccountRefreshingWhatExpired(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("listing\n%s\nwant\n%s", got, want)
 	}
-	if live := f.liveTokens(); live.RefreshToken != "fake-refresh-work-102" || f.entryTokens("work") != live {
+	if live := f.liveTokens(); live.RefreshToken != "fake-refresh-work-101" || f.entryTokens("work") != live {
 		t.Fatalf("live %+v, work entry %+v", live, f.entryTokens("work"))
 	}
-	if f.entryTokens("home").RefreshToken != "fake-refresh-home-101" {
+	if f.entryTokens("home").RefreshToken != "fake-refresh-home-102" {
 		t.Fatalf("home entry %+v", f.entryTokens("home"))
 	}
 	// Nothing expired now, so a second listing refreshes nothing.
@@ -392,7 +429,7 @@ func TestAddSavesANewLoginAndRefusesAMismatch(t *testing.T) {
 	if err := f.vault.Add(ctx, "x", func(string) error { return fmt.Errorf("cancelled") }); err == nil || err.Error() != "cancelled" {
 		t.Fatalf("failed sign-in: %v", err)
 	}
-	if err := f.vault.Add(ctx, "work", signIn("work", 9)); err != nil || f.liveTokens().RefreshToken != "fake-refresh-work-1" {
+	if err := f.vault.Add(ctx, "work", signIn("work", 9)); !errors.Is(err, ErrAddedLive) || f.liveTokens().RefreshToken != "fake-refresh-work-1" {
 		t.Fatalf("adding the active account: %v", err)
 	}
 	dirents, err := os.ReadDir(f.vault.Dir)
@@ -443,7 +480,7 @@ func TestKeepFreshRefreshesOnlyLoginsNearTheirExpiry(t *testing.T) {
 	if live := f.liveTokens(); f.entryTokens("work") != live || f.entryTokens("idle").RefreshToken != "fake-refresh-idle-102" {
 		t.Fatalf("live %+v, work %+v, idle %+v", live, f.entryTokens("work"), f.entryTokens("idle"))
 	}
-	if log.String() != "refreshed the live login\nrefreshed account idle\n" {
+	if log.String() != "refreshed account work, the box's login\nrefreshed account idle\n" {
 		t.Fatalf("log %q", log.String())
 	}
 }
