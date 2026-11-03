@@ -165,7 +165,7 @@ func runAgent(agentName string, args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	if len(args) > 0 && args[0] == "account" {
+	if agent.Kind == config.KindClaude && len(args) > 0 && args[0] == "account" {
 		return account(e, agent, args[1:])
 	}
 	cli := agent.CLI()
@@ -381,9 +381,6 @@ const accountUsage = "usage: rclaude account [list [--json] | use <name> | add <
 // account runs the box's account commands; without arguments it lists the
 // accounts and switches to the one picked.
 func account(e env, agent config.Agent, args []string) (int, error) {
-	if agent.Kind != config.KindClaude {
-		return 2, fmt.Errorf("accounts are for agents of kind %s", config.KindClaude)
-	}
 	kind := string(agent.Kind)
 	if len(args) == 0 {
 		return pickAccount(e, kind)
