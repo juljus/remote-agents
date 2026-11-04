@@ -245,9 +245,12 @@ func restoreOnSignal(t *tty) (stop func()) {
 	go func() {
 		select {
 		case sig := <-sigs:
-			// The process ends with the signal either way; a terminal that
-			// cannot be put back has nothing more to tell.
-			_ = t.restore()
+			// Holding the lock until the process ends keeps a suspended
+			// picker from making the terminal raw again. The process ends
+			// with the signal either way; a terminal that cannot be put
+			// back has nothing more to tell.
+			t.mu.Lock()
+			_ = t.restoreLocked()
 			signal.Reset(syscall.SIGTERM, syscall.SIGHUP)
 			_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
 		case <-done:
@@ -284,6 +287,10 @@ func (t *tty) raw() error {
 func (t *tty) restore() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.restoreLocked()
+}
+
+func (t *tty) restoreLocked() error {
 	if t.saved == nil {
 		return nil
 	}

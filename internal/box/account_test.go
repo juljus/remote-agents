@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"remote-agents/internal/accounts"
@@ -64,7 +66,7 @@ func TestAccountAddsASignInAndListsItsUsage(t *testing.T) {
 	var out bytes.Buffer
 	stdio := IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}
 	base := []string{"HOME=" + l.Home}
-	if err := Account(context.Background(), l, []string{"claude", "add", "home", token}, stdio, base, lookup); err != nil {
+	if err := Account(context.Background(), l, []string{"claude", "add", "home", token}, stdio, base, lookup, noProcs); err != nil {
 		t.Fatalf("add: %v\n%s", err, out.String())
 	}
 	if !strings.Contains(out.String(), "args=auth login browser="+filepath.Join(l.Shims(), "xdg-open")+" secure=unset") || !strings.Contains(out.String(), "saved the new login as home") {
@@ -74,7 +76,7 @@ func TestAccountAddsASignInAndListsItsUsage(t *testing.T) {
 		t.Fatalf("entry: %v", err)
 	}
 	out.Reset()
-	if err := Account(context.Background(), l, []string{"claude", "list"}, stdio, base, lookup); err != nil {
+	if err := Account(context.Background(), l, []string{"claude", "list"}, stdio, base, lookup, noProcs); err != nil {
 		t.Fatal(err)
 	}
 	var listing accounts.Listing
@@ -217,7 +219,7 @@ func TestAccountAddRefusesASpecThatMovesClaudesConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 		var out bytes.Buffer
-		err = Account(context.Background(), l, []string{"claude", "add", "home", token}, IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}, []string{"HOME=" + l.Home}, lookup)
+		err = Account(context.Background(), l, []string{"claude", "add", "home", token}, IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}, []string{"HOME=" + l.Home}, lookup, noProcs)
 		if err == nil || !strings.Contains(err.Error(), key) || strings.Contains(out.String(), "args=") {
 			t.Fatalf("%s: %v\n%s", key, err, out.String())
 		}
@@ -255,13 +257,18 @@ func TestCodexAccountAddsListsAndSwitches(t *testing.T) {
 	lookup := func(string) (string, bool) { return "", false }
 	var out bytes.Buffer
 	stdio := IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}
+	try := func(proc fs.FS, args ...string) (string, error) {
+		out.Reset()
+		err := Account(context.Background(), l, append([]string{"codex"}, args...), stdio, []string{"HOME=" + l.Home}, lookup, proc)
+		return out.String(), err
+	}
 	run := func(args ...string) string {
 		t.Helper()
-		out.Reset()
-		if err := Account(context.Background(), l, append([]string{"codex"}, args...), stdio, []string{"HOME=" + l.Home}, lookup); err != nil {
-			t.Fatalf("%v: %v\n%s", args, err, out.String())
+		got, err := try(noProcs, args...)
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, got)
 		}
-		return out.String()
+		return got
 	}
 	token, err := spec.Spec{Mode: spec.ModeExec, Workdir: work, Argv: []string{script, "login"}}.Encode()
 	if err != nil {
@@ -289,9 +296,16 @@ func TestCodexAccountAddsListsAndSwitches(t *testing.T) {
 	if err := writeRunRecord(l, "11111111-2222-4333-8444-555555555555", runRecord{AgentSession: codexSession}); err != nil {
 		t.Fatal(err)
 	}
-	got := run("use", "home")
-	if !strings.Contains(got, "switched the box's Codex to home; Codex sessions started from now on use it") ||
-		!strings.Contains(got, "rcodex resume <id>:\n  "+codexSession+"\n1 other open Codex threads") {
+	// While that Codex runs, with cfg as its home, the box keeps its login.
+	codex := fstest.MapFS{
+		"70/stat":    &fstest.MapFile{Data: []byte("70 (codex) S 1 0 1 " + strings.Repeat("0 ", 11) + "20 0 1 0 100")},
+		"70/cmdline": &fstest.MapFile{Data: []byte("codex\x00")},
+		"70/environ": &fstest.MapFile{Data: []byte("HOME=/elsewhere\x00CODEX_HOME=" + cfg + "\x00")},
+	}
+	if _, err := try(codex, "use", "home"); err == nil || !strings.Contains(err.Error(), "pid 70") || !strings.HasSuffix(err.Error(), "rcodex resume <id>: "+codexSession) {
+		t.Fatalf("use while Codex runs: %v", err)
+	}
+	if got := run("use", "home"); got != "switched the box's Codex to home; every Codex started from now on uses it\n" {
 		t.Fatalf("use:\n%s", got)
 	}
 	if data, err := os.ReadFile(filepath.Join(cfg, "auth.json")); err != nil || !strings.Contains(string(data), codexfake.RefreshToken("home", 1)) {
@@ -313,7 +327,7 @@ func TestCodexAccountsNeedLoginsInAuthJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 		var out bytes.Buffer
-		err := Account(context.Background(), l, []string{"codex", "list"}, IO{Stdout: &out}, nil, lookup)
+		err := Account(context.Background(), l, []string{"codex", "list"}, IO{Stdout: &out}, nil, lookup, noProcs)
 		if (err == nil) != ok || (err != nil && !strings.Contains(err.Error(), "cli_auth_credentials_store")) {
 			t.Errorf("%s: %v", store, err)
 		}
@@ -333,7 +347,7 @@ func TestCodexAccountAddRefusesASpecThatMovesCodexHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	err = Account(context.Background(), l, []string{"codex", "add", "home", token}, IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}, []string{"HOME=" + l.Home}, func(string) (string, bool) { return "", false })
+	err = Account(context.Background(), l, []string{"codex", "add", "home", token}, IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}, []string{"HOME=" + l.Home}, func(string) (string, bool) { return "", false }, noProcs)
 	if err == nil || !strings.Contains(err.Error(), codexauth.EnvVar) || out.Len() != 0 {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
@@ -348,12 +362,12 @@ func TestKeepFreshRunsOnlyInTheProductionInstall(t *testing.T) {
 	writeAccountsConfig(t, l, fmt.Sprintf("[claude]\nconfig_dir = %q\n", filepath.Join(l.Home, "cfg")))
 	lookup := func(string) (string, bool) { return "", false }
 	for _, args := range [][]string{{"claude", "keep-fresh"}, {"codex", "keep-fresh"}, {"keep-fresh"}} {
-		if err := Account(context.Background(), l, args, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), "runs in only the remote-agents install") {
+		if err := Account(context.Background(), l, args, IO{}, nil, lookup, noProcs); err == nil || !strings.Contains(err.Error(), "runs in only the remote-agents install") {
 			t.Fatalf("%v: %v", args, err)
 		}
 	}
 	// An account may be named keep-fresh.
-	if err := Account(context.Background(), l, []string{"claude", "remove", "keep-fresh"}, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), "no account keep-fresh") {
+	if err := Account(context.Background(), l, []string{"claude", "remove", "keep-fresh"}, IO{}, nil, lookup, noProcs); err == nil || !strings.Contains(err.Error(), "no account keep-fresh") {
 		t.Fatalf("remove keep-fresh: %v", err)
 	}
 }
@@ -369,7 +383,7 @@ func TestKeepFreshOfEveryAgentRunsEachDespiteTheOthers(t *testing.T) {
 		}
 	}
 	none := func(string) (string, bool) { return "", false }
-	err := Account(context.Background(), l, []string{"keep-fresh"}, IO{Stdout: &bytes.Buffer{}}, nil, none)
+	err := Account(context.Background(), l, []string{"keep-fresh"}, IO{Stdout: &bytes.Buffer{}}, nil, none, noProcs)
 	if err == nil || !strings.Contains(err.Error(), "claude: account broken") || !strings.Contains(err.Error(), "codex: account broken") {
 		t.Fatalf("err = %v", err)
 	}
@@ -386,7 +400,7 @@ func TestKeepFreshOfEveryAgentRunsEachDespiteTheOthers(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(l.Home, ".codex", "config.toml"), []byte("cli_auth_credentials_store = \"keyring\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Account(context.Background(), l, []string{"keep-fresh"}, IO{Stdout: &bytes.Buffer{}}, nil, none); err != nil {
+	if err := Account(context.Background(), l, []string{"keep-fresh"}, IO{Stdout: &bytes.Buffer{}}, nil, none, noProcs); err != nil {
 		t.Fatalf("no accounts: %v", err)
 	}
 }
@@ -396,7 +410,7 @@ func TestAccountRefusesConfigDirsFromTheEnvironment(t *testing.T) {
 	for kind, keys := range map[string][]string{"claude": claudeauth.EnvVars, "codex": {codexauth.EnvVar}} {
 		for _, key := range keys {
 			lookup := func(k string) (string, bool) { return "/x", k == key }
-			if err := Account(context.Background(), l, []string{kind, "list"}, IO{}, nil, lookup); err == nil || !strings.Contains(err.Error(), key+" is set") {
+			if err := Account(context.Background(), l, []string{kind, "list"}, IO{}, nil, lookup, noProcs); err == nil || !strings.Contains(err.Error(), key+" is set") {
 				t.Errorf("%s: %v", key, err)
 			}
 		}
@@ -407,7 +421,7 @@ func TestAccountRefusesUnknownCommands(t *testing.T) {
 	l := testLayout(t)
 	none := func(string) (string, bool) { return "", false }
 	for _, args := range [][]string{nil, {"gemini", "list"}, {"claude"}, {"claude", "use"}, {"claude", "list", "x"}, {"claude", "frob"}} {
-		if err := Account(context.Background(), l, args, IO{}, nil, none); err == nil || err.Error() != AccountUsage {
+		if err := Account(context.Background(), l, args, IO{}, nil, none, noProcs); err == nil || err.Error() != AccountUsage {
 			t.Errorf("%v: %v", args, err)
 		}
 	}
@@ -415,20 +429,8 @@ func TestAccountRefusesUnknownCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Account(context.Background(), l, []string{"claude", "add", "x", token}, IO{}, nil, none); err == nil || !strings.Contains(err.Error(), "exec spec") {
+	if err := Account(context.Background(), l, []string{"claude", "add", "x", token}, IO{}, nil, none, noProcs); err == nil || !strings.Contains(err.Error(), "exec spec") {
 		t.Fatalf("reattach spec: %v", err)
-	}
-}
-
-func TestCodexSwitchSaysWhenItCannotTellTheRunningSessions(t *testing.T) {
-	l := testLayout(t)
-	home := t.TempDir()
-	unlock := lockFile(t, filepath.Join(home, "thread-writer-locks", ".coordination.lock"))
-	defer unlock()
-	var out bytes.Buffer
-	err := codexSwitched(l, home, &out, "home")
-	if err == nil || !strings.Contains(err.Error(), "could not tell which Codex sessions are running") || !strings.Contains(out.String(), "switched the box's Codex to home") {
-		t.Fatalf("%v\n%s", err, out.String())
 	}
 }
 
@@ -474,7 +476,7 @@ func TestAccountStartSendsTheAccountARequest(t *testing.T) {
 	var out bytes.Buffer
 	run := func(args ...string) error {
 		out.Reset()
-		return Account(context.Background(), l, append([]string{"claude"}, args...), IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}, []string{"HOME=" + l.Home}, lookup)
+		return Account(context.Background(), l, append([]string{"claude"}, args...), IO{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &out}, []string{"HOME=" + l.Home}, lookup, noProcs)
 	}
 	if err := run("save", "home"); err != nil {
 		t.Fatal(err)
@@ -508,24 +510,10 @@ func TestAccountStartSendsTheAccountARequest(t *testing.T) {
 	if err != nil || !strings.Contains(string(entry), "fake-refresh-w2") {
 		t.Fatalf("work entry: %v", err)
 	}
-	if err := Account(context.Background(), l, []string{"codex", "start", "x", token}, IO{}, nil, lookup); err == nil {
+	if err := Account(context.Background(), l, []string{"codex", "start", "x", token}, IO{}, nil, lookup, noProcs); err == nil {
 		t.Fatal("codex start ran")
 	}
 }
 
-func TestReportHeldNamesTheSessionsThatKeepTheOldAccount(t *testing.T) {
-	var out bytes.Buffer
-	if err := reportHeld(&out, []string{"a", "b", "sub"}, map[string]bool{"a": true, "b": true}); err != nil {
-		t.Fatal(err)
-	}
-	want := "running Codex sessions keep their account until restarted; restart each with rcodex resume <id>:\n  a\n  b\n" +
-		"1 other open Codex threads, such as subagents' or a Codex's started outside rcodex, keep their account until their Codex restarts\n" +
-		"the box neither refreshes nor switches back to the account they keep until they exit\n"
-	if out.String() != want {
-		t.Fatalf("report:\n%s", out.String())
-	}
-	out.Reset()
-	if err := reportHeld(&out, nil, nil); err != nil || out.Len() != 0 {
-		t.Fatalf("nothing held: %q, %v", out.String(), err)
-	}
-}
+// noProcs is a /proc tree with no processes, Codex or other.
+var noProcs = fstest.MapFS{}

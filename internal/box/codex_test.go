@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -449,5 +450,39 @@ func TestAttachingToARunningSessionJoinsIt(t *testing.T) {
 	var j joinedRecord
 	if found, err := jsonfile.Read(l.Joined(runID), &j); err != nil || !found || j.Session != running {
 		t.Fatalf("joined = %+v %v %v", j, found, err)
+	}
+}
+
+func TestCodexProcessesAreTheCodexesOfOneHome(t *testing.T) {
+	stat := func(pid int, state string) *fstest.MapFile {
+		return &fstest.MapFile{Data: []byte(fmt.Sprintf("%d (codex) %s 1 0 1 ", pid, state) + strings.Repeat("0 ", 11) + "20 0 1 0 100")}
+	}
+	proc := fstest.MapFS{}
+	add := func(pid int, state, argv0, env string) {
+		proc[fmt.Sprintf("%d/stat", pid)] = stat(pid, state)
+		proc[fmt.Sprintf("%d/cmdline", pid)] = &fstest.MapFile{Data: []byte(argv0 + "\x00resume\x00")}
+		if env != "" {
+			proc[fmt.Sprintf("%d/environ", pid)] = &fstest.MapFile{Data: []byte(strings.ReplaceAll(env, " ", "\x00"))}
+		}
+	}
+	u := t.TempDir()
+	test := t.TempDir()
+	if err := os.Mkdir(filepath.Join(u, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(u, ".codex"), filepath.Join(test, "link")); err != nil {
+		t.Fatal(err)
+	}
+	add(10, "S", "codex", "HOME="+u+" TERM=xterm")                                      // the default home
+	add(11, "S", "/usr/local/lib/codex/bin/codex", "HOME=/x CODEX_HOME="+test+"/link/") // there by another path
+	add(12, "S", "codex", "HOME="+u+" CODEX_HOME="+test)                                // a test install's
+	add(13, "S", "claude", "HOME="+u)                                                   // not a Codex
+	add(14, "Z", "codex", "HOME="+u)                                                    // exited, uncollected
+	add(15, "S", "codex", "")                                                           // exited before its environ was read
+	add(16, "S", "codex", "HOME="+u+" CODEX_HOME=rel")                                  // a home that can't be told: counted
+	add(17, "S", "codex", "HOME=/gone")                                                 // a home that does not exist
+	got, err := codexProcesses(proc, filepath.Join(u, ".codex"))
+	if err != nil || !slices.Equal(got, []int{10, 11, 16}) {
+		t.Fatalf("codexProcesses = %v, %v", got, err)
 	}
 }

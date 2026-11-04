@@ -137,7 +137,7 @@ func runCommand(layout boxlayout.Layout, stdio box.IO, args []string) (int, erro
 	case "account":
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 		defer stop()
-		return 0, box.Account(ctx, layout, rest, stdio, os.Environ(), os.LookupEnv)
+		return 0, box.Account(ctx, layout, rest, stdio, os.Environ(), os.LookupEnv, os.DirFS("/proc"))
 	case "listening":
 		if len(rest) != 1 {
 			return 1, errors.New("usage: remote-agents-box listening <port>")

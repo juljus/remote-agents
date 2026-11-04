@@ -1521,7 +1521,7 @@ func TestAccountsAddListAndSwitchTheBoxLogin(t *testing.T) {
 	cfg := boxHome + "/" + boxTestDir + "/accounts-claude"
 	vault := box.AccountsDir("claude")
 	if _, err := onBox(fmt.Sprintf(`set -e
-rm -rf %[1]q %[2]q %[3]q/started-* && mkdir -p %[1]q
+rm -rf %[1]q %[2]q && find %[3]q -maxdepth 1 -name 'started-*' -delete && mkdir -p %[1]q
 expires=$(( $(date +%%s) * 1000 + 3600000 ))
 printf '{"claudeAiOauth":{"accessToken":"fake-access-work-1","refreshToken":"fake-refresh-work-1","expiresAt":%%s}}' "$expires" > %[1]q/.credentials.json
 printf '{"numStartups":1,"oauthAccount":{"accountUuid":"acc-work","organizationUuid":"org-work","emailAddress":"work@example.com"}}' > %[1]q/.claude.json
@@ -1529,7 +1529,7 @@ echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir)); err != nil 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if out, err := onBox(fmt.Sprintf(`rm -rf %q %q %q/started-*`, cfg, vault, boxHome+"/"+boxTestDir)); err != nil {
+		if out, err := onBox(fmt.Sprintf(`rm -rf %q %q && find %q -maxdepth 1 -name 'started-*' -delete`, cfg, vault, boxHome+"/"+boxTestDir)); err != nil {
 			t.Logf("cleanup: %v %s", err, out)
 		}
 	})
@@ -1558,7 +1558,7 @@ echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir)); err != nil 
 
 	// The picker starts home's week as home, then switches the box to it.
 	pick := run()
-	pick.expect(`▸ work .*\n.*s start week · q quit`, 20*time.Second)
+	pick.expect(`(?s)▸ work .*s start week · q quit`, 20*time.Second)
 	pick.send("k")
 	mark := len(pick.text())
 	pick.expectAfter(mark, `▸ home `, 10*time.Second)
@@ -1629,12 +1629,12 @@ echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir, live)); err !
 	waitOK(t, list)
 
 	pick := run()
-	pick.expect(`▸ work .*\n.*d remove · q quit`, 20*time.Second)
+	pick.expect(`(?s)▸ work .*d remove · q quit`, 20*time.Second)
 	pick.send("\x1b[A")
 	mark := len(pick.text())
 	pick.expectAfter(mark, `▸ home `, 10*time.Second)
 	pick.send("\r")
-	pick.expect(`switched the box's Codex to home; Codex sessions started from now on use it`, 20*time.Second)
+	pick.expect(`switched the box's Codex to home; every Codex started from now on uses it`, 20*time.Second)
 	waitOK(t, pick)
 
 	out, err := onBox(fmt.Sprintf(`set -e

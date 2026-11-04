@@ -21,8 +21,8 @@ type codexFixture struct {
 	vault CodexVault
 	// live holds every refresh token the box's login had: none may ever be presented.
 	live []string
-	// running are the Codex threads running Codex processes hold.
-	running []string
+	// running are the Codex processes using the box's Codex home.
+	running CodexRunning
 }
 
 func newCodexFixture(t *testing.T) *codexFixture {
@@ -32,7 +32,7 @@ func newCodexFixture(t *testing.T) *codexFixture {
 	paths := codexauth.Paths{Home: filepath.Join(home, ".codex")}
 	store := codexauth.Store{Paths: paths, Endpoints: codexauth.Endpoints{TokenOverride: api.URL + "/oauth/token", APIBase: api.URL + "/backend-api"}, Client: http.DefaultClient, Now: now}
 	f := &codexFixture{t: t, api: api, paths: paths}
-	f.vault = CodexVault{Dir: filepath.Join(home, ".config/remote-agents/accounts/codex"), Store: store, Running: func() ([]string, error) { return f.running, nil }}
+	f.vault = CodexVault{Dir: filepath.Join(home, ".config/remote-agents/accounts/codex"), Store: store, Running: func() (CodexRunning, error) { return f.running, nil }}
 	if err := os.MkdirAll(paths.Home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -156,25 +156,31 @@ func TestCodexUseRefusesToDropALogin(t *testing.T) {
 			t.Fatalf("auth.json %s", data)
 		}
 	})
-	t.Run("about to refresh", func(t *testing.T) {
+	t.Run("codex running", func(t *testing.T) {
 		f := newCodexFixture(t)
 		f.seed("home", "home", 1, later)
-		f.seed("work", "work", 1, t0.Add(10*time.Minute))
-		f.setLive("work", 1, t0.Add(10*time.Minute))
-		if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "about to refresh") {
+		f.seed("work", "work", 1, later)
+		f.setLive("work", 1, later)
+		f.running = CodexRunning{PIDs: []int{41, 42}, Sessions: []string{"t1"}}
+		if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "pid 41, 42") || !strings.Contains(err.Error(), "rcodex resume <id>: t1") {
 			t.Fatalf("err = %v", err)
 		}
 		if f.liveRefresh() != "fake-refresh-work-1" {
 			t.Fatalf("live %s", f.liveRefresh())
 		}
+		// A Codex that has opened no session yet holds the login all the same.
+		f.running = CodexRunning{PIDs: []int{43}}
+		if _, err := f.vault.Use(ctx, "home"); err == nil || strings.Contains(err.Error(), "rcodex resume") {
+			t.Fatalf("err = %v", err)
+		}
 	})
-	t.Run("expired", func(t *testing.T) {
+	t.Run("expired with no Codex running", func(t *testing.T) {
 		f := newCodexFixture(t)
 		f.seed("home", "home", 1, later)
 		f.seed("work", "work", 1, t0)
 		f.setLive("work", 1, t0)
-		if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "send a Codex session a message") || !strings.Contains(err.Error(), "codex logout") {
-			t.Fatalf("err = %v", err)
+		if switched, err := f.vault.Use(ctx, "home"); err != nil || !switched || f.entryRefresh("work") != "fake-refresh-work-1" {
+			t.Fatalf("Use = %v, %v", switched, err)
 		}
 	})
 	t.Run("signed out", func(t *testing.T) {
@@ -343,60 +349,5 @@ func TestCodexRename(t *testing.T) {
 	}
 	if err := f.vault.Rename(ctx, "job", "home"); err == nil || !strings.Contains(err.Error(), "exists already") {
 		t.Fatalf("onto home: %v", err)
-	}
-}
-
-func TestCodexSwitchLeavesTheOldAccountToItsRunningSessions(t *testing.T) {
-	f := newCodexFixture(t)
-	f.setLive("work", 1, later)
-	if err := f.vault.Save(ctx, "work"); err != nil {
-		t.Fatal(err)
-	}
-	f.seed("home", "home", 1, later)
-	f.running = []string{"t1", "t2"}
-	if _, err := f.vault.Use(ctx, "home"); err != nil {
-		t.Fatal(err)
-	}
-	// t1 and t2 refresh work's login in memory, where the vault never sees
-	// the new tokens: the vault must not spend work's saved ones meanwhile.
-	f.live = append(f.live, codexfake.RefreshToken("work", 1))
-	f.seed("work", "work", 1, t0.Add(time.Hour))
-	var log bytes.Buffer
-	if err := f.vault.KeepFresh(ctx, &log); err != nil {
-		t.Fatal(err)
-	}
-	if log.String() != "account work: not refreshed while 2 Codex sessions that started on it run\n" {
-		t.Fatalf("log %q", log.String())
-	}
-	l, err := f.vault.Usage(ctx)
-	if err != nil || rowSummary(l) != "home*:40 work:40" {
-		t.Fatalf("usage %q, %v", rowSummary(l), err)
-	}
-	f.seed("work", "work", 1, t0)
-	if l, err = f.vault.Usage(ctx); err != nil || !strings.Contains(l.Accounts[1].Error, "2 Codex sessions that started on it run") {
-		t.Fatalf("expired kept login: %+v, %v", l, err)
-	}
-	if _, err := f.vault.Use(ctx, "work"); err == nil || !strings.Contains(err.Error(), "t1, t2") {
-		t.Fatalf("switch back while its sessions run: %v", err)
-	}
-	// A session started on home after the switch stays home's.
-	f.running = []string{"t2", "t3"}
-	f.seed("work", "work", 1, later)
-	if _, err := f.vault.Use(ctx, "work"); err == nil || !strings.Contains(err.Error(), "1 Codex session that started on work") || strings.Contains(err.Error(), "t3") {
-		t.Fatalf("switch back while t2 runs: %v", err)
-	}
-	f.running = []string{"t3"}
-	if _, err := f.vault.Use(ctx, "work"); err != nil {
-		t.Fatalf("switch back once they ended: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(f.vault.Dir, codexKeptFile)); err != nil {
-		t.Fatalf("home's running t3 not recorded: %v", err)
-	}
-	f.running = nil
-	if _, err := f.vault.Usage(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(f.vault.Dir, codexKeptFile)); !os.IsNotExist(err) {
-		t.Fatalf("record outlived its sessions: %v", err)
 	}
 }

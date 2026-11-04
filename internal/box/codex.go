@@ -263,3 +263,66 @@ func codexProbe(home, id string) holderProbe {
 		return "a running Codex", nil, nil
 	}
 }
+
+// codexProcesses are the processes of a Codex whose home is home, in the
+// /proc tree proc. A Codex is a process whose command is named codex; its
+// home is CODEX_HOME, or .codex in HOME, by any path to the same dir. A
+// relative CODEX_HOME could be anywhere, so its Codex counts. Another
+// user's Codex, whose environment can't be read, has a home of its own.
+func codexProcesses(proc fs.FS, home string) ([]int, error) {
+	procs, err := reaper.ReadProcs(proc)
+	if err != nil {
+		return nil, err
+	}
+	ours, err := os.Stat(home)
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, p := range procs {
+		if p.Zombie || len(p.Args) == 0 || filepath.Base(p.Args[0]) != "codex" {
+			continue
+		}
+		environ, err := fs.ReadFile(proc, strconv.Itoa(p.PID)+"/environ")
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) || errors.Is(err, fs.ErrPermission) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		its, ok := codexHomeOf(environ)
+		if !ok {
+			pids = append(pids, p.PID)
+			continue
+		}
+		info, err := os.Stat(its)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if os.SameFile(info, ours) {
+			pids = append(pids, p.PID)
+		}
+	}
+	return pids, nil
+}
+
+// codexHomeOf is the Codex home an environment names; ok is false when it
+// names none that can be told.
+func codexHomeOf(environ []byte) (home string, ok bool) {
+	vars := map[string]string{}
+	for _, kv := range strings.Split(string(environ), "\x00") {
+		if k, v, found := strings.Cut(kv, "="); found {
+			vars[k] = v
+		}
+	}
+	if dir, set := vars["CODEX_HOME"]; set {
+		return dir, filepath.IsAbs(dir)
+	}
+	if h := vars["HOME"]; filepath.IsAbs(h) {
+		return filepath.Join(h, ".codex"), true
+	}
+	return "", false
+}

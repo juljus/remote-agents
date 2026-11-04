@@ -129,22 +129,19 @@ under the vault's lock; the copy is refreshed first so that Claude Code need not
 any tokens it rotates there all the same go back to the account.
 
 `rcodex account` does the same for Codex's ChatGPT logins, with one difference: a running Codex
-keeps the login it started with, so a switch reaches only the Codex sessions started after it.
-It names the running ones; restart each with `rcodex resume <id>` to move it over. Those
-sessions keep the old account's login in memory and refresh it there, where the vault never sees
-the new tokens, so until they exit the box neither refreshes that account nor switches back to it.
-A session that refreshed it meanwhile leaves the saved copy spent: add that account again. Codex keeps
-its login in `~/.codex/auth.json`, which a switch replaces whole under Codex's `auth.lock`; the
-saved ones wait in `~/.config/remote-agents/accounts/codex/`. The login names its own account,
-so the vault always knows whose the live one is. A running Codex refreshes its login outside its
-lock and keeps the new tokens only if `auth.json` still holds that login, so a switch that lands
-in between costs that account its login. A switch is therefore refused while the live access
-token is expired or within 15 minutes of expiry, when a Codex refreshes it; a Codex that
-refreshes because a request was refused can still race a switch, which is rare. The timer refreshes an idle
-login a day before its access token expires, as often as a Codex that used it would. Usage
-comes from `chatgpt.com/backend-api/wham/usage`, the endpoint Codex's `/status` reads, which is
-undocumented too. A Codex weekly window always has a reset time, so `rcodex account` has no s
-and no `start`. Accounts need Codex's logins in `auth.json`, the default: a `config.toml`
+keeps the login it started with, and refreshes it without saving the new tokens anywhere a switch
+could keep them. A switch is therefore refused while any Codex runs with the box's Codex home,
+found by its process and environment; it names the box's sessions among them: exit them, switch,
+then `rcodex resume <id>` each, which runs on the new account. With no Codex running, nothing
+refreshes the live login during a switch, and no saved login is in use anywhere. A Codex that
+starts in the instant a switch replaces the login can still read the old one. Codex keeps its
+login in `~/.codex/auth.json`, which a switch replaces whole under Codex's `auth.lock`; the saved
+ones wait in `~/.config/remote-agents/accounts/codex/`. The login names its own account, so the
+vault always knows whose the live one is. The timer refreshes an idle login a day before its
+access token expires, as often as a Codex that used it would. Usage comes from
+`chatgpt.com/backend-api/wham/usage`, the endpoint Codex's `/status` reads, which is undocumented
+too. A Codex weekly window always has a reset time, so `rcodex account` has no s and no `start`.
+Accounts need Codex's logins in `auth.json`, the default: a `config.toml`
 with another `cli_auth_credentials_store` is refused.
 
 Account commands use `~/.claude` and `~/.codex`, as the sessions do, and refuse
