@@ -49,6 +49,8 @@ the OOM killer then ends only the process that overran it. Set the cap in
 applies to sessions started after the change.
 
 No shell setup is needed. Arguments every run should get go in the agent's `args` in the config.
+The example config runs both agents without permission prompts or sandbox
+(`--dangerously-skip-permissions`, `--yolo`): the box is the sandbox. Drop `args` to get the prompts back.
 Stop the link daemon with `launchctl bootout gui/$(id -u)/com.remote-agents.link`.
 Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook relay problems).
 
