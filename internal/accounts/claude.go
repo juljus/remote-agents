@@ -256,7 +256,7 @@ func (v ClaudeVault) fresh(ctx context.Context, s *claudeState, name string) (cl
 // signedOut names the way back for an account the server signed out.
 func signedOut(name string, err error) error {
 	if errors.Is(err, claudeauth.ErrRefreshRefused) {
-		return fmt.Errorf("signed out: log in again with `rclaude account add %s`", name)
+		return fmt.Errorf("signed out: add it again: press a in `rclaude account`, or run `rclaude account add %s`", name)
 	}
 	return err
 }

@@ -354,7 +354,7 @@ func (v CodexVault) fresh(ctx context.Context, s *codexState, name string) (code
 // codexSignedOut names the way back for an account the server signed out.
 func codexSignedOut(name string, err error) error {
 	if errors.Is(err, codexauth.ErrRefreshRefused) {
-		return fmt.Errorf("signed out: log in again with `rcodex account add %s`", name)
+		return fmt.Errorf("signed out: add it again: press a in `rcodex account`, or run `rcodex account add %s`", name)
 	}
 	return err
 }

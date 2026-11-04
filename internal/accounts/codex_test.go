@@ -342,3 +342,19 @@ func TestCodexRename(t *testing.T) {
 		t.Fatalf("onto home: %v", err)
 	}
 }
+
+func TestCodexSignedOutAccountShowsAndFailsKeepFresh(t *testing.T) {
+	f := newCodexFixture(t)
+	f.setLive("work", 1, later)
+	f.seed("gone", "gone", 1, t0)
+	// A refresh that raced a switch spent gone's saved token.
+	f.api.Spend(codexfake.RefreshToken("gone", 1))
+	want := "signed out: add it again: press a in `rcodex account`, or run `rcodex account add gone`"
+	l, err := f.vault.Usage(ctx)
+	if err != nil || l.Accounts[1].Name != "gone" || l.Accounts[1].Error != want {
+		t.Fatalf("listing %+v, %v", l, err)
+	}
+	if err := f.vault.KeepFresh(ctx, &bytes.Buffer{}); err == nil || err.Error() != "account gone: "+want {
+		t.Fatalf("KeepFresh = %v", err)
+	}
+}

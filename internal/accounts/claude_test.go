@@ -401,7 +401,7 @@ func TestUsageRefreshesOnlyInactiveAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"accounts":[` +
-		`{"name":"gone","email":"gone@example.com","active":false,"weekly":null,"error":"signed out: log in again with ` + "`rclaude account add gone`" + `"},` +
+		`{"name":"gone","email":"gone@example.com","active":false,"weekly":null,"error":"signed out: add it again: press a in ` + "`rclaude account`" + `, or run ` + "`rclaude account add gone`" + `"},` +
 		`{"name":"home","email":"home@example.com","active":false,"weekly":{"utilization":40,"resets_at":"2026-11-03T15:00:00Z"}},` +
 		`{"name":"work","email":"work@example.com","active":true,"weekly":{"utilization":40,"resets_at":"2026-11-03T15:00:00Z"}}]}`
 	if string(got) != want {
