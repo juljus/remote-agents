@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Juljus <juljus@gmail.com>
 Date: Wed, 4 Nov 2026 22:43:21 +0200
-Subject: [PATCH 3/4] fix(daemon): treat every client write error as a hangup
+Subject: [PATCH 3/5] fix(daemon): treat every client write error as a hangup
 
 The shell->client thread counted only EPIPE as a client hangup when
 writing a heartbeat or a MaybeSwitch chunk; any other error ended the

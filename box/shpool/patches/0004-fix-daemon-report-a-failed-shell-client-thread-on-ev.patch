@@ -1,0 +1,302 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Juljus <juljus@gmail.com>
+Date: Wed, 4 Nov 2026 22:54:46 +0200
+Subject: [PATCH 4/5] fix(daemon): report a failed shell->client thread on
+ every attach
+
+When the shell->client thread of a running shell had failed, the first
+attach joined it and failed with its error, which also dropped the join
+handle. Every later attach took the missing handle for a live thread,
+handed the client to it and failed with "sending on a disconnected
+channel", so the session looked attachable but never was.
+
+Join the thread once, keep how it ended, and refuse every attach to such
+a session with the thread's error and the way out (`shpool kill`). A
+thread that failed under a shell that has exited no longer fails the
+attach that replaces the session.
+---
+ libshpool/src/daemon/server.rs | 120 ++++++++++++++++++---------------
+ libshpool/src/daemon/shell.rs  |  78 +++++++++++++++++++--
+ 2 files changed, 138 insertions(+), 60 deletions(-)
+
+diff --git a/libshpool/src/daemon/server.rs b/libshpool/src/daemon/server.rs
+index 8ed3978..cb40f34 100644
+--- a/libshpool/src/daemon/server.rs
++++ b/libshpool/src/daemon/server.rs
+@@ -280,12 +280,8 @@ impl Server {
+             .select_shell_desc(stream, conn_id, &header, &user_info, &shell_env, peer_pid)
+         {
+             Ok(t) => t,
+-            Err(err)
+-                if err
+-                    .downcast_ref::<ShellSelectionError>()
+-                    .map(|e| e == &ShellSelectionError::BusyShellSession)
+-                    .unwrap_or(false) =>
+-            {
++            // select_shell_desc has already told the client why.
++            Err(err) if err.downcast_ref::<ShellSelectionError>().is_some() => {
+                 return Ok(());
+             }
+             Err(err) => return Err(err)?,
+@@ -458,42 +454,59 @@ impl Server {
+                         None => {
+                             // the channel is still open so the subshell is
+                             // still running
+-                            info!("taking over existing session inner");
+-                            inner.client_stream = Some(stream.try_clone()?);
+-                            session.lifecycle.record_attached(Attachment {
+-                                session_name_template: header.name_template.clone(),
+-                                pid: peer_pid,
+-                            });
+-
+-                            if inner
+-                                .shell_to_client_join_h
+-                                .as_ref()
+-                                .map(|h| h.is_finished())
+-                                .unwrap_or(false)
+-                            {
+-                                warn!(
+-                                    "child_exited chan unclosed, but shell->client thread has exited, clobbering with new subshell"
+-                                );
+-                            } else {
+-                                // Reattach confirmed; the create path won't run
+-                                // and clobber the entry, so it's safe to
+-                                // publish.
+-                                self.events_bus.publish(&events::Event::SessionAttached);
+-                                if let Err(err) = self.hooks.on_reattach(&header.name) {
+-                                    warn!("reattach hook: {:?}", err);
++                            match inner.shell_to_client_exit() {
++                                None => {
++                                    info!("taking over existing session inner");
++                                    inner.client_stream = Some(stream.try_clone()?);
++                                    session.lifecycle.record_attached(Attachment {
++                                        session_name_template: header.name_template.clone(),
++                                        pid: peer_pid,
++                                    });
++
++                                    // Reattach confirmed; the create path won't
++                                    // run and clobber the entry, so it's safe
++                                    // to publish.
++                                    self.events_bus.publish(&events::Event::SessionAttached);
++                                    if let Err(err) = self.hooks.on_reattach(&header.name) {
++                                        warn!("reattach hook: {:?}", err);
++                                    }
++                                    // Immediately return so that we never give
++                                    // up the inner lock for a session we are
++                                    // reattaching to. We only want to give it
++                                    // up when creating a new session.
++                                    return Ok((
++                                        Some((
++                                            Arc::clone(&session.child_exit_notifier),
++                                            inner,
++                                            Arc::clone(&session.pager_ctl),
++                                        )),
++                                        AttachStatus::Attached { warnings },
++                                    ));
++                                }
++                                Some(shell::ShellToClientExit::Clean) => {
++                                    warn!(
++                                        "child_exited chan unclosed, but shell->client thread has exited, clobbering with new subshell"
++                                    );
++                                }
++                                Some(shell::ShellToClientExit::Failed(failure)) => {
++                                    error!(
++                                        "shell still running, but its shell->client thread failed: {}",
++                                        failure
++                                    );
++                                    write_reply(
++                                        &mut stream,
++                                        AttachReplyHeader {
++                                            status: AttachStatus::UnexpectedError(format!(
++                                                "session '{}' is still running, but its shell->client thread failed ({}), so it can never be attached again; end it with `shpool kill {}`",
++                                                header.name, failure, header.name
++                                            )),
++                                        },
++                                    )?;
++                                    stream
++                                        .shutdown(net::Shutdown::Both)
++                                        .context("closing stream")?;
++                                    Err(ShellSelectionError::BrokenShellSession)?;
+                                 }
+-                                // Immediately return so that we never give
+-                                // up the inner lock for a session we are
+-                                // reattaching to. We only want to give it
+-                                // up when creating a new session.
+-                                return Ok((
+-                                    Some((
+-                                        Arc::clone(&session.child_exit_notifier),
+-                                        inner,
+-                                        Arc::clone(&session.pager_ctl),
+-                                    )),
+-                                    AttachStatus::Attached { warnings },
+-                                ));
+                             }
+                         }
+                         Some(exit_status) => {
+@@ -503,20 +516,14 @@ impl Server {
+                                 "stale inner, (child exited with status {}) clobbering with new subshell",
+                                 exit_status
+                             );
+-                        }
+-                    }
+-
+-                    if inner
+-                        .shell_to_client_join_h
+-                        .as_ref()
+-                        .map(|h| h.is_finished())
+-                        .unwrap_or(false)
+-                    {
+-                        info!("shell->client thread finished, joining");
+-                        if let Some(h) = inner.shell_to_client_join_h.take() {
+-                            h.join()
+-                                .map_err(|e| anyhow!("joining shell->client on reattach: {:?}", e))?
+-                                .context("within shell->client thread on reattach")?;
++                            if let Some(shell::ShellToClientExit::Failed(failure)) =
++                                inner.shell_to_client_exit()
++                            {
++                                warn!(
++                                    "shell->client thread of the exited shell failed: {}",
++                                    failure
++                                );
++                            }
+                         }
+                     }
+ 
+@@ -1199,6 +1206,7 @@ impl Server {
+             client_stream: Some(client_stream),
+             config: self.config.clone(),
+             shell_to_client_join_h: None,
++            shell_to_client_outcome: None,
+             term_db,
+             daily_messenger: Arc::clone(&self.daily_messenger),
+             needs_initial_motd_dump: dump_motd_on_new_session,
+@@ -1415,6 +1423,8 @@ where
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum ShellSelectionError {
+     BusyShellSession,
++    /// The shell still runs, but nothing relays its output any more.
++    BrokenShellSession,
+ }
+ 
+ impl std::fmt::Display for ShellSelectionError {
+diff --git a/libshpool/src/daemon/shell.rs b/libshpool/src/daemon/shell.rs
+index 7d47467..1d890c4 100644
+--- a/libshpool/src/daemon/shell.rs
++++ b/libshpool/src/daemon/shell.rs
+@@ -169,6 +169,18 @@ pub struct SessionInner {
+     /// Only wrapped in an option so we can spawn the thread after
+     /// constructing the SessionInner.
+     pub shell_to_client_join_h: Option<thread::JoinHandle<anyhow::Result<()>>>,
++    /// How the shell->client thread ended, once it has been joined.
++    pub shell_to_client_outcome: Option<ShellToClientExit>,
++}
++
++/// How the shell->client thread of a session ended.
++#[derive(Debug, Clone)]
++pub enum ShellToClientExit {
++    /// The thread returned cleanly, which it only does once the shell is gone.
++    Clean,
++    /// The thread failed. Nothing relays the shell's output any more, so the
++    /// session can never be attached again, even if its shell still runs.
++    Failed(String),
+ }
+ 
+ /// A notification that a new client has connected, sent to the
+@@ -276,6 +288,20 @@ pub struct ShellToClientArgs {
+ }
+ 
+ impl SessionInner {
++    /// Reports how the shell->client thread ended, or None while it runs.
++    /// Joins the thread when it is first found finished.
++    pub fn shell_to_client_exit(&mut self) -> Option<ShellToClientExit> {
++        if self.shell_to_client_outcome.is_none() {
++            let join_h = self.shell_to_client_join_h.take_if(|h| h.is_finished())?;
++            self.shell_to_client_outcome = Some(match join_h.join() {
++                Ok(Ok(())) => ShellToClientExit::Clean,
++                Ok(Err(e)) => ShellToClientExit::Failed(format!("{e:#}")),
++                Err(panic) => ShellToClientExit::Failed(format!("panicked: {panic:?}")),
++            });
++        }
++        self.shell_to_client_outcome.clone()
++    }
++
+     /// Spawn the shell-to-client thread which continually reads from the pty
+     /// and sends data both to the output spool and to the client,
+     /// if one is attached.
+@@ -1289,8 +1315,11 @@ mod test {
+     /// rather than EPIPE. The heartbeat write counted only EPIPE as a hangup,
+     /// so the reset ended the thread for good: the shell kept running but no
+     /// client could ever attach to it again.
+-    #[test]
+-    fn heartbeat_to_reset_client_keeps_shell_to_client_thread() -> anyhow::Result<()> {
++    /// A session inner for a pty running `sleep 60`, plus the two ends of
++    /// the channels for a shell->client thread that is not spawned yet.
++    fn sleeping_inner(
++    ) -> anyhow::Result<(SessionInner, Arc<Mutex<ShellToClientCtl>>, ShellToClientArgs, libc::pid_t)>
++    {
+         let mut cmd = std::process::Command::new("sleep");
+         cmd.arg("60");
+         let fork = shpool_pty::fork::Fork::from_ptmx().context("forking pty")?;
+@@ -1302,12 +1331,11 @@ mod test {
+         let child_pid = fork.child_pid().ok_or(anyhow!("no child pid"))?;
+ 
+         let size = TtySize { rows: 24, cols: 80, xpixel: 0, ypixel: 0 };
+-        let (ctl, args) =
+-            ShellToClientCtl::new(0, size.clone(), 100, Arc::new(ExitNotifier::new()));
++        let (ctl, args) = ShellToClientCtl::new(0, size, 100, Arc::new(ExitNotifier::new()));
+         let ctl = Arc::new(Mutex::new(ctl));
+         let config = config::Manager::new(None)?;
+         let inner = SessionInner {
+-            name: String::from("reset"),
++            name: String::from("sleeping"),
+             shell_to_client_ctl: Arc::clone(&ctl),
+             pty_master: fork,
+             client_stream: None,
+@@ -1317,7 +1345,47 @@ mod test {
+             needs_initial_motd_dump: false,
+             supports_sentinels: false,
+             shell_to_client_join_h: None,
++            shell_to_client_outcome: None,
+         };
++        Ok((inner, ctl, args, child_pid))
++    }
++
++    /// Regression test for a session whose shell->client thread failed while
++    /// its shell kept running. The first attach joined the thread and failed
++    /// with its error, which dropped the join handle; every later attach took
++    /// the missing handle for a live thread and failed with "sending on a
++    /// disconnected channel". Every attach must see the thread's failure.
++    #[test]
++    fn failed_shell_to_client_thread_is_reported_every_time() -> anyhow::Result<()> {
++        let (mut inner, _ctl, _args, child_pid) = sleeping_inner()?;
++        let (fail_tx, fail_rx) = crossbeam_channel::bounded::<()>(0);
++        inner.shell_to_client_join_h = Some(thread::spawn(move || {
++            fail_rx.recv()?;
++            Err(anyhow!("relay broke"))
++        }));
++        assert!(inner.shell_to_client_exit().is_none(), "a running thread has not exited");
++
++        fail_tx.send(())?;
++        while !inner.shell_to_client_join_h.as_ref().is_some_and(|h| h.is_finished()) {
++            thread::sleep(Duration::from_millis(10));
++        }
++        for _ in 0..2 {
++            match inner.shell_to_client_exit() {
++                Some(ShellToClientExit::Failed(failure)) => {
++                    assert!(failure.contains("relay broke"), "got {failure}")
++                }
++                exit => panic!("want the thread's failure, got {exit:?}"),
++            }
++        }
++
++        signal::kill(Pid::from_raw(child_pid), signal::Signal::SIGKILL)?;
++        Ok(())
++    }
++
++    #[test]
++    fn heartbeat_to_reset_client_keeps_shell_to_client_thread() -> anyhow::Result<()> {
++        let (inner, ctl, args, child_pid) = sleeping_inner()?;
++        let size = args.tty_size.clone();
+         let join_h = inner.spawn_shell_to_client(args)?;
+ 
+         let attach = |stream: &UnixStream| -> anyhow::Result<ClientConnectionStatus> {
