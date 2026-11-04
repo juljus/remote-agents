@@ -6,9 +6,9 @@
 set -euo pipefail
 shopt -s inherit_errexit
 
-SHPOOL_VERSION=0.11.5
-SHPOOL_SHA256=132f786bd275749a46224c17a071474a850f0be1fbb752b1c96d910778543c9b
-SHPOOL_URL="https://github.com/shell-pool/shpool/releases/download/v${SHPOOL_VERSION}/shpool-x86_64-unknown-linux-musl.tar.gz"
+# shpool/build.sh builds this byte for byte; update the pin whenever box/shpool changes.
+SHPOOL_VERSION=0.11.5+ra.1
+SHPOOL_SHA256=018d90697b0c935bbb68654b9672be4c8ae6fb10b476c6c04342e53e6f0d1520
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 
@@ -48,22 +48,33 @@ install_file() {
   echo changed
 }
 
+# pinned_shpool file: whether file is the shpool build SHPOOL_SHA256 pins.
+pinned_shpool() { echo "$SHPOOL_SHA256  $1" | sha256sum -c --quiet - >/dev/null 2>&1; }
+
+# Every install on the box shares one build of the pinned shpool.
+SHPOOL_BUILD="$HOME/.cache/remote-agents/shpool-$SHPOOL_SHA256"
 current_shpool=""
 if [[ -x "$SHARE/bin/shpool" ]]; then
   current_shpool="$("$SHARE/bin/shpool" version)"
 fi
-if [[ "$current_shpool" != "shpool $SHPOOL_VERSION" ]]; then
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL -o "$tmp/shpool.tgz" "$SHPOOL_URL"
-  echo "$SHPOOL_SHA256  $tmp/shpool.tgz" | sha256sum -c --quiet -
-  tar -xzf "$tmp/shpool.tgz" -C "$tmp" shpool
-  install -m 0755 "$tmp/shpool" "$SHARE/bin/shpool.tmp.$$"
+if ! pinned_shpool "$SHARE/bin/shpool"; then
+  if ! pinned_shpool "$SHPOOL_BUILD"; then
+    command -v docker >/dev/null || die "building shpool $SHPOOL_VERSION needs docker"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    "$STAGE/shpool/build.sh" "$tmp/shpool"
+    pinned_shpool "$tmp/shpool" \
+      || die "shpool build has sha256 $(sha256sum "$tmp/shpool" | cut -d' ' -f1), not SHPOOL_SHA256; update the pin"
+    mkdir -p "$(dirname "$SHPOOL_BUILD")"
+    install -m 0755 "$tmp/shpool" "$SHPOOL_BUILD.tmp.$$"
+    mv -f "$SHPOOL_BUILD.tmp.$$" "$SHPOOL_BUILD"
+  fi
+  install -m 0755 "$SHPOOL_BUILD" "$SHARE/bin/shpool.tmp.$$"
   mv -f "$SHARE/bin/shpool.tmp.$$" "$SHARE/bin/shpool"
   echo "installed shpool $SHPOOL_VERSION (was: ${current_shpool:-none})"
   if [[ -n "$current_shpool" ]] && systemctl --user is-active --quiet "$SERVICE"; then
-    echo "NOTE: the running shpool daemon still uses the old binary;"
-    echo "      restart $SERVICE once no sessions are running."
+    echo "NOTE: the running shpool daemon still uses the old binary, and restarting it ends"
+    echo "      every session; restart $SERVICE once none is running."
   fi
 fi
 

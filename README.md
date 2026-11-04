@@ -17,7 +17,8 @@ laptop; you still want to work with them from your own terminal, clipboard and b
 - Laptop: macOS (the link daemon runs under launchd), Go to build, `ssh` to the box without a
   password prompt (keys or an agent). cmux is optional; `make lint` needs staticcheck and
   shellcheck.
-- Box: Linux x86_64 with systemd, a user with lingering enabled (`loginctl enable-linger <user>`).
+- Box: Linux x86_64 with systemd, a user with lingering enabled (`loginctl enable-linger <user>`)
+  who can run docker, which `make deploy-box` uses to build shpool.
   `make deploy-box` installs shpool and Claude Code there. Codex comes with the bootstrap's pinned
   toolchain below; on another box, put `codex` on `/usr/local/bin` yourself.
 
@@ -30,8 +31,13 @@ Box, from the laptop; idempotent, and it never restarts the shpool daemon:
 
     make deploy-box HOST=<ssh host>
 
-It installs shpool (pinned), `remote-agents-box`, the clipboard, browser and hook shims, a
-`systemctl --user` socket for shpool, and Claude Code if missing. Log in to Claude once on the box
+It installs shpool, `remote-agents-box`, the clipboard, browser and hook shims, a
+`systemctl --user` socket for shpool, and Claude Code if missing. The shpool is upstream's pinned
+release plus the fixes in `box/shpool/patches`, built on the box with docker into a static binary
+that `box/install.sh` pins by sha256; after a change there, run `box/shpool/build.sh` on the box and
+put the sha256 it gives into the pin. A new shpool takes over from the next start of the shpool
+daemon, and restarting it ends every session, so restart `remote-agents-shpool.service` on the box
+once no session runs. Until then the old daemon keeps serving all sessions. Log in to Claude once on the box
 through a session (`rclaude`, then `/login`), and to Codex with `rcodex login`, whose browser
 callback comes back through the link, or `rcodex login --device-auth`.
 
