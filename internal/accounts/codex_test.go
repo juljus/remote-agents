@@ -21,8 +21,6 @@ type codexFixture struct {
 	vault CodexVault
 	// live holds every refresh token the box's login had: none may ever be presented.
 	live []string
-	// running are the Codex processes using the box's Codex home.
-	running CodexRunning
 }
 
 func newCodexFixture(t *testing.T) *codexFixture {
@@ -31,8 +29,7 @@ func newCodexFixture(t *testing.T) *codexFixture {
 	api := codexfake.NewServer(t, now)
 	paths := codexauth.Paths{Home: filepath.Join(home, ".codex")}
 	store := codexauth.Store{Paths: paths, Endpoints: codexauth.Endpoints{TokenOverride: api.URL + "/oauth/token", APIBase: api.URL + "/backend-api"}, Client: http.DefaultClient, Now: now}
-	f := &codexFixture{t: t, api: api, paths: paths}
-	f.vault = CodexVault{Dir: filepath.Join(home, ".config/remote-agents/accounts/codex"), Store: store, Running: func() (CodexRunning, error) { return f.running, nil }}
+	f := &codexFixture{t: t, api: api, paths: paths, vault: CodexVault{Dir: filepath.Join(home, ".config/remote-agents/accounts/codex"), Store: store}}
 	if err := os.MkdirAll(paths.Home, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -156,31 +153,25 @@ func TestCodexUseRefusesToDropALogin(t *testing.T) {
 			t.Fatalf("auth.json %s", data)
 		}
 	})
-	t.Run("codex running", func(t *testing.T) {
+	t.Run("about to refresh", func(t *testing.T) {
 		f := newCodexFixture(t)
 		f.seed("home", "home", 1, later)
-		f.seed("work", "work", 1, later)
-		f.setLive("work", 1, later)
-		f.running = CodexRunning{PIDs: []int{41, 42}, Sessions: []string{"t1"}}
-		if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "pid 41, 42") || !strings.Contains(err.Error(), "rcodex resume <id>: t1") {
+		f.seed("work", "work", 1, t0.Add(10*time.Minute))
+		f.setLive("work", 1, t0.Add(10*time.Minute))
+		if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "about to refresh") {
 			t.Fatalf("err = %v", err)
 		}
 		if f.liveRefresh() != "fake-refresh-work-1" {
 			t.Fatalf("live %s", f.liveRefresh())
 		}
-		// A Codex that has opened no session yet holds the login all the same.
-		f.running = CodexRunning{PIDs: []int{43}}
-		if _, err := f.vault.Use(ctx, "home"); err == nil || strings.Contains(err.Error(), "rcodex resume") {
-			t.Fatalf("err = %v", err)
-		}
 	})
-	t.Run("expired with no Codex running", func(t *testing.T) {
+	t.Run("expired", func(t *testing.T) {
 		f := newCodexFixture(t)
 		f.seed("home", "home", 1, later)
 		f.seed("work", "work", 1, t0)
 		f.setLive("work", 1, t0)
-		if switched, err := f.vault.Use(ctx, "home"); err != nil || !switched || f.entryRefresh("work") != "fake-refresh-work-1" {
-			t.Fatalf("Use = %v, %v", switched, err)
+		if _, err := f.vault.Use(ctx, "home"); err == nil || !strings.Contains(err.Error(), "send a Codex session a message") || !strings.Contains(err.Error(), "codex logout") {
+			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("signed out", func(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"maps"
 	"net/http"
 	"os"
@@ -46,7 +45,7 @@ type accountAgent struct {
 	envVars []string
 	// dirVar points a sign-in at its own dir.
 	dirVar string
-	open   func(l boxlayout.Layout, proc fs.FS) (openVault, error)
+	open   func(l boxlayout.Layout) (openVault, error)
 }
 
 // openVault is an agent's vault, and how to tell which sessions follow a
@@ -67,7 +66,7 @@ var accountAgents = map[string]accountAgent{
 // Account runs one account command for an agent kind. The caller catches
 // SIGINT, SIGTERM and SIGHUP into ctx: a token refresh, once sent, must live
 // to save what the server answers.
-func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, base []string, lookupEnv func(string) (string, bool), proc fs.FS) error {
+func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, base []string, lookupEnv func(string) (string, bool)) error {
 	if len(args) == 0 {
 		return errors.New(AccountUsage)
 	}
@@ -77,7 +76,7 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 		return fmt.Errorf("keep-fresh runs in only the %s install", boxlayout.DefaultName)
 	}
 	if len(args) == 1 && args[0] == "keep-fresh" {
-		return keepEveryAgentFresh(ctx, l, stdio, base, lookupEnv, proc)
+		return keepEveryAgentFresh(ctx, l, stdio, base, lookupEnv)
 	}
 	if len(args) < 2 {
 		return errors.New(AccountUsage)
@@ -97,7 +96,7 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 			return fmt.Errorf("%s is set, and the box's sessions may not see it: set [%s] config_dir in %s instead", key, kind, l.AccountsConfig())
 		}
 	}
-	v, err := agent.open(l, proc)
+	v, err := agent.open(l)
 	if err != nil {
 		return err
 	}
@@ -176,7 +175,7 @@ func Account(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, b
 
 // keepEveryAgentFresh runs each agent's keep-fresh, every one whatever the
 // others' errors, which it reports together.
-func keepEveryAgentFresh(ctx context.Context, l boxlayout.Layout, stdio IO, base []string, lookupEnv func(string) (string, bool), proc fs.FS) error {
+func keepEveryAgentFresh(ctx context.Context, l boxlayout.Layout, stdio IO, base []string, lookupEnv func(string) (string, bool)) error {
 	var failed []error
 	for _, kind := range slices.Sorted(maps.Keys(accountAgents)) {
 		// An agent nobody saved accounts of may not even be set up for them.
@@ -188,14 +187,14 @@ func keepEveryAgentFresh(ctx context.Context, l boxlayout.Layout, stdio IO, base
 		if !saved {
 			continue
 		}
-		if err := Account(ctx, l, []string{kind, "keep-fresh"}, stdio, base, lookupEnv, proc); err != nil {
+		if err := Account(ctx, l, []string{kind, "keep-fresh"}, stdio, base, lookupEnv); err != nil {
 			failed = append(failed, fmt.Errorf("%s: %w", kind, err))
 		}
 	}
 	return errors.Join(failed...)
 }
 
-func openClaudeVault(l boxlayout.Layout, _ fs.FS) (openVault, error) {
+func openClaudeVault(l boxlayout.Layout) (openVault, error) {
 	cfg, err := LoadClaudeAccounts(l)
 	if err != nil {
 		return openVault{}, err
@@ -209,7 +208,7 @@ func openClaudeVault(l boxlayout.Layout, _ fs.FS) (openVault, error) {
 	return openVault{vault: v, switched: switched, start: v.Start}, nil
 }
 
-func openCodexVault(l boxlayout.Layout, proc fs.FS) (openVault, error) {
+func openCodexVault(l boxlayout.Layout) (openVault, error) {
 	cfg, err := LoadCodexAccounts(l)
 	if err != nil {
 		return openVault{}, err
@@ -218,12 +217,8 @@ func openCodexVault(l boxlayout.Layout, proc fs.FS) (openVault, error) {
 		return openVault{}, err
 	}
 	store := codexauth.Store{Paths: cfg.Paths, Endpoints: cfg.Endpoints, Client: &http.Client{}, Now: time.Now}
-	switched := func(w io.Writer, name string) error {
-		_, err := fmt.Fprintf(w, "switched the box's Codex to %s; every Codex started from now on uses it\n", name)
-		return err
-	}
-	running := func() (accounts.CodexRunning, error) { return codexRunning(l, proc, cfg.Paths.Home) }
-	return openVault{vault: accounts.CodexVault{Dir: l.AccountsDir("codex"), Store: store, Running: running}, switched: switched}, nil
+	switched := func(w io.Writer, name string) error { return codexSwitched(l, cfg.Paths.Home, w, name) }
+	return openVault{vault: accounts.CodexVault{Dir: l.AccountsDir("codex"), Store: store}, switched: switched}, nil
 }
 
 // checkCodexStoresInFile refuses a Codex config that keeps logins in the
@@ -248,28 +243,41 @@ func checkCodexStoresInFile(p codexauth.Paths) error {
 	return nil
 }
 
-// codexRunning lists the Codex processes that use home, and the box's
-// sessions among them.
-func codexRunning(l boxlayout.Layout, proc fs.FS, home string) (accounts.CodexRunning, error) {
-	pids, err := codexProcesses(proc, home)
-	if err != nil || len(pids) == 0 {
-		return accounts.CodexRunning{}, err
+// codexSwitched names the running Codex sessions of the box's runs, which
+// keep the login they started with until they are restarted.
+func codexSwitched(l boxlayout.Layout, home string, w io.Writer, name string) error {
+	if _, err := fmt.Fprintf(w, "switched the box's Codex to %s; Codex sessions started from now on use it\n", name); err != nil {
+		return err
 	}
 	held, err := heldCodexSessions(home)
-	if err != nil {
-		return accounts.CodexRunning{}, err
-	}
-	runs, err := runSessions(l)
-	if err != nil {
-		return accounts.CodexRunning{}, err
-	}
-	r := accounts.CodexRunning{PIDs: pids}
-	for _, id := range held {
-		if runs[id] {
-			r.Sessions = append(r.Sessions, id)
+	if err == nil {
+		var runs map[string]bool
+		if runs, err = runSessions(l); err == nil {
+			return reportHeld(w, held, runs)
 		}
 	}
-	return r, nil
+	return fmt.Errorf("could not tell which Codex sessions are running (%w); each one keeps its account until restarted with: rcodex resume <id>", err)
+}
+
+// reportHeld names the held Codex sessions the box's runs started, and
+// counts the other open Codex threads, such as subagents' or those of a
+// Codex started outside rcodex.
+func reportHeld(w io.Writer, held []string, runs map[string]bool) error {
+	var listed []string
+	for _, id := range held {
+		if runs[id] {
+			listed = append(listed, id)
+		}
+	}
+	var b strings.Builder
+	if len(listed) > 0 {
+		fmt.Fprintf(&b, "running Codex sessions keep their account until restarted; restart each with rcodex resume <id>:\n  %s\n", strings.Join(listed, "\n  "))
+	}
+	if others := len(held) - len(listed); others > 0 {
+		fmt.Fprintf(&b, "%d other open Codex threads, such as subagents' or a Codex's started outside rcodex, keep their account until their Codex restarts\n", others)
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 // runSessions are the agent sessions the box's runs last saw running.

@@ -1573,7 +1573,7 @@ grep -o 'fake-refresh-[a-z]*-[0-9]*' %[1]q/.credentials.json
 grep -o '"emailAddress": "[^"]*"' %[1]q/.claude.json
 stat -c '%%a %%n' %[2]q %[2]q/work.json %[2]q/home.json | sed 's|%[2]s|VAULT|'
 find ~/.config/systemd/user -name '%[3]s-accounts-refresh*' | wc -l
-ls -A %[2]q
+ls -A %[2]q | LC_ALL=C sort
 cat %[4]q/started-home`, cfg, vault, boxInstall, boxHome+"/"+boxTestDir))
 	if err != nil {
 		t.Fatal(err)
@@ -1634,7 +1634,7 @@ echo home > %[3]q/next-login`, cfg, vault, boxHome+"/"+boxTestDir, live)); err !
 	mark := len(pick.text())
 	pick.expectAfter(mark, `▸ home `, 10*time.Second)
 	pick.send("\r")
-	pick.expect(`switched the box's Codex to home; every Codex started from now on uses it`, 20*time.Second)
+	pick.expect(`switched the box's Codex to home; Codex sessions started from now on use it`, 20*time.Second)
 	waitOK(t, pick)
 
 	out, err := onBox(fmt.Sprintf(`set -e

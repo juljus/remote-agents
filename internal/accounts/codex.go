@@ -5,32 +5,35 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
-	"strings"
 	"time"
 
 	"remote-agents/internal/codexauth"
 )
 
-// CodexVault is the named Codex logins of one box install, in Dir.
+// CodexVault is the named Codex logins of one box install, in Dir. A switch
+// reaches only the Codex processes that start after it: a running Codex
+// keeps the login it read until it is restarted. It refreshes that login
+// only while auth.json still holds its account (reload_if_account_id_matches
+// in codex-rs/login/src/auth/manager.rs, rust-v0.166.0), so a Codex left on
+// an account the box switched away from never spends that entry's tokens.
 type CodexVault struct {
 	Dir   string
 	Store codexauth.Store
-	// Running lists the Codex processes that use the box's Codex home.
-	Running func() (CodexRunning, error)
-}
-
-// CodexRunning are the Codex processes that use the box's Codex home.
-type CodexRunning struct {
-	PIDs []int
-	// Sessions are the box's sessions among them, which rcodex can resume.
-	Sessions []string
 }
 
 // codexRefreshAhead is how long before its access token expires KeepFresh
 // refreshes an idle login: the timer runs daily, so each login rotates as
 // often as a Codex that used it would rotate it.
 const codexRefreshAhead = 24 * time.Hour
+
+// codexBusyWindow is how close to its expiry the live access token may be
+// for a switch. A Codex refreshes outside its lock and saves the new tokens
+// only if auth.json still holds its login, so a switch that lands between
+// the two loses them, and the saved copy holds a spent refresh token. A
+// Codex refreshes when its access token is five minutes from expiry, which
+// this window keeps switches away from; one that refreshes on a refused
+// request, which a valid token rarely meets, can still race a switch.
+const codexBusyWindow = 15 * time.Minute
 
 type codexState = state[codexauth.Login]
 
@@ -148,11 +151,10 @@ func (v CodexVault) Usage(ctx context.Context) (Listing, error) {
 	}), nil
 }
 
-// Use makes the named account the box's Codex login, keeping the live login
-// in its own entry first. A running Codex keeps the login it read, and
-// refreshes it without saving the new tokens anywhere the vault sees, so Use
-// refuses while any Codex runs: once Codex runs nowhere, no copy of a login
-// is in use but the live one. It also refuses to drop a login it cannot keep.
+// Use makes the named account the box's Codex login for every Codex that
+// starts after it, keeping the live login in its own entry first. It
+// refuses to drop a login it cannot keep, and to switch while a Codex may
+// be refreshing the live login.
 func (v CodexVault) Use(ctx context.Context, name string) (switched bool, err error) {
 	if err := ValidName(name); err != nil {
 		return false, err
@@ -173,13 +175,10 @@ func (v CodexVault) Use(ctx context.Context, name string) (switched bool, err er
 			return nil
 		case l.active == "":
 			return fmt.Errorf("the box's Codex is signed in to %s; keep that login with `rcodex account save <name>` first", l.read.Email())
-		}
-		running, err := v.Running()
-		if err != nil {
-			return fmt.Errorf("listing the running Codex processes: %w", err)
-		}
-		if len(running.PIDs) > 0 {
-			return codexRunningError(running)
+		case l.read.AccessExpiresBy(v.Store.Now()):
+			return errors.New("the box's Codex login expired, and the next Codex request refreshes it, which a switch now could lose; send a Codex session a message, then switch, or, if that account was signed out, run `codex logout` on the box first")
+		case l.read.AccessExpiresBy(v.Store.Now().Add(codexBusyWindow)):
+			return errors.New("the box's Codex is about to refresh its login, which a switch now could lose; try again in a quarter of an hour")
 		}
 		login, err := v.fresh(ctx, s, name)
 		if err != nil {
@@ -194,20 +193,6 @@ func (v CodexVault) Use(ctx context.Context, name string) (switched bool, err er
 		})
 	})
 	return switched, err
-}
-
-// codexRunningError says which Codex processes keep a switch from happening,
-// and how to move the box's sessions among them over.
-func codexRunningError(r CodexRunning) error {
-	pids := make([]string, len(r.PIDs))
-	for i, pid := range r.PIDs {
-		pids[i] = strconv.Itoa(pid)
-	}
-	msg := fmt.Sprintf("Codex runs on the box (pid %s) with the login a switch would replace, which it would go on using and refreshing where the box cannot keep it; exit every Codex, switch, then start them again", strings.Join(pids, ", "))
-	if len(r.Sessions) > 0 {
-		msg += "; resume each of the box's sessions with rcodex resume <id>: " + strings.Join(r.Sessions, ", ")
-	}
-	return errors.New(msg)
 }
 
 // Save keeps the live login, which no entry names, under name.
