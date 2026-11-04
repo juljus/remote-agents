@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Juljus <juljus@gmail.com>
+Date: Wed, 4 Nov 2026 22:43:21 +0200
+Subject: [PATCH 3/4] fix(daemon): treat every client write error as a hangup
+
+The shell->client thread counted only EPIPE as a client hangup when
+writing a heartbeat or a MaybeSwitch chunk; any other error ended the
+thread. A client that goes away while a write to it is blocked on its
+full socket (a stalled ssh connection, a sleeping laptop) fails that
+write with ECONNRESET, so the thread died and the session could never
+be attached again although its shell kept running (#335).
+
+A failed write to the client says nothing about the shell, whatever the
+errno. Route all chunk writes through one helper and drop the client on
+any error, as the data path already did.
+---
+ libshpool/src/daemon/shell.rs | 43 ++++++++++++++++++++---------------
+ 1 file changed, 25 insertions(+), 18 deletions(-)
+
+diff --git a/libshpool/src/daemon/shell.rs b/libshpool/src/daemon/shell.rs
+index a4dc4f8..7d47467 100644
+--- a/libshpool/src/daemon/shell.rs
++++ b/libshpool/src/daemon/shell.rs
+@@ -198,6 +198,19 @@ pub enum ClientConnectionStatus {
+     DetachNone,
+ }
+ 
++impl ClientConnection {
++    /// Writes one chunk to the client and flushes it.
++    ///
++    /// An error here is always about this client and never about the shell:
++    /// the client hung up (EPIPE), went away while a write to it was blocked
++    /// on its full socket (ECONNRESET), and so on. Whatever the errno, the
++    /// caller drops the client and carries on, because the shell->client
++    /// thread has to outlive every client of its shell.
++    fn write_chunk(&mut self, chunk: Chunk) -> io::Result<()> {
++        chunk.write_to(&mut self.sink).and_then(|_| self.sink.flush())
++    }
++}
++
+ struct ResizeCmd {
+     /// The actual size to set to
+     size: TtySize,
+@@ -423,23 +436,22 @@ impl SessionInner {
+                     recv(args.heartbeat) -> request_id => {
+                         let client_present = if let ClientConnectionMsg::New(conn) = &mut client_conn {
+                             let chunk = Chunk { kind: ChunkKind::Heartbeat, buf: &[] };
+-                            match chunk.write_to(&mut conn.sink).and_then(|_| conn.sink.flush()) {
+-                                Ok(_) => {
++                            match conn.write_chunk(chunk) {
++                                Ok(()) => {
+                                     trace!("wrote heartbeat");
+                                     true
+                                 }
+-                                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+-                                    trace!("client hangup: {:?}", e);
+-                                    false
+-                                }
+                                 Err(e) => {
+-                                    error!("unexpected IO error while writing heartbeat: {}", e);
+-                                    return Err(e).context("writing heartbeat")?;
++                                    info!("writing heartbeat: client hangup: {:?}", e);
++                                    false
+                                 }
+                             }
+                         } else {
+                             false
+                         };
++                        if !client_present {
++                            client_conn = ClientConnectionMsg::Disconnect;
++                        }
+ 
+                         test_hooks::emit("daemon-wrote-heartbeat");
+ 
+@@ -469,16 +481,13 @@ impl SessionInner {
+                         }
+ 
+                         let chunk = Chunk { kind: ChunkKind::MaybeSwitch, buf: &encoded[..] };
+-                        match chunk.write_to(&mut conn.sink).and_then(|_| conn.sink.flush()) {
+-                            Ok(_) => {
++                        match conn.write_chunk(chunk) {
++                            Ok(()) => {
+                                 trace!("wrote MaybeSwitch");
+                             }
+-                            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+-                                trace!("writing MaybeSwitch: client hangup: {:?}", e);
+-                            }
+                             Err(e) => {
+-                                error!("unexpected IO error while writing heartbeat: {}", e);
+-                                return Err(e).context("writing MaybeSwitch")?;
++                                info!("writing MaybeSwitch: client hangup: {:?}", e);
++                                client_conn = ClientConnectionMsg::Disconnect;
+                             }
+                         }
+                     }
+@@ -620,9 +629,7 @@ impl SessionInner {
+                         }
+                     }
+ 
+-                    let write_result =
+-                        chunk.write_to(&mut conn.sink).and_then(|_| conn.sink.flush());
+-                    if let Err(err) = write_result {
++                    if let Err(err) = conn.write_chunk(chunk) {
+                         info!("client_stream write err, assuming hangup: {:?}", err);
+                         reset_client_conn = true;
+                     } else {

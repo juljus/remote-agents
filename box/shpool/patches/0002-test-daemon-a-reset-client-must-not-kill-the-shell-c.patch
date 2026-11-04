@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Juljus <juljus@gmail.com>
+Date: Wed, 4 Nov 2026 22:42:38 +0200
+Subject: [PATCH 2/4] test(daemon): a reset client must not kill the
+ shell->client thread
+
+---
+ libshpool/src/daemon/shell.rs | 88 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 88 insertions(+)
+
+diff --git a/libshpool/src/daemon/shell.rs b/libshpool/src/daemon/shell.rs
+index 4a5d398..a4dc4f8 100644
+--- a/libshpool/src/daemon/shell.rs
++++ b/libshpool/src/daemon/shell.rs
+@@ -1271,8 +1271,96 @@ fn snip_buf(
+ 
+ #[cfg(test)]
+ mod test {
++    use std::os::unix::process::CommandExt as _;
++
+     use super::*;
+ 
++    /// Regression test for a reset client connection killing the
++    /// shell->client thread. A client that dies while the thread is blocked
++    /// writing to it (its socket full because it stopped reading, e.g. an ssh
++    /// session stalled by a sleeping laptop) fails that write with ECONNRESET
++    /// rather than EPIPE. The heartbeat write counted only EPIPE as a hangup,
++    /// so the reset ended the thread for good: the shell kept running but no
++    /// client could ever attach to it again.
++    #[test]
++    fn heartbeat_to_reset_client_keeps_shell_to_client_thread() -> anyhow::Result<()> {
++        let mut cmd = std::process::Command::new("sleep");
++        cmd.arg("60");
++        let fork = shpool_pty::fork::Fork::from_ptmx().context("forking pty")?;
++        if fork.is_child().is_ok() {
++            let err = cmd.exec();
++            eprintln!("exec err: {err:?}");
++            std::process::exit(1);
++        }
++        let child_pid = fork.child_pid().ok_or(anyhow!("no child pid"))?;
++
++        let size = TtySize { rows: 24, cols: 80, xpixel: 0, ypixel: 0 };
++        let (ctl, args) =
++            ShellToClientCtl::new(0, size.clone(), 100, Arc::new(ExitNotifier::new()));
++        let ctl = Arc::new(Mutex::new(ctl));
++        let config = config::Manager::new(None)?;
++        let inner = SessionInner {
++            name: String::from("reset"),
++            shell_to_client_ctl: Arc::clone(&ctl),
++            pty_master: fork,
++            client_stream: None,
++            config: config.clone(),
++            term_db: Arc::new(termini::TermInfo::from_name("xterm")?),
++            daily_messenger: Arc::new(show_motd::DailyMessenger::new(config)?),
++            needs_initial_motd_dump: false,
++            supports_sentinels: false,
++            shell_to_client_join_h: None,
++        };
++        let join_h = inner.spawn_shell_to_client(args)?;
++
++        let attach = |stream: &UnixStream| -> anyhow::Result<ClientConnectionStatus> {
++            let ctl = ctl.lock();
++            ctl.client_connection.send_timeout(
++                ClientConnectionMsg::New(ClientConnection {
++                    sink: io::BufWriter::new(stream.try_clone()?),
++                    size: size.clone(),
++                    stream: stream.try_clone()?,
++                }),
++                SHELL_TO_CLIENT_CTL_TIMEOUT,
++            )?;
++            Ok(ctl.client_connection_ack.recv_timeout(SHELL_TO_CLIENT_CTL_TIMEOUT)?)
++        };
++
++        let (daemon_end, client_end) = UnixStream::pair()?;
++        // Fill the socket so the next write blocks, like a client that
++        // stopped reading.
++        daemon_end.set_nonblocking(true)?;
++        let filler = [0u8; 4096];
++        loop {
++            match (&daemon_end).write(&filler) {
++                Ok(_) => continue,
++                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
++                Err(e) => return Err(e.into()),
++            }
++        }
++        daemon_end.set_nonblocking(false)?;
++        attach(&daemon_end)?;
++
++        ctl.lock().heartbeat.send_timeout(1, SHELL_TO_CLIENT_CTL_TIMEOUT)?;
++        // Let the heartbeat write block on the full socket, then close the
++        // client with all that data unread.
++        thread::sleep(Duration::from_millis(200));
++        drop(client_end);
++
++        match ctl.lock().heartbeat_ack.recv_timeout(Duration::from_secs(2)) {
++            Ok((1, false)) => {}
++            ack => panic!("want a hangup ack, got {ack:?}; shell->client: {:?}", join_h.join()),
++        }
++        assert!(!join_h.is_finished(), "shell->client thread exited");
++
++        let (daemon_end, _client_end) = UnixStream::pair()?;
++        let status = attach(&daemon_end)?;
++        assert!(matches!(status, ClientConnectionStatus::New), "got {status:?}");
++
++        signal::kill(Pid::from_raw(child_pid), signal::Signal::SIGKILL)?;
++        Ok(())
++    }
++
+     #[test]
+     fn test_snip_buf() {
+         let cases = vec![

@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Juljus <juljus@gmail.com>
+Date: Wed, 4 Nov 2026 22:44:26 +0200
+Subject: [PATCH 4/4] chore: label the remote-agents build 0.11.5+ra.1
+
+---
+ Cargo.lock        | 2 +-
+ shpool/Cargo.toml | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 4bd1871..78530e2 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -998,7 +998,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+ 
+ [[package]]
+ name = "shpool"
+-version = "0.11.5"
++version = "0.11.5+ra.1"
+ dependencies = [
+  "anyhow",
+  "clap",
+diff --git a/shpool/Cargo.toml b/shpool/Cargo.toml
+index 44f26a2..19f7bb7 100644
+--- a/shpool/Cargo.toml
++++ b/shpool/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "shpool"
+-version = "0.11.5"
++version = "0.11.5+ra.1"
+ edition = "2024"
+ authors = ["Ethan Pailes <pailes@google.com>"]
+ repository = "https://github.com/shell-pool/shpool"
