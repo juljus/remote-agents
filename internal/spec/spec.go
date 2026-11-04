@@ -110,6 +110,9 @@ const (
 	// ExitSessionLost: the session ended without its agent exiting on its own,
 	// as when its shpool daemon stops; a reconnect resumes it.
 	ExitSessionLost = 77
+	// ExitUnattachable: shpool could not attach the session, whose agent still
+	// runs on the box, so attaching again would fail the same way.
+	ExitUnattachable = 78
 	// ExitAgentReserved stands in for an agent exit status that means something
 	// else on the link: 255, which ssh reserves for its own failures, and the
 	// box's own codes above.

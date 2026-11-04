@@ -59,7 +59,8 @@ func scopeArgv(l boxlayout.Layout, session, unit string, memoryMax uint64) []str
 
 // Attach runs shpool attached to the spec's session and returns its exit
 // code. shpool also exits 0 when another terminal takes the session over, so
-// a session still running after a clean exit is reported as taken over. A
+// a session still running after a clean exit is reported as taken over, and
+// one still running after a failed exit as unattachable. A
 // stale attempt of a run, one a newer attempt replaced, attaches nothing; if
 // one took the session between its claim and its attach, Attach takes the
 // session back.
@@ -117,7 +118,20 @@ func Attach(l boxlayout.Layout, s spec.Spec, stdio IO) (int, error) {
 				return spec.ExitSessionLost, nil
 			}
 		}
-		if code == 255 || code == spec.ExitTakenOver || code == spec.ExitStaleAttempt || code == spec.ExitSessionLost {
+		if code > 0 {
+			// An agent that exits takes its session with it, and a session
+			// another client still holds is only busy. One left disconnected
+			// means shpool itself failed to attach it.
+			sess, running, err := listedAfter(l, s.Session, takeoverGrace)
+			if err != nil {
+				return 1, err
+			}
+			if running && sess.Status == "Disconnected" {
+				fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: shpool cannot attach %s, but its agent still runs on the box; attaching again will not help.\r\nremote-agents: to get the agent back, stop it with: systemctl --user stop '%s', then resume it.\r\n", s.Session, l.SessionScope(s.Session, "*"))
+				return spec.ExitUnattachable, nil
+			}
+		}
+		if code == 255 || code == spec.ExitTakenOver || code == spec.ExitStaleAttempt || code == spec.ExitSessionLost || code == spec.ExitUnattachable {
 			fmt.Fprintf(stdio.Stderr, "\r\nremote-agents: the agent exited with status %d, reported as %d\r\n", code, spec.ExitAgentReserved)
 			return spec.ExitAgentReserved, nil
 		}
@@ -185,17 +199,25 @@ const takeoverGrace = 2 * time.Second
 
 // outlives reports whether session is still running after grace.
 func outlives(l boxlayout.Layout, session string, grace time.Duration) (bool, error) {
+	_, running, err := listedAfter(l, session, grace)
+	return running, err
+}
+
+// listedAfter returns session as shpool lists it after grace, and false if it
+// ended by then.
+func listedAfter(l boxlayout.Layout, session string, grace time.Duration) (shpoolSession, bool, error) {
 	deadline := time.Now().Add(grace)
 	for {
 		sessions, err := listSessions(l)
 		if err != nil {
-			return false, err
+			return shpoolSession{}, false, err
 		}
-		if !slices.ContainsFunc(sessions, func(s shpoolSession) bool { return s.Name == session }) {
-			return false, nil
+		i := slices.IndexFunc(sessions, func(s shpoolSession) bool { return s.Name == session })
+		if i < 0 {
+			return shpoolSession{}, false, nil
 		}
 		if time.Now().After(deadline) {
-			return true, nil
+			return sessions[i], true, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
