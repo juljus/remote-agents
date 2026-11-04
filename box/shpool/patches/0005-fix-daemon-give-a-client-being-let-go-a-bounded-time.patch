@@ -1,0 +1,322 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Juljus <juljus@gmail.com>
+Date: Wed, 4 Nov 2026 23:18:23 +0200
+Subject: [PATCH 5/7] fix(daemon): give a client being let go a bounded time to
+ take its exit status
+
+Replacing or detaching a client first writes it an exit status, then acks
+the control message whose sender waits SHELL_TO_CLIENT_CTL_TIMEOUT for
+that ack. A client that stopped reading (a stalled ssh connection)
+blocked that write past the wait, and once it failed the shell->client
+thread blocked for good handing its ack to nobody: the thread lived but
+no attach or detach got through again. That write now gets 100ms.
+
+When the shell exits, the thread now acks first and gives the client up
+to 5s for its exit status, so a slow client still gets the shell's real
+status while a dead one cannot hold the thread, and the attach joining
+it, forever. A client that does not take its status in time is logged at
+info.
+
+The shell->client tests share their setup, kill their shell however they
+end, and the reset test checks that the heartbeat write really blocked.
+---
+ libshpool/src/daemon/shell.rs | 183 +++++++++++++++++++++++-----------
+ 1 file changed, 123 insertions(+), 60 deletions(-)
+
+diff --git a/libshpool/src/daemon/shell.rs b/libshpool/src/daemon/shell.rs
+index 1d890c4..c20d656 100644
+--- a/libshpool/src/daemon/shell.rs
++++ b/libshpool/src/daemon/shell.rs
+@@ -63,6 +63,18 @@ const SHELL_TO_CLIENT_POLL_MS: u16 = 50;
+ // shell->client thread.
+ const SHELL_TO_CLIENT_CTL_TIMEOUT: time::Duration = time::Duration::from_millis(300);
+ 
++// How long a client that is replaced or detached gets to take its exit
++// status. The thread acks only after that write, and the sender waits
++// SHELL_TO_CLIENT_CTL_TIMEOUT for the ack: a client that stopped reading must
++// not hold the write past it, or the late ack blocks the thread for good.
++const DETACH_EXIT_CHUNK_WRITE_TIMEOUT: time::Duration = time::Duration::from_millis(100);
++
++// How long the client of a shell that exited gets to take its exit status.
++// The ack goes out first, so a slow client can take its time; the bound only
++// keeps a dead one from holding the thread, and the session joining it, for
++// good.
++const SHELL_EXIT_CHUNK_WRITE_TIMEOUT: time::Duration = time::Duration::from_secs(5);
++
+ /// Lifecycle state tracking when sessions were last connected/disconnected and
+ /// by whom. The fields update in lockstep, so they live behind a single private
+ /// lock that only this type's methods take, exactly once per update or read.
+@@ -221,6 +233,16 @@ impl ClientConnection {
+     fn write_chunk(&mut self, chunk: Chunk) -> io::Result<()> {
+         chunk.write_to(&mut self.sink).and_then(|_| self.sink.flush())
+     }
++
++    /// Sends the client its exit status, waiting at most timeout for it to
++    /// take it, and shuts its socket.
++    fn hang_up(mut self, status: i32, timeout: time::Duration) -> anyhow::Result<()> {
++        if let Err(e) = self.stream.set_write_timeout(Some(timeout)) {
++            warn!("bounding the exit status write: {:?}", e);
++        }
++        SessionInner::write_exit_chunk(&mut self.sink, status);
++        shutdown_socket(&self.stream, net::Shutdown::Both)
++    }
+ }
+ 
+ struct ResizeCmd {
+@@ -360,9 +382,8 @@ impl SessionInner {
+                             Ok(ClientConnectionMsg::New(conn)) => {
+                                 info!("got new connection (rows={}, cols={})", conn.size.rows, conn.size.cols);
+                                 do_reattach = true;
+-                                let ack = if let ClientConnectionMsg::New(mut old_conn) = client_conn {
+-                                    Self::write_exit_chunk(&mut old_conn.sink, 0);
+-                                    shutdown_socket(&old_conn.stream, net::Shutdown::Both)?;
++                                let ack = if let ClientConnectionMsg::New(old_conn) = client_conn {
++                                    old_conn.hang_up(0, DETACH_EXIT_CHUNK_WRITE_TIMEOUT)?;
+                                     ClientConnectionStatus::Replaced
+                                 } else {
+                                     ClientConnectionStatus::New
+@@ -395,10 +416,9 @@ impl SessionInner {
+                                     .context("sending client connection ack")?;
+                             }
+                             Ok(ClientConnectionMsg::Disconnect) => {
+-                                let ack = if let ClientConnectionMsg::New(mut old_conn) = client_conn {
++                                let ack = if let ClientConnectionMsg::New(old_conn) = client_conn {
+                                     info!("disconnect, shutting down client stream");
+-                                    Self::write_exit_chunk(&mut old_conn.sink, 0);
+-                                    shutdown_socket(&old_conn.stream, net::Shutdown::Both)?;
++                                    old_conn.hang_up(0, DETACH_EXIT_CHUNK_WRITE_TIMEOUT)?;
+                                     ClientConnectionStatus::Detached
+                                 } else {
+                                     info!("disconnect, no client stream to shut down");
+@@ -410,24 +430,26 @@ impl SessionInner {
+                                     .context("sending client disconnect ack")?;
+                             }
+                             Ok(ClientConnectionMsg::DisconnectExit(exit_status)) => {
+-                                let ack = if let ClientConnectionMsg::New(mut old_conn) = client_conn {
++                                let ack = if matches!(client_conn, ClientConnectionMsg::New(_)) {
++                                    ClientConnectionStatus::Detached
++                                } else {
++                                    ClientConnectionStatus::DetachNone
++                                };
++                                args.client_connection_ack.send(ack)
++                                    .context("sending client disconnect exit ack")?;
++
++                                if let ClientConnectionMsg::New(old_conn) = client_conn {
+                                     info!("disconnectexit({}), shutting down client stream",
+                                            exit_status);
+ 
+                                     // write an exit status frame so the attach process
+                                     // can exit with the same exit code as the child shell
+-                                    Self::write_exit_chunk(&mut old_conn.sink, exit_status);
+-                                    shutdown_socket(&old_conn.stream, net::Shutdown::Both)?;
+-
+-                                    ClientConnectionStatus::Detached
++                                    old_conn.hang_up(exit_status, SHELL_EXIT_CHUNK_WRITE_TIMEOUT)?;
+                                 } else {
+                                     info!(
+                                         "disconnectexit({}), no client stream to shut down",
+                                           exit_status);
+-                                    ClientConnectionStatus::DetachNone
+-                                };
+-                                args.client_connection_ack.send(ack)
+-                                    .context("sending client disconnect exit ack")?;
++                                }
+ 
+                                 return Ok(());
+                             }
+@@ -683,6 +705,9 @@ impl SessionInner {
+             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                 trace!("client hangup: {:?}", e);
+             }
++            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
++                info!("client did not take its exit status in time: {:?}", e);
++            }
+             Err(e) => {
+                 error!("writing exit status chunk: {:?}", e);
+             }
+@@ -1308,17 +1333,21 @@ mod test {
+ 
+     use super::*;
+ 
+-    /// Regression test for a reset client connection killing the
+-    /// shell->client thread. A client that dies while the thread is blocked
+-    /// writing to it (its socket full because it stopped reading, e.g. an ssh
+-    /// session stalled by a sleeping laptop) fails that write with ECONNRESET
+-    /// rather than EPIPE. The heartbeat write counted only EPIPE as a hangup,
+-    /// so the reset ended the thread for good: the shell kept running but no
+-    /// client could ever attach to it again.
++    /// A shell child that is killed when the test ends, however it ends.
++    struct Child(libc::pid_t);
++
++    impl Drop for Child {
++        fn drop(&mut self) {
++            if let Err(e) = signal::kill(Pid::from_raw(self.0), signal::Signal::SIGKILL) {
++                eprintln!("killing test shell {}: {e:?}", self.0);
++            }
++        }
++    }
++
+     /// A session inner for a pty running `sleep 60`, plus the two ends of
+     /// the channels for a shell->client thread that is not spawned yet.
+     fn sleeping_inner(
+-    ) -> anyhow::Result<(SessionInner, Arc<Mutex<ShellToClientCtl>>, ShellToClientArgs, libc::pid_t)>
++    ) -> anyhow::Result<(SessionInner, Arc<Mutex<ShellToClientCtl>>, ShellToClientArgs, Child)>
+     {
+         let mut cmd = std::process::Command::new("sleep");
+         cmd.arg("60");
+@@ -1328,7 +1357,7 @@ mod test {
+             eprintln!("exec err: {err:?}");
+             std::process::exit(1);
+         }
+-        let child_pid = fork.child_pid().ok_or(anyhow!("no child pid"))?;
++        let child = Child(fork.child_pid().ok_or(anyhow!("no child pid"))?);
+ 
+         let size = TtySize { rows: 24, cols: 80, xpixel: 0, ypixel: 0 };
+         let (ctl, args) = ShellToClientCtl::new(0, size, 100, Arc::new(ExitNotifier::new()));
+@@ -1347,7 +1376,40 @@ mod test {
+             shell_to_client_join_h: None,
+             shell_to_client_outcome: None,
+         };
+-        Ok((inner, ctl, args, child_pid))
++        Ok((inner, ctl, args, child))
++    }
++
++    /// Hands stream to the shell->client thread as its new client.
++    fn attach(
++        ctl: &Mutex<ShellToClientCtl>,
++        stream: &UnixStream,
++    ) -> anyhow::Result<ClientConnectionStatus> {
++        let ctl = ctl.lock();
++        ctl.client_connection.send_timeout(
++            ClientConnectionMsg::New(ClientConnection {
++                sink: io::BufWriter::new(stream.try_clone()?),
++                size: TtySize { rows: 24, cols: 80, xpixel: 0, ypixel: 0 },
++                stream: stream.try_clone()?,
++            }),
++            SHELL_TO_CLIENT_CTL_TIMEOUT,
++        )?;
++        Ok(ctl.client_connection_ack.recv_timeout(SHELL_TO_CLIENT_CTL_TIMEOUT)?)
++    }
++
++    /// Fills the socket so that the next write to it blocks, as it does for
++    /// a client that stopped reading.
++    fn fill(stream: &UnixStream) -> anyhow::Result<()> {
++        stream.set_nonblocking(true)?;
++        let filler = [0u8; 4096];
++        let mut sink = stream;
++        loop {
++            match sink.write(&filler) {
++                Ok(_) => continue,
++                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
++                Err(e) => return Err(e.into()),
++            }
++        }
++        Ok(stream.set_nonblocking(false)?)
+     }
+ 
+     /// Regression test for a session whose shell->client thread failed while
+@@ -1357,7 +1419,7 @@ mod test {
+     /// disconnected channel". Every attach must see the thread's failure.
+     #[test]
+     fn failed_shell_to_client_thread_is_reported_every_time() -> anyhow::Result<()> {
+-        let (mut inner, _ctl, _args, child_pid) = sleeping_inner()?;
++        let (mut inner, _ctl, _args, _child) = sleeping_inner()?;
+         let (fail_tx, fail_rx) = crossbeam_channel::bounded::<()>(0);
+         inner.shell_to_client_join_h = Some(thread::spawn(move || {
+             fail_rx.recv()?;
+@@ -1377,49 +1439,32 @@ mod test {
+                 exit => panic!("want the thread's failure, got {exit:?}"),
+             }
+         }
+-
+-        signal::kill(Pid::from_raw(child_pid), signal::Signal::SIGKILL)?;
+         Ok(())
+     }
+ 
++    /// Regression test for a reset client connection killing the
++    /// shell->client thread. On Linux, a client that goes away while the
++    /// thread is blocked writing to it (its socket full because it stopped
++    /// reading, e.g. an ssh session stalled by a sleeping laptop) fails that
++    /// write with ECONNRESET rather than EPIPE. The heartbeat write counted
++    /// only EPIPE as a hangup, so the reset ended the thread for good: the
++    /// shell kept running but no client could ever attach to it again.
+     #[test]
+     fn heartbeat_to_reset_client_keeps_shell_to_client_thread() -> anyhow::Result<()> {
+-        let (inner, ctl, args, child_pid) = sleeping_inner()?;
+-        let size = args.tty_size.clone();
++        let (inner, ctl, args, _child) = sleeping_inner()?;
+         let join_h = inner.spawn_shell_to_client(args)?;
+ 
+-        let attach = |stream: &UnixStream| -> anyhow::Result<ClientConnectionStatus> {
+-            let ctl = ctl.lock();
+-            ctl.client_connection.send_timeout(
+-                ClientConnectionMsg::New(ClientConnection {
+-                    sink: io::BufWriter::new(stream.try_clone()?),
+-                    size: size.clone(),
+-                    stream: stream.try_clone()?,
+-                }),
+-                SHELL_TO_CLIENT_CTL_TIMEOUT,
+-            )?;
+-            Ok(ctl.client_connection_ack.recv_timeout(SHELL_TO_CLIENT_CTL_TIMEOUT)?)
+-        };
+-
+         let (daemon_end, client_end) = UnixStream::pair()?;
+-        // Fill the socket so the next write blocks, like a client that
+-        // stopped reading.
+-        daemon_end.set_nonblocking(true)?;
+-        let filler = [0u8; 4096];
+-        loop {
+-            match (&daemon_end).write(&filler) {
+-                Ok(_) => continue,
+-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+-                Err(e) => return Err(e.into()),
+-            }
+-        }
+-        daemon_end.set_nonblocking(false)?;
+-        attach(&daemon_end)?;
++        fill(&daemon_end)?;
++        attach(&ctl, &daemon_end)?;
+ 
+         ctl.lock().heartbeat.send_timeout(1, SHELL_TO_CLIENT_CTL_TIMEOUT)?;
+-        // Let the heartbeat write block on the full socket, then close the
+-        // client with all that data unread.
++        // The thread took the heartbeat, so no ack yet means its write is
++        // blocked on the full socket: closing the client with all that data
++        // unread now resets the connection under it.
+         thread::sleep(Duration::from_millis(200));
++        let early = ctl.lock().heartbeat_ack.try_recv();
++        assert!(early.is_err(), "the heartbeat write did not block: {early:?}");
+         drop(client_end);
+ 
+         match ctl.lock().heartbeat_ack.recv_timeout(Duration::from_secs(2)) {
+@@ -1429,10 +1474,28 @@ mod test {
+         assert!(!join_h.is_finished(), "shell->client thread exited");
+ 
+         let (daemon_end, _client_end) = UnixStream::pair()?;
+-        let status = attach(&daemon_end)?;
++        let status = attach(&ctl, &daemon_end)?;
+         assert!(matches!(status, ClientConnectionStatus::New), "got {status:?}");
++        Ok(())
++    }
++
++    /// Regression test for a stalled client wedging its session. Replacing a
++    /// client first tells it to exit, and that write blocked for as long as
++    /// the client was not reading. The attach waiting for the ack gave up,
++    /// and once the write finally failed the thread blocked for good handing
++    /// its ack to nobody, so no later attach could get through.
++    #[test]
++    fn replacing_a_stalled_client_acks_in_time() -> anyhow::Result<()> {
++        let (inner, ctl, args, _child) = sleeping_inner()?;
++        let _join_h = inner.spawn_shell_to_client(args)?;
++
++        let (stalled, _stalled_peer) = UnixStream::pair()?;
++        fill(&stalled)?;
++        attach(&ctl, &stalled)?;
+ 
+-        signal::kill(Pid::from_raw(child_pid), signal::Signal::SIGKILL)?;
++        let (fresh, _fresh_peer) = UnixStream::pair()?;
++        let status = attach(&ctl, &fresh)?;
++        assert!(matches!(status, ClientConnectionStatus::Replaced), "got {status:?}");
+         Ok(())
+     }
+ 

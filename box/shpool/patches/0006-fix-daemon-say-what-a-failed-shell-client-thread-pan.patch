@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Juljus <juljus@gmail.com>
+Date: Wed, 4 Nov 2026 23:18:23 +0200
+Subject: [PATCH 6/7] fix(daemon): say what a failed shell->client thread
+ panicked with
+
+---
+ libshpool/src/daemon/shell.rs | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/libshpool/src/daemon/shell.rs b/libshpool/src/daemon/shell.rs
+index c20d656..bb1dffb 100644
+--- a/libshpool/src/daemon/shell.rs
++++ b/libshpool/src/daemon/shell.rs
+@@ -318,7 +318,14 @@ impl SessionInner {
+             self.shell_to_client_outcome = Some(match join_h.join() {
+                 Ok(Ok(())) => ShellToClientExit::Clean,
+                 Ok(Err(e)) => ShellToClientExit::Failed(format!("{e:#}")),
+-                Err(panic) => ShellToClientExit::Failed(format!("panicked: {panic:?}")),
++                Err(panic) => ShellToClientExit::Failed(format!(
++                    "panicked: {}",
++                    panic
++                        .downcast_ref::<&str>()
++                        .copied()
++                        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
++                        .unwrap_or("with a payload that is not a string")
++                )),
+             });
+         }
+         self.shell_to_client_outcome.clone()

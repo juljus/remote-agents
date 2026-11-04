@@ -8,7 +8,7 @@ shopt -s inherit_errexit
 
 # shpool/build.sh builds this byte for byte; update the pin whenever box/shpool changes.
 SHPOOL_VERSION=0.11.5+ra.1
-SHPOOL_SHA256=018d90697b0c935bbb68654b9672be4c8ae6fb10b476c6c04342e53e6f0d1520
+SHPOOL_SHA256=338c342dd09af10693592eb2989e294c59254de23d7150aa2d377586832b2367
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 
