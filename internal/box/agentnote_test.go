@@ -76,3 +76,13 @@ func TestCodexIsToldAboutLaptopFiles(t *testing.T) {
 		t.Fatal("a broken config went unread")
 	}
 }
+
+// An agent that knows a save waits for the user's Touch ID gives it time, and
+// knows it may name any laptop path.
+func TestTheNoteSaysASaveWaitsForTheUserAndMayGoAnywhere(t *testing.T) {
+	for _, want := range []string{"Touch ID", "anywhere on the laptop", "10 minutes"} {
+		if !strings.Contains(agentNote, want) {
+			t.Errorf("the note does not say %q: %s", want, agentNote)
+		}
+	}
+}

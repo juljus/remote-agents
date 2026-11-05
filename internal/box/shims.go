@@ -230,11 +230,12 @@ func cmuxHook(ctx context.Context, args []string, stdio IO, laptop Laptop, sessi
 const laptopSaveUsage = "usage: laptop-save <file> [<laptop path>]"
 
 const laptopSaveHelp = laptopSaveUsage + `
-Saves a box file on the laptop: in ~/Downloads, revealed in Finder, unless a
-laptop path says where. That may be in ~/Downloads (relative paths are, and a
-dir there takes the file under its name) or a file pasted into this session.
-A file there already keeps its name: the save takes a free one, except over a
-pasted file, whose old version goes to the Trash.`
+Saves a box file on the laptop once the user approves it with Touch ID, which
+they are asked for each new place and get up to 10 minutes to give. It goes
+to ~/Downloads, revealed in Finder, unless a laptop path says where: anywhere
+on the laptop (~/ or absolute; a relative path is in ~/Downloads), and a dir
+takes the file under its name. A file the path names is replaced, its old
+version to the Trash; in a dir, the save takes a free name.`
 
 // laptopSave asks the laptop to fetch a box file; it never sends the content
 // over the link itself.

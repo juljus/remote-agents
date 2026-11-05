@@ -15,7 +15,7 @@ import (
 )
 
 // agentNote tells a session's agent what reaches the user's laptop.
-const agentNote = "Laptop files the user pastes into this session are copies on this box: saving one writes it back to the laptop file. To give the user a file you made, run laptop-save <file> [<laptop path>]; it lands in ~/Downloads on the laptop unless a path says where."
+const agentNote = "Laptop files the user pastes into this session are copies on this box: saving one writes it back to the laptop file, a hidden or system one once the user approves with Touch ID. To give the user a file you made, run laptop-save <file> [<laptop path>]; it lands in ~/Downloads on the laptop unless a path says where, which may be anywhere on the laptop (~/ or absolute; a relative path is in ~/Downloads). Each save waits up to 10 minutes for the user to approve it with Touch ID, so give the command that long; if they decline, it fails and the file stays here."
 
 // withClaudeNote gives Claude the note in its system prompt. Claude applies
 // only the last --append-system-prompt, so the note joins one given.

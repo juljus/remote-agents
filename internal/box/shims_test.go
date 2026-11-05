@@ -295,7 +295,7 @@ func TestLaptopSaveRefusesWhatCannotGo(t *testing.T) {
 			t.Errorf("laptop-save %q = %+v, saves %v", args, r, l.saves)
 		}
 	}
-	l := &fakeLaptop{saveErr: errors.New("laptop: refused: /etc/x is neither in ~/Downloads nor a file pasted into this session")}
+	l := &fakeLaptop{saveErr: errors.New("laptop: refused: /etc/x not approved: Canceled by user.; the box keeps its version")}
 	file := filepath.Join(dir, "x")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -307,7 +307,7 @@ func TestLaptopSaveRefusesWhatCannotGo(t *testing.T) {
 
 func TestLaptopSaveHelpSaysWhatItDoes(t *testing.T) {
 	r := runShim(t, "laptop-save", []string{"--help"}, "", &fakeLaptop{}, nil)
-	if r.code != 0 || !strings.Contains(r.stdout, "~/Downloads") {
+	if r.code != 0 || !strings.Contains(r.stdout, "~/Downloads") || !strings.Contains(r.stdout, "Touch ID") {
 		t.Fatalf("--help = %+v", r)
 	}
 }
