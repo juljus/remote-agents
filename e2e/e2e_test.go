@@ -1297,13 +1297,26 @@ func TestAgentSavesReachTheLaptop(t *testing.T) {
 	if err := os.WriteFile(declineFile, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Remove(declineFile) })
+	// A failure before the test removes it must not decline the later tests' prompts.
+	t.Cleanup(func() { _ = os.Remove(declineFile) })
 	mark = len(tm.text())
 	tm.send("save " + boxCopy + " ~/declined.txt\r")
 	tm.expectAfter(mark, `not approved`, 15*time.Second)
 	tm.expectAfter(mark, `save exit=1`, 5*time.Second)
 	if _, err := os.Stat(filepath.Join(laptopHome, "declined.txt")); !os.IsNotExist(err) {
 		t.Fatalf("a declined save landed: %v", err)
+	}
+	// Asking again at once is refused without a prompt, though the user would now say yes.
+	if err := os.Remove(declineFile); err != nil {
+		t.Fatal(err)
+	}
+	prompted := len(approvals(t))
+	mark = len(tm.text())
+	tm.send("save " + boxCopy + " ~/declined.txt\r")
+	tm.expectAfter(mark, `you declined`, 15*time.Second)
+	tm.expectAfter(mark, `save exit=1`, 5*time.Second)
+	if got := approvals(t)[prompted:]; len(got) != 0 {
+		t.Fatalf("asked %q right after a decline", got)
 	}
 
 	tm.send("exit 0\r")

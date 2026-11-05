@@ -193,7 +193,9 @@ for you: the link daemon shows the macOS authentication sheet (Touch ID, or your
 naming the session, whether it creates or replaces, and the full path where the file lands. Every
 `laptop-save` asks the same way. Prompts show one at a time; one declined, failed or unanswered
 for 10 minutes is refused with a notice, and the box keeps the agent's version: a new change, a
-new paste or a new save offers it anew. A daemon that cannot ask, as with no one logged in at the
+new paste or a new save offers it anew. Once you decline (cancel) a prompt, that session's
+requests for the same path are refused without a prompt for 5 minutes, so a box asking again at
+once cannot keep the sheet up until one touch slips; a prompt nobody answered starts no such pause. A daemon that cannot ask, as with no one logged in at the
 screen, refuses. An approval holds for that file's write-backs (or that save destination) and
 session, on the terms its prompt named, until the link daemon restarts: what makes the place
 risky changing, or a save that would now replace the file it was approved to create, asks again.
