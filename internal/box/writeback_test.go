@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -181,4 +184,49 @@ func TestOneWatcherAtATimeSendsWriteBacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectWriteBack(t, newer, want)
+}
+
+// A refused version never reached the laptop: it is the only copy of the
+// agent's change, so neither a prune nor a paste may drop it.
+func TestARefusedVersionStaysTheAgentsChange(t *testing.T) {
+	l := testLayout(t)
+	paths := pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	seen := make(chan linkproto.WriteBackRequest, 10)
+	laptop := &fakeLaptop{writeBack: func(req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
+		seen <- req
+		return linkproto.WriteBackResult{}, fmt.Errorf("laptop: %w: /l now leads to /elsewhere", linkproto.ErrRefused)
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchSessionCopies(ctx, l, laptop, 10*time.Millisecond, 50*time.Millisecond, t.Logf)
+	}()
+	if err := os.WriteFile(paths[0], []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectWriteBack(t, seen, linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/notes.md", BoxPath: paths[0]})
+	expectNone(t, seen)
+	cancel()
+	<-done
+
+	weekAgo := time.Now().Add(-8 * 24 * time.Hour)
+	for _, p := range []string{paths[0], filepath.Dir(paths[0]) + ".json"} {
+		if err := os.Chtimes(p, weekAgo, weekAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := prunePasted(l, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(paths[0]); err != nil || string(got) != "agent" {
+		t.Fatalf("the refused change was pruned: %q, %v", got, err)
+	}
+	err := PasteFilesInto(l, pasteSession, exchange(t, []string{"/l/notes.md"}, [2]string{"/l/notes.md", "laptop 2"}), io.Discard, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "not reached the laptop yet") {
+		t.Fatalf("a paste over the refused change = %v", err)
+	}
+	if got, _ := os.ReadFile(paths[0]); string(got) != "agent" {
+		t.Fatalf("the paste replaced the refused change with %q", got)
+	}
 }

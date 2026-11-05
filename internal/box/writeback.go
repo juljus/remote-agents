@@ -134,7 +134,7 @@ func checkCopy(ctx context.Context, l boxlayout.Layout, laptop Laptop, c pastedC
 	if err != nil {
 		return err
 	}
-	if sum != c.Synced {
+	if sum != c.Synced && sum != c.Refused {
 		reqCtx, cancel := context.WithTimeout(ctx, writeBackTimeout)
 		defer cancel()
 		res, err := laptop.WriteBack(reqCtx, linkproto.WriteBackRequest{Session: c.Session, Origin: c.Origin, BoxPath: c.Path})
@@ -142,13 +142,14 @@ func checkCopy(ctx context.Context, l boxlayout.Layout, laptop Laptop, c pastedC
 		case errors.Is(err, linkproto.ErrRefused):
 			// Asking again would be refused again; the next change asks anew.
 			logf("write-back of %s: %v; not asking again until it changes", c.Path, err)
-			res.SHA256 = sum
+			err = markRefused(l, c, sum)
 		case err != nil:
 			return err
 		default:
 			logf("write-back of %s: %s, %s", c.Path, res.Outcome, res.Path)
+			err = markSynced(l, c, res.SHA256)
 		}
-		if err := markSynced(l, c, res.SHA256); err != nil {
+		if err != nil {
 			return err
 		}
 	}

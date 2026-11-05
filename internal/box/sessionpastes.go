@@ -22,10 +22,13 @@ import (
 // the session replaces its copy.
 
 // copyRecord is what the box keeps about a session's copy: its laptop path,
-// and the hash of the content the laptop last pasted, took or refused.
+// the hash of the content the laptop last pasted or took, and that of a
+// version the laptop refused, which the box does not offer again. A refused
+// version reached no laptop, so it stays a change the laptop lacks.
 type copyRecord struct {
-	Origin string `json:"origin"`
-	Synced string `json:"synced"`
+	Origin  string `json:"origin"`
+	Synced  string `json:"synced"`
+	Refused string `json:"refused,omitempty"`
 }
 
 // pastedCopy is one session's copy of a pasted laptop file.
@@ -34,6 +37,7 @@ type pastedCopy struct {
 	Origin  string
 	Path    string
 	Synced  string
+	Refused string
 	record  string
 }
 
@@ -153,6 +157,7 @@ func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 				Origin:  rec.Origin,
 				Path:    filepath.Join(dir, key, filepath.Base(rec.Origin)),
 				Synced:  rec.Synced,
+				Refused: rec.Refused,
 				record:  record,
 			})
 		}
@@ -160,16 +165,26 @@ func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 	return out, errors.Join(errs...)
 }
 
-// markSynced records that the laptop has content of hash sum for c, unless
-// c's record changed since c was read, as a paste in between changes it.
+// markSynced records that the laptop has content of hash sum for c.
 func markSynced(l boxlayout.Layout, c pastedCopy, sum string) error {
+	return updateCopy(l, c, func(rec *copyRecord) { rec.Synced, rec.Refused = sum, "" })
+}
+
+// markRefused records that the laptop refused c's content of hash sum.
+func markRefused(l boxlayout.Layout, c pastedCopy, sum string) error {
+	return updateCopy(l, c, func(rec *copyRecord) { rec.Refused = sum })
+}
+
+// updateCopy changes c's record with fn, unless the record changed since c
+// was read, as a paste in between changes it.
+func updateCopy(l boxlayout.Layout, c pastedCopy, fn func(*copyRecord)) error {
 	return withFlock(l.PastedLock(), func() error {
 		var rec copyRecord
 		found, err := jsonfile.Read(c.record, &rec)
-		if err != nil || !found || rec != (copyRecord{Origin: c.Origin, Synced: c.Synced}) {
+		if err != nil || !found || rec != (copyRecord{Origin: c.Origin, Synced: c.Synced, Refused: c.Refused}) {
 			return err
 		}
-		rec.Synced = sum
+		fn(&rec)
 		return jsonfile.Write(c.record, rec)
 	})
 }

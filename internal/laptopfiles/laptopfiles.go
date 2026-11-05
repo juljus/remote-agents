@@ -114,9 +114,10 @@ func (f Files) pastedEntry(session, origin string) (entry, error) {
 		return entry{}, fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
 	}
 	dir := filepath.Dir(origin)
+	// A dir that cannot be resolved now, such as one on a volume not mounted, may be back later.
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return entry{}, fmt.Errorf("%w: %v", ErrRefused, err)
+		return entry{}, err
 	}
 	if resolved != dir {
 		return entry{}, fmt.Errorf("%w: %s now leads to %s", ErrRefused, dir, resolved)

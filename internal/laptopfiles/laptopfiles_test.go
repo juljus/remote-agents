@@ -561,3 +561,18 @@ func TestConcurrentWriteBacksOfOneFileLeaveOneOfThem(t *testing.T) {
 	}
 	onlyFiles(t, docs, "notes.md")
 }
+
+// A dir that is gone may come back, as an ejected volume does; that is no refusal.
+func TestAWriteBackIntoAMissingDirFailsWithoutRefusing(t *testing.T) {
+	f := newFixture(t)
+	docs := filepath.Join(f.home, "docs")
+	origin := filepath.Join(docs, "notes.md")
+	f.pasted(t, origin, "laptop")
+	if err := os.RemoveAll(docs); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.files.WriteBack(session, origin, content("agent"))
+	if err == nil || errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v, want a failure that is no refusal", err)
+	}
+}
