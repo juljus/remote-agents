@@ -158,22 +158,46 @@ func TestLastSettingsFindsTheSettingsClaudeApplies(t *testing.T) {
 	cases := []struct {
 		name  string
 		args  []string
-		want  SettingsArg
+		want  ValueArg
 		found bool
 	}{
-		{"none", []string{"--model", "x", "fix it"}, SettingsArg{}, false},
-		{"separate value", []string{"--model", "x", "--settings", "{}"}, SettingsArg{Index: 3}, true},
-		{"joined", []string{"--settings={}", "--verbose"}, SettingsArg{Index: 0, Joined: true}, true},
-		{"last of several", []string{"--settings", "a.json", "--settings={}", "--settings", "{}"}, SettingsArg{Index: 4}, true},
-		{"value of another option", []string{"--append-system-prompt", "--settings"}, SettingsArg{}, false},
-		{"after double dash", []string{"--", "--settings", "{}"}, SettingsArg{}, false},
-		{"without a value", []string{"--settings"}, SettingsArg{}, false},
+		{"none", []string{"--model", "x", "fix it"}, ValueArg{}, false},
+		{"separate value", []string{"--model", "x", "--settings", "{}"}, ValueArg{Index: 3}, true},
+		{"joined", []string{"--settings={}", "--verbose"}, ValueArg{Index: 0, Joined: true}, true},
+		{"last of several", []string{"--settings", "a.json", "--settings={}", "--settings", "{}"}, ValueArg{Index: 4}, true},
+		{"value of another option", []string{"--append-system-prompt", "--settings"}, ValueArg{}, false},
+		{"after double dash", []string{"--", "--settings", "{}"}, ValueArg{}, false},
+		{"without a value", []string{"--settings"}, ValueArg{}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, found := LastSettings(tc.args)
 			if found != tc.found || got != tc.want {
 				t.Fatalf("LastSettings(%q) = %+v, %v; want %+v, %v", tc.args, got, found, tc.want, tc.found)
+			}
+		})
+	}
+}
+
+func TestLastAppendSystemPrompt(t *testing.T) {
+	cases := []struct {
+		name  string
+		args  []string
+		want  ValueArg
+		found bool
+	}{
+		{"none", []string{"--model", "x", "fix it"}, ValueArg{}, false},
+		{"separate value", []string{"--append-system-prompt", "be brief", "--verbose"}, ValueArg{Index: 1}, true},
+		{"joined", []string{"--model", "x", "--append-system-prompt=be brief"}, ValueArg{Index: 2, Joined: true}, true},
+		{"last of several", []string{"--append-system-prompt", "a", "--append-system-prompt", "b"}, ValueArg{Index: 3}, true},
+		{"value of another option", []string{"--system-prompt", "--append-system-prompt"}, ValueArg{}, false},
+		{"after double dash", []string{"--", "--append-system-prompt", "x"}, ValueArg{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := LastAppendSystemPrompt(tc.args)
+			if found != tc.found || got != tc.want {
+				t.Fatalf("LastAppendSystemPrompt(%q) = %+v, %v; want %+v, %v", tc.args, got, found, tc.want, tc.found)
 			}
 		})
 	}

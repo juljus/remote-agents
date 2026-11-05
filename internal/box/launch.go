@@ -178,7 +178,7 @@ func Launch(l boxlayout.Layout, s spec.Spec, stdio IO, base []string) int {
 			}
 		}
 		seed := kind.startsWith(s.Argv[1:])
-		if s.Argv, err = kind.withHooks(l, s); err != nil {
+		if s.Argv, err = kind.withHooks(l, s, env); err != nil {
 			return fail(err)
 		}
 		if w, err = newWatcher(l, s.Session, s.RunID, rec, seed, now); err != nil {

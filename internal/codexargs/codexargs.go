@@ -100,13 +100,32 @@ func (o option) overridesHooks() bool {
 	return false
 }
 
+// overridesInstructions reports whether opt sets the developer instructions,
+// which the box adds its note on laptop files to.
+func (o option) overridesInstructions() bool {
+	if o.name != "-c" && o.name != "--config" {
+		return false
+	}
+	for _, v := range o.values {
+		if key, _, _ := strings.Cut(v, "="); strings.TrimSpace(key) == "developer_instructions" {
+			return true
+		}
+	}
+	return false
+}
+
+func instructionsError(args []string) error {
+	return fmt.Errorf("%s would replace the developer instructions remote-agents gives Codex; set developer_instructions in the box's ~/.codex/config.toml, which the box adds to", strings.Join(args, " "))
+}
+
 type scan struct {
 	command bool
 	// sub is "resume" or "fork" when the run picks an existing session.
-	sub         string
-	positionals []string
-	last        bool
-	hooks       []string
+	sub          string
+	positionals  []string
+	last         bool
+	hooks        []string
+	instructions []string
 }
 
 func scanArgs(args []string) scan {
@@ -124,6 +143,9 @@ func scanArgs(args []string) scan {
 			opt, next := readOption(args, i)
 			if opt.overridesHooks() {
 				s.hooks = opt.args
+			}
+			if opt.overridesInstructions() {
+				s.instructions = opt.args
 			}
 			if opt.name == "--last" {
 				s.last = true
@@ -166,6 +188,9 @@ func Analyze(args []string) (agentcli.Plan, error) {
 	}
 	if s.hooks != nil {
 		return agentcli.Plan{}, hooksError(s.hooks)
+	}
+	if s.instructions != nil {
+		return agentcli.Plan{}, instructionsError(s.instructions)
 	}
 	id := s.resumed()
 	return agentcli.Plan{Mode: agentcli.ModeSession, Args: args, SessionID: id, Resumes: id != ""}, nil
@@ -224,6 +249,9 @@ func CheckDefaults(args []string) error {
 		}
 		if opt.overridesHooks() {
 			return hooksError(opt.args)
+		}
+		if opt.overridesInstructions() {
+			return instructionsError(opt.args)
 		}
 		if pickerFlags[arg] {
 			return fmt.Errorf("%s picks the session; pass it on the command line", arg)

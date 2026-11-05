@@ -91,6 +91,25 @@ func TestAnalyzeRefusesHookOverrides(t *testing.T) {
 	}
 }
 
+// The box gives Codex developer instructions of its own, added to the config's.
+func TestAnalyzeAndDefaultsRefuseDeveloperInstructions(t *testing.T) {
+	for _, args := range [][]string{
+		{"-c", "developer_instructions='be brief'"},
+		{"--config=developer_instructions=x"},
+		{"resume", "-c", " developer_instructions = 'x'", existing},
+	} {
+		if _, err := Analyze(args); err == nil || !strings.Contains(err.Error(), "developer instructions") {
+			t.Fatalf("Analyze(%q) = %v, want a refusal", args, err)
+		}
+	}
+	if err := CheckDefaults([]string{"--config=developer_instructions=x"}); err == nil || !strings.Contains(err.Error(), "developer instructions") {
+		t.Fatalf("CheckDefaults = %v, want a refusal", err)
+	}
+	if _, err := Analyze([]string{"-c", "developer_instructions_extra=1"}); err != nil {
+		t.Fatalf("Analyze refused another key: %v", err)
+	}
+}
+
 func TestResumeBase(t *testing.T) {
 	cases := []struct {
 		name string

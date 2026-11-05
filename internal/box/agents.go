@@ -29,8 +29,9 @@ type agentKind interface {
 	startsWith(args []string) string
 	// holder probes for a running agent that holds session id.
 	holder(l boxlayout.Layout, env []string, id string) holderProbe
-	// withHooks adds the box's hooks to the agent command line of s.
-	withHooks(l boxlayout.Layout, s spec.Spec) ([]string, error)
+	// withHooks adds the box's hooks and its note on laptop files to the
+	// agent command line of s, which runs with env.
+	withHooks(l boxlayout.Layout, s spec.Spec, env []string) ([]string, error)
 }
 
 var kinds = map[spec.Kind]agentKind{spec.KindClaude: claudeKind{}, spec.KindCodex: codexKind{}}
@@ -77,8 +78,12 @@ func (claudeKind) holder(l boxlayout.Layout, env []string, id string) holderProb
 	return claudeProbe(claudeSessionsDir(l, env), os.DirFS("/proc"), id)
 }
 
-func (claudeKind) withHooks(l boxlayout.Layout, s spec.Spec) ([]string, error) {
-	return withActivityHooks(l, s.Argv, s.Workdir)
+func (claudeKind) withHooks(l boxlayout.Layout, s spec.Spec, _ []string) ([]string, error) {
+	argv, err := withActivityHooks(l, s.Argv, s.Workdir)
+	if err != nil {
+		return nil, err
+	}
+	return withClaudeNote(argv), nil
 }
 
 type codexKind struct{}
@@ -99,8 +104,12 @@ func (codexKind) holder(l boxlayout.Layout, env []string, id string) holderProbe
 	return codexProbe(codexHome(l, env), id)
 }
 
-func (codexKind) withHooks(l boxlayout.Layout, s spec.Spec) ([]string, error) {
-	return withCodexHooks(l, s.Argv, s.HookRelay)
+func (codexKind) withHooks(l boxlayout.Layout, s spec.Spec, env []string) ([]string, error) {
+	argv, err := withCodexNote(s.Argv, codexHome(l, env))
+	if err != nil {
+		return nil, err
+	}
+	return withCodexHooks(l, argv, s.HookRelay)
 }
 
 // codexHome is where Codex keeps its sessions and config.

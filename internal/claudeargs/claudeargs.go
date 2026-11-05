@@ -42,14 +42,15 @@ type scan struct {
 	cont        bool
 	fork        bool
 	sessionID   string
-	settings    *SettingsArg
+	settings     *ValueArg
+	appendPrompt *ValueArg
 }
 
-// SettingsArg locates a --settings value in an argument list.
-type SettingsArg struct {
+// ValueArg locates an option's value in an argument list.
+type ValueArg struct {
 	// Index is the argument holding the value.
 	Index int
-	// Joined is true for the --settings=<value> form.
+	// Joined is true for the --option=<value> form.
 	Joined bool
 }
 
@@ -85,11 +86,18 @@ func scanArgs(args []string) scan {
 			s.sessionID = strings.TrimPrefix(arg, "--session-id=")
 		case arg == "--settings":
 			if i+1 < len(args) {
-				s.settings = &SettingsArg{Index: i + 1}
+				s.settings = &ValueArg{Index: i + 1}
 				i++
 			}
 		case strings.HasPrefix(arg, "--settings="):
-			s.settings = &SettingsArg{Index: i, Joined: true}
+			s.settings = &ValueArg{Index: i, Joined: true}
+		case arg == "--append-system-prompt":
+			if i+1 < len(args) {
+				s.appendPrompt = &ValueArg{Index: i + 1}
+				i++
+			}
+		case strings.HasPrefix(arg, "--append-system-prompt="):
+			s.appendPrompt = &ValueArg{Index: i, Joined: true}
 		case strings.HasPrefix(arg, "-"):
 			if !strings.Contains(arg, "=") && valueOptions[arg] {
 				i++
@@ -106,12 +114,22 @@ func scanArgs(args []string) scan {
 
 // LastSettings finds the --settings that Claude applies: given several, it
 // reads only the last.
-func LastSettings(args []string) (SettingsArg, bool) {
+func LastSettings(args []string) (ValueArg, bool) {
 	s := scanArgs(args)
 	if s.settings == nil {
-		return SettingsArg{}, false
+		return ValueArg{}, false
 	}
 	return *s.settings, true
+}
+
+// LastAppendSystemPrompt finds the --append-system-prompt that Claude
+// applies: given several, it reads only the last.
+func LastAppendSystemPrompt(args []string) (ValueArg, bool) {
+	s := scanArgs(args)
+	if s.appendPrompt == nil {
+		return ValueArg{}, false
+	}
+	return *s.appendPrompt, true
 }
 
 // ResumeBase is args without the session they pick and without a prompt:

@@ -37,8 +37,9 @@ func TestCodexSessionLifecycle(t *testing.T) {
 	tm := start(t, "rfakecodex", "-m", "x")
 	args := tm.expect(`fake-codex args=(.*)\r?\n`, 20*time.Second)[1]
 	id, pid, session := codexStarted(t, tm, 0)
-	// The box keeps Codex off its shared server and adds its hooks; configured args go first.
-	if !strings.HasPrefix(args, "--no-daemon --enable hooks -c hooks={") || !strings.HasSuffix(strings.TrimSpace(args), "} --yolo -m x") {
+	// The box keeps Codex off its shared server and adds its hooks and its note; configured args go first.
+	if !strings.HasPrefix(args, "--no-daemon --enable hooks -c hooks={") || !strings.Contains(args, "} -c developer_instructions=") ||
+		!strings.HasSuffix(strings.TrimSpace(args), " --yolo -m x") {
 		t.Fatalf("agent args = %q", args)
 	}
 	browser := tm.expect(`fake-codex env BROWSER=(\S+)`, 5*time.Second)[1]
