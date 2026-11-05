@@ -54,6 +54,10 @@ var (
 	daemonPid  int
 	openedLog  string
 	revealLog  string
+	// approvalLog has a line per prompt the daemon showed; declineFile, while
+	// it exists, has the user decline them.
+	approvalLog string
+	declineFile string
 )
 
 func TestMain(m *testing.M) {
@@ -102,12 +106,15 @@ func setup(m *testing.M) (int, error) {
 	daemonLog = filepath.Join(work, "daemon.log")
 	openedLog = filepath.Join(work, "opened.log")
 	revealLog = filepath.Join(work, "revealed.log")
+	approvalLog = filepath.Join(work, "approvals.log")
+	declineFile = filepath.Join(work, "decline")
 	for _, d := range []string{binDir, sshDir, laptopHome, filepath.Join(laptopHome, "Downloads")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return 0, err
 		}
 	}
-	build := exec.Command("go", "build", "-o", filepath.Join(binDir, "remote-agents"), "./cmd/remote-agents")
+	// The e2e build asks RA_E2E_APPROVER instead of Touch ID.
+	build := exec.Command("go", "build", "-tags", "e2e", "-o", filepath.Join(binDir, "remote-agents"), "./cmd/remote-agents")
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("build: %v: %s", err, out)
@@ -155,8 +162,14 @@ chmod +x %[1]s/claude-isolated`, boxTestDir, boxHome)); err != nil {
 exec %q "$@"`, blockFile, host, realSSH)); err != nil {
 		return 0, err
 	}
-	// Tests count hook lines before a hook may have run.
-	if err := os.WriteFile(hookLog, nil, 0o644); err != nil {
+	// Tests count hook and prompt lines before one may have come.
+	for _, log := range []string{hookLog, approvalLog} {
+		if err := os.WriteFile(log, nil, 0o644); err != nil {
+			return 0, err
+		}
+	}
+	approver := filepath.Join(work, "approver")
+	if err := writeExec(approver, fmt.Sprintf(`printf '%%s\n' "$1" >> %q; [ ! -e %q ]`, approvalLog, declineFile)); err != nil {
 		return 0, err
 	}
 	fakeCmux := filepath.Join(work, "cmux")
@@ -213,7 +226,7 @@ kind = "claude"
 	}
 	defer logFile.Close()
 	daemon := exec.Command(filepath.Join(binDir, "remote-agents"), "link")
-	daemon.Env = testEnv()
+	daemon.Env = append(testEnv(), "RA_E2E_APPROVER="+approver)
 	daemon.Stdout, daemon.Stderr = logFile, logFile
 	if err := daemon.Start(); err != nil {
 		return 0, err
@@ -1205,17 +1218,25 @@ func TestPastedLaptopPathsReachTheSessionAsTheBoxShouldSeeThem(t *testing.T) {
 }
 
 // An agent's save of a pasted laptop file goes back over that file, the old
-// version to the Trash. Once the laptop's copy changed since, a save goes
-// beside it instead, with a notice. laptop-save puts a box file in
-// ~/Downloads.
+// version to the Trash, without asking. Once the laptop's copy changed since,
+// a save goes beside it instead, with a notice. A hidden file is written back
+// once the user approves, then without asking. laptop-save asks for each new
+// place, ~/Downloads included, and a declined one fails.
 func TestAgentSavesReachTheLaptop(t *testing.T) {
 	t.Cleanup(func() { emptyTrashed(t) })
 	docs := filepath.Join(laptopHome, "docs")
-	if err := os.MkdirAll(docs, 0o755); err != nil {
-		t.Fatal(err)
+	hidden := filepath.Join(laptopHome, "Downloads", ".ra-test")
+	for _, dir := range []string{docs, hidden} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	notes := filepath.Join(docs, "notes.txt")
 	if err := os.WriteFile(notes, []byte("laptop-v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(hidden, "conf.txt")
+	if err := os.WriteFile(conf, []byte("laptop-conf"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	tm := start(t, "rfakeclaude")
@@ -1223,6 +1244,8 @@ func TestAgentSavesReachTheLaptop(t *testing.T) {
 	mark := len(tm.text())
 	tm.send("\x1b[200~" + notes + "\x1b[201~\r")
 	boxCopy := tm.expectAfter(mark, `got: (\S+/session-pastes/\S+/notes\.txt)`, 15*time.Second)[1]
+	session := filepath.Base(filepath.Dir(filepath.Dir(boxCopy)))
+	prompts := approvals(t)
 
 	tm.send("edit " + boxCopy + " agent-v2\r")
 	waitContent(t, notes, "agent-v2", 10*time.Second)
@@ -1237,6 +1260,21 @@ func TestAgentSavesReachTheLaptop(t *testing.T) {
 	if data, err := os.ReadFile(notes); err != nil || string(data) != "edited-on-the-laptop" {
 		t.Fatalf("the laptop's edit became %q, %v", data, err)
 	}
+	if got := approvals(t)[len(prompts):]; len(got) != 0 {
+		t.Fatalf("plain write-backs asked %q", got)
+	}
+
+	mark = len(tm.text())
+	tm.send("\x1b[200~" + conf + "\x1b[201~\r")
+	confCopy := tm.expectAfter(mark, `got: (\S+/session-pastes/\S+/conf\.txt)`, 15*time.Second)[1]
+	tm.send("edit " + confCopy + " agent-conf\r")
+	waitContent(t, conf, "agent-conf", 10*time.Second)
+	tm.send("edit " + confCopy + " agent-conf-2\r")
+	waitContent(t, conf, "agent-conf-2", 10*time.Second)
+	want := []string{"replace " + conf + " with the edit of box session " + session + " (hidden; the old version goes to the Trash)"}
+	if got := approvals(t)[len(prompts):]; !slices.Equal(got, want) {
+		t.Fatalf("asked %q, want %q", got, want)
+	}
 
 	mark = len(tm.text())
 	tm.send("save " + boxCopy + "\r")
@@ -1246,15 +1284,41 @@ func TestAgentSavesReachTheLaptop(t *testing.T) {
 	}
 	waitContent(t, saved, "agent-v3", time.Second)
 	waitContent(t, revealLog, saved+"\n", 5*time.Second)
+	want = append(want, "create "+saved+" with a file from box session "+session)
+	if got := approvals(t)[len(prompts):]; !slices.Equal(got, want) {
+		t.Fatalf("asked %q, want %q", got, want)
+	}
+
+	if err := os.WriteFile(declineFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(declineFile) })
 	mark = len(tm.text())
-	tm.send("save " + boxCopy + " /etc/notes.txt\r")
-	tm.expectAfter(mark, `neither in ~/Downloads nor a file pasted into this session`, 15*time.Second)
+	tm.send("save " + boxCopy + " ~/declined.txt\r")
+	tm.expectAfter(mark, `not approved`, 15*time.Second)
 	tm.expectAfter(mark, `save exit=1`, 5*time.Second)
+	if _, err := os.Stat(filepath.Join(laptopHome, "declined.txt")); !os.IsNotExist(err) {
+		t.Fatalf("a declined save landed: %v", err)
+	}
 
 	tm.send("exit 0\r")
 	if code := tm.wait(15 * time.Second); code != 0 {
 		t.Fatalf("exit %d; output:\n%s", code, tm.text())
 	}
+}
+
+// approvals lists the prompts the daemon has shown.
+func approvals(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(approvalLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.TrimSuffix(string(data), "\n")
+	if text == "" {
+		return nil
+	}
+	return strings.Split(text, "\n")
 }
 
 // waitContent waits for path to hold content.

@@ -89,13 +89,17 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   within about a second, and the laptop file's previous version goes to the Trash. If the laptop
   file changed since the paste (or since the last write-back), it stays as it is: the agent's
   version goes beside it as `name (box).ext`, with a notice on the bottom row. Paste the file
-  again to write back over it once more. Only plain files in your home are written back: not
-  hidden ones, ones under `~/Library` or executables. Copies changed while the link is down go when it is
-  back. A copy goes 7 days after its last paste or change, once the laptop has it.
-- `laptop-save <file> [<laptop path>]` on the box saves a file to the laptop: into `~/Downloads`
-  under its name, or a free `name (1).ext`, and shows it in Finder (`[link] revealer`). A laptop
-  path may name a place in `~/Downloads` (a relative one is) or a file pasted into the session,
-  whose old version goes to the Trash. Agents learn both from one line the box adds to their
+  again to write back over it once more. Plain files in your home are written back on their own;
+  a hidden one, one under `~/Library`, outside your home, executable or reached through a symlink
+  first asks for your Touch ID (or password), once per file and session. Copies changed while the
+  link is down go when it is back. A copy goes 7 days after its last paste or change, once the
+  laptop has it.
+- `laptop-save <file> [<laptop path>]` on the box saves a file to the laptop once you approve it
+  with Touch ID (or your password), which it asks for each new place, `~/Downloads` included, once
+  per session. It goes into `~/Downloads` under its name, or a free `name (1).ext`, and shows it
+  in Finder (`[link] revealer`). A laptop path may name any place on the laptop (`~/` or
+  absolute; a relative one is in `~/Downloads`); a file it names is replaced, and the prompt says
+  so, its old version going to the Trash. Agents learn both from one line the box adds to their
   system prompt (Claude) or developer instructions (Codex, after those of its `config.toml`).
 - While the link is down, Ctrl+C detaches; the session keeps running.
 - A session ends when its agent exits. If the box loses it instead, say the shpool daemon stops,
@@ -179,17 +183,27 @@ The box account is trusted with the laptop: anyone who can act as the box user c
 the laptop clipboard, open http(s) URLs in the laptop browser, send cmux status events and write the
 files below while the link is up. Use a box account nobody else uses.
 
-Files: the box writes on the laptop only the files pasted into a session in the last two weeks,
-their `name (box).ext` beside them, and new files inside `~/Downloads`, with symlinks and `..`
-resolved on the laptop. The wrapper records each paste itself, so only a paste adds a file to that
-list; but every box session runs as the same user, so any of them can write any session's pasted
-files. Pasting a path the box put on the laptop clipboard counts too, so a write-back (or a
-`laptop-save` over a pasted file) lands only on a regular, non-executable file inside your home,
-not under `~/Library` and with no component starting with `.` (such as `~/.zshrc`). Anything else
-is refused with a notice, and the box keeps the agent's version; pasting the file again offers it
-anew. A file replaced goes to the Trash; the laptop fetches the content over an ssh of its
-own (`remote-agents-box send-file`), up to 100 MB. A refused write is not retried until the copy
-changes again.
+Files: on its own, the box writes on the laptop only the files pasted into a session in the last
+two weeks and their `name (box).ext` beside them, with symlinks and `..` resolved on the laptop,
+and only where the file is a regular, non-executable one inside your home, not under `~/Library`,
+with no component starting with `.` (such as `~/.zshrc`), whose folder still leads where it did at
+the paste. The wrapper records each paste itself, so only a paste adds a file to that list; but
+pasting a path the box put on the laptop clipboard counts too, which is why anything else waits
+for you: the link daemon shows the macOS authentication sheet (Touch ID, or your password),
+naming the session, whether it creates or replaces, and the full path where the file lands. Every
+`laptop-save` asks the same way. Prompts show one at a time; one declined, failed or unanswered
+for 10 minutes is refused with a notice, and the box keeps the agent's version: a new change, a
+new paste or a new save offers it anew. A daemon that cannot ask, as with no one logged in at the
+screen, refuses. An approval holds for that file (or save destination) and session until the link
+daemon restarts: it lives only in the daemon's memory, as a grant kept in a file could be forged
+by a write to it. The place is checked again where the write lands; one that changed since
+the prompt is refused. Sessions name themselves to the laptop, and every box session runs as the
+same user, so one box session can claim another's name and with it that session's pasted files
+and approvals: the approvals scope prompts, not box sessions from each other. A file replaced
+goes to the Trash. A write never follows a symlink at the file's own name: a write-back goes
+beside it, a save replaces the link. The
+laptop fetches the content over an ssh of its own (`remote-agents-box send-file`), up to 100 MB.
+A refused write is not retried until the copy changes again.
 
 URLs: link-local and multicast hosts are refused after resolving the host; LAN and tailnet
 addresses open. The browser resolves again, so DNS rebinding remains possible.

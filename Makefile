@@ -12,7 +12,7 @@ test:
 	go test -race ./...
 
 lint:
-	go vet ./... && go vet -tags e2e ./e2e && staticcheck ./... && shellcheck box/install.sh box/shpool/build.sh box/bootstrap/*.sh box/bootstrap/host/*.sh box/bootstrap/user/*.sh scripts/deploy-box.sh testdata/fake-claude
+	go vet ./... && go vet -tags e2e ./e2e ./cmd/remote-agents && staticcheck ./... && shellcheck box/install.sh box/shpool/build.sh box/bootstrap/*.sh box/bootstrap/host/*.sh box/bootstrap/user/*.sh scripts/deploy-box.sh testdata/fake-claude
 
 # Installs the laptop binary and its rclaude and rcodex entry points. Loads nothing.
 install: build plist
