@@ -121,7 +121,10 @@ func (g *Gate) ask(ctx context.Context, gr grant, reason string) error {
 	g.mu.Lock()
 	granted, cooling := g.granted[gr], g.coolingDown(gr)
 	g.mu.Unlock()
-	if granted || cooling != nil {
+	if granted {
+		return nil
+	}
+	if cooling != nil {
 		return cooling
 	}
 	promptCtx, cancel := context.WithTimeout(ctx, g.timeout)

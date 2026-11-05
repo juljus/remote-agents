@@ -333,3 +333,48 @@ func TestRequestsQueuedBehindADeclineAreRefused(t *testing.T) {
 		t.Fatalf("shown %q right after a decline", p.reason)
 	}
 }
+
+// A request queued for a grant that came through before a decline goes on:
+// the pause stops prompts, not what is approved already.
+func TestAQueuedRequestApprovedBeforeADeclineGoesOn(t *testing.T) {
+	h := held{prompts: make(chan prompt)}
+	g := NewGate(h, time.Minute)
+	x := grant{session: session, use: saveUse, path: "/u/x"}
+	first := make(chan error, 1)
+	go func() { first <- g.ask(context.Background(), x, "x") }()
+	px := <-h.prompts
+	other := make(chan error, 1)
+	go func() { other <- g.ask(context.Background(), grant{session: session, use: saveUse, path: "/u/y"}, "y") }()
+	for g.waitingNow() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	again := make(chan error, 1)
+	go func() { again <- g.ask(context.Background(), x, "x again") }()
+	for g.waitingNow() < 3 {
+		time.Sleep(time.Millisecond)
+	}
+	px.answer <- nil
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	var pending []chan error
+	select {
+	case py := <-h.prompts:
+		py.answer <- fmt.Errorf("Canceled by user.: %w", ErrDeclined)
+		<-other
+		pending = append(pending, again)
+	case err := <-again:
+		// It got its turn before y and found x granted.
+		if err != nil {
+			t.Fatal(err)
+		}
+		py := <-h.prompts
+		py.answer <- fmt.Errorf("Canceled by user.: %w", ErrDeclined)
+		<-other
+	}
+	for _, c := range pending {
+		if err := <-c; err != nil {
+			t.Fatalf("a granted request was refused during the pause: %v", err)
+		}
+	}
+}
