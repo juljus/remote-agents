@@ -121,7 +121,9 @@ func TestPastedLaptopFilesTheBoxLacksGoToItUnderTheirBoxPaths(t *testing.T) {
 		t.Fatalf("uploads %q, want %s by its laptop path", uploads, shot)
 	}
 	// The paste is recorded, so the box may write the file back.
-	res, err := laptopfiles.Files{Records: laptopfiles.Records{Dir: h.pasted}, Home: filepath.Dir(origin), Trash: os.Remove}.WriteBack("claude-abc", origin, func(w io.Writer) error {
+	unasked := laptopfiles.NewGate(laptopfiles.ApproverFunc(func(context.Context, string) error { return errors.New("a plain file needs no approval") }), time.Minute)
+	files := laptopfiles.Files{Records: laptopfiles.Records{Dir: h.pasted}, Home: filepath.Dir(origin), Trash: os.Remove, Gate: unasked}
+	res, err := files.WriteBack(t.Context(), "claude-abc", origin, func(w io.Writer) error {
 		_, err := io.WriteString(w, "edited")
 		return err
 	})
