@@ -67,6 +67,8 @@ the `args` lines to get the prompts back.
     remote-agents attach <session> # reattach to one
     rclaude account                # pick or add a Claude account (rcodex account for Codex)
 
+- `rclaude` and `rcodex` pass their arguments to `claude` and `codex` unchanged, so each keeps its
+  own syntax: Claude resumes with `--resume <id>`, Codex with the `resume <id>` subcommand.
 - When the agent exits, `rclaude` prints the command that resumes the session, once it knows the
   session's id: after `--resume`, or inside cmux.
 - A detached session that has been idle for 5 minutes is ended. A still-running `rclaude`
