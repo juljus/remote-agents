@@ -66,13 +66,13 @@ the `args` lines to get the prompts back.
 
 ## Everyday use
 
-    rclaude                      # new Claude session on the box
-    rclaude --resume <id>        # resume one; reattaches if it still runs
-    rcodex                       # new Codex session
+    rclaude                        # new Claude session on the box
+    rclaude --resume <id>          # resume one; reattaches if it still runs
+    rcodex                         # new Codex session
     rcodex resume <id>
-    remote-agents ls             # sessions on the box
-    remote-agents attach <session>  # reattach to one
-    rclaude account              # pick or add a Claude account (rcodex account for Codex)
+    remote-agents ls               # sessions on the box
+    remote-agents attach <session> # reattach to one
+    rclaude account                # pick or add a Claude account (rcodex account for Codex)
 
 - When the agent exits, `rclaude` prints the command that resumes the session, once it knows the
   session's id: after `--resume`, or inside cmux.
