@@ -138,13 +138,15 @@ func readOneFile(r io.Reader, w io.Writer) error {
 	return nil
 }
 
-// FinderRevealer selects a file in a Finder window.
-type FinderRevealer struct{}
+// CommandRevealer shows a file by running Argv with its path after them.
+type CommandRevealer struct {
+	Argv []string
+}
 
-func (FinderRevealer) Reveal(ctx context.Context, path string) error {
-	out, err := exec.CommandContext(ctx, "/usr/bin/open", "-R", path).CombinedOutput()
+func (r CommandRevealer) Reveal(ctx context.Context, path string) error {
+	out, err := exec.CommandContext(ctx, r.Argv[0], append(r.Argv[1:], path)...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("open -R %s: %w: %s", path, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s %s: %w: %s", strings.Join(r.Argv, " "), path, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

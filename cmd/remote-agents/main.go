@@ -620,7 +620,7 @@ func runLink() error {
 			Resolve:    resolveHost,
 			Files:      laptopfiles.Files{Records: laptopfiles.Records{Dir: e.paths.PastedRecords()}, Home: home, Trash: trash},
 			Fetcher:    link.SSHFetcher{SSH: e.ssh, Box: e.box()},
-			Revealer:   link.FinderRevealer{},
+			Revealer:   link.CommandRevealer{Argv: e.cfg.Link.Revealer},
 			Logf:       logger.Printf,
 		},
 		Registry: reg,

@@ -40,10 +40,16 @@ type Agent struct {
 type Link struct {
 	// Opener is the laptop executable that opens a URL given as its only argument.
 	Opener string
+	// Revealer is the laptop command that shows a file saved from the box,
+	// given after its arguments.
+	Revealer []string
 }
 
 // DefaultOpener opens URLs in the default browser.
 const DefaultOpener = "/usr/bin/open"
+
+// DefaultRevealer selects the file in a Finder window.
+var DefaultRevealer = []string{"/usr/bin/open", "-R"}
 
 type Cmux struct {
 	// Wrapper is cmux's claude wrapper script; it decides which hooks to inject.
@@ -68,7 +74,8 @@ type rawAgent struct {
 }
 
 type rawLink struct {
-	Opener *string `toml:"opener"`
+	Opener   *string   `toml:"opener"`
+	Revealer *[]string `toml:"revealer"`
 }
 
 type rawCmux struct {
@@ -159,13 +166,23 @@ func (r rawConfig) validate() (Config, error) {
 }
 
 func (r rawConfig) validateLink() (Link, error) {
-	if r.Link == nil || r.Link.Opener == nil {
-		return Link{Opener: DefaultOpener}, nil
+	l := Link{Opener: DefaultOpener, Revealer: DefaultRevealer}
+	if r.Link == nil {
+		return l, nil
 	}
-	if !filepath.IsAbs(*r.Link.Opener) {
-		return Link{}, fmt.Errorf("link.opener must be an absolute path, got %q", *r.Link.Opener)
+	if r.Link.Opener != nil {
+		if !filepath.IsAbs(*r.Link.Opener) {
+			return Link{}, fmt.Errorf("link.opener must be an absolute path, got %q", *r.Link.Opener)
+		}
+		l.Opener = *r.Link.Opener
 	}
-	return Link{Opener: *r.Link.Opener}, nil
+	if r.Link.Revealer != nil {
+		if len(*r.Link.Revealer) == 0 || !filepath.IsAbs((*r.Link.Revealer)[0]) {
+			return Link{}, fmt.Errorf("link.revealer must start with an absolute path, got %q", *r.Link.Revealer)
+		}
+		l.Revealer = *r.Link.Revealer
+	}
+	return l, nil
 }
 
 func (r rawConfig) validateCmux() (*Cmux, error) {

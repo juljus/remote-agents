@@ -36,12 +36,12 @@ var commandFlags = map[string]bool{
 }
 
 type scan struct {
-	command     bool
-	resume      bool
-	resumeValue string
-	cont        bool
-	fork        bool
-	sessionID   string
+	command      bool
+	resume       bool
+	resumeValue  string
+	cont         bool
+	fork         bool
+	sessionID    string
 	settings     *ValueArg
 	appendPrompt *ValueArg
 }

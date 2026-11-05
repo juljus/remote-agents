@@ -218,3 +218,17 @@ func sha(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
 }
+
+func TestCommandRevealerRunsItsCommandOnThePath(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "out")
+	r := CommandRevealer{Argv: []string{"/bin/sh", "-c", `printf %s "$0" > '` + out + `'`}}
+	if err := r.Reveal(context.Background(), "/Users/me/Downloads/a b.pdf"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(out); string(data) != "/Users/me/Downloads/a b.pdf" {
+		t.Fatalf("revealed %q", data)
+	}
+	if err := (CommandRevealer{Argv: []string{"/usr/bin/false"}}).Reveal(context.Background(), "/x"); err == nil {
+		t.Fatal("a failing revealer went unreported")
+	}
+}

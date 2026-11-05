@@ -4,6 +4,7 @@ workdir = "/home/agent/work"        # every session runs here; must exist on the
 
 # [link]
 # opener = "/usr/bin/open"          # laptop command that opens box URLs; the default
+# revealer = ["/usr/bin/open", "-R"] # laptop command that shows a file laptop-save saved; the default
 
 # [cmux]                            # only with cmux
 # wrapper = "/Applications/cmux.app/Contents/Resources/bin/cmux-claude-wrapper"

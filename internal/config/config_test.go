@@ -71,6 +71,25 @@ func TestParseWithoutOpenerOpensWithOpen(t *testing.T) {
 		if cfg.Link.Opener != "/usr/bin/open" {
 			t.Fatalf("%s: opener = %q, want /usr/bin/open", name, cfg.Link.Opener)
 		}
+		if !slices.Equal(cfg.Link.Revealer, []string{"/usr/bin/open", "-R"}) {
+			t.Fatalf("%s: revealer = %q, want open -R", name, cfg.Link.Revealer)
+		}
+	}
+}
+
+func TestParseRevealer(t *testing.T) {
+	src := strings.Replace(valid, "[link]\n", "[link]\nrevealer = [\"/usr/bin/true\", \"-x\"]\n", 1)
+	cfg, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.Link.Revealer, []string{"/usr/bin/true", "-x"}) {
+		t.Fatalf("revealer = %q", cfg.Link.Revealer)
+	}
+	for _, bad := range []string{`[]`, `["true"]`} {
+		if _, err := Parse([]byte(strings.Replace(valid, "[link]\n", "[link]\nrevealer = "+bad+"\n", 1))); err == nil || !strings.Contains(err.Error(), "revealer") {
+			t.Fatalf("revealer %s: %v", bad, err)
+		}
 	}
 }
 
