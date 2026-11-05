@@ -599,3 +599,42 @@ func TestNothingHiddenIsWrittenBack(t *testing.T) {
 	}
 	onlyFiles(t, f.home, ".config", ".zshrc", "Downloads", "docs")
 }
+
+// Write-backs land only on plain files of the user's: a script, a launch
+// agent or a file outside home may run as code once written.
+func TestWriteBackLandsOnlyOnAPlainFileInHomeOutsideLibrary(t *testing.T) {
+	f := newFixture(t)
+	library := filepath.Join(f.home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(library, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(f.home), "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(f.home, "docs", "run.sh")
+	for name, origin := range map[string]string{
+		"under ~/Library":    filepath.Join(library, "agent.plist"),
+		"outside home":       filepath.Join(outside, "notes.md"),
+		"an executable file": script,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f.pasted(t, origin, "laptop")
+			if origin == script {
+				if err := os.Chmod(script, 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := f.files.WriteBack(session, origin, content("agent")); !errors.Is(err, ErrRefused) {
+				t.Fatalf("write-back: %v", err)
+			}
+			if _, err := f.files.Save(session, "x", origin, content("agent")); !errors.Is(err, ErrRefused) {
+				t.Fatalf("save over it: %v", err)
+			}
+			if read(t, origin) != "laptop" {
+				t.Fatal("it changed")
+			}
+			onlyFiles(t, filepath.Dir(origin), filepath.Base(origin))
+		})
+	}
+}

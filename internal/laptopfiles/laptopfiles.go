@@ -3,8 +3,9 @@
 // file pasted into a session is written back over its laptop origin, or
 // beside it as "name (box).ext" when the laptop's copy changed since; other
 // files the box saves land in ~/Downloads, or over a file pasted into the
-// session. Nothing hidden is written: a dotfile is code. A file replaced goes
-// to the Trash.
+// session. Only plain files of the user's are written back: none outside
+// home, under ~/Library, hidden or executable. A file replaced goes to the
+// Trash.
 package laptopfiles
 
 import (
@@ -75,7 +76,11 @@ func (f Files) WriteBack(session, origin string, fetch Fetch) (Result, error) {
 		if !ok {
 			return fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
 		}
-		current, mode, err := regularSum(origin)
+		mode, err := plainFile(origin)
+		if err != nil {
+			return err
+		}
+		current, err := regularSum(origin)
 		if err != nil {
 			return err
 		}
@@ -114,8 +119,8 @@ func (f Files) pastedEntry(session, origin string) (entry, error) {
 	if !ok {
 		return entry{}, fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
 	}
-	if hidden(origin) {
-		return entry{}, fmt.Errorf("%w: %s is hidden, and nothing hidden is written from the box; the box keeps its version", ErrRefused, origin)
+	if err := f.inPlainPlace(origin); err != nil {
+		return entry{}, err
 	}
 	dir := filepath.Dir(origin)
 	// A dir that cannot be resolved now, such as one on a volume not mounted, may be back later.
@@ -129,41 +134,70 @@ func (f Files) pastedEntry(session, origin string) (entry, error) {
 	return e, nil
 }
 
-// hidden reports whether a component of path starts with a dot, as dotfiles
-// and the dirs of shell and tool configs do: the box can put such a path on
-// the clipboard for the user to paste, and writing it could run code.
-func hidden(path string) bool {
-	for _, part := range strings.Split(path, string(filepath.Separator)) {
+// inPlainPlace refuses a pasted origin outside the user's home, under
+// ~/Library or with a hidden component: the box can put any path on the
+// clipboard for the user to paste, and a file there, such as a dotfile or a
+// launch agent, may run as code once written.
+func (f Files) inPlainPlace(origin string) error {
+	home, err := filepath.EvalSymlinks(f.Home)
+	if err != nil {
+		return fmt.Errorf("finding your home: %w", err)
+	}
+	rel, err := filepath.Rel(home, origin)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return fmt.Errorf("%w: %s is outside your home, where nothing is written from the box; the box keeps its version", ErrRefused, origin)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if parts[0] == "Library" {
+		return fmt.Errorf("%w: %s is under ~/Library, where nothing is written from the box; the box keeps its version", ErrRefused, origin)
+	}
+	for _, part := range parts {
 		if strings.HasPrefix(part, ".") {
-			return true
+			return fmt.Errorf("%w: %s is hidden, and nothing hidden is written from the box; the box keeps its version", ErrRefused, origin)
 		}
 	}
-	return false
+	return nil
 }
 
-// regularSum hashes path, giving "" when it is gone or not a regular file,
-// and the mode a file written in its place gets.
-func regularSum(path string) (string, fs.FileMode, error) {
+// plainFile refuses an origin that is there but not a regular file without
+// execute bits, and gives the mode a file written in its place gets.
+func plainFile(origin string) (fs.FileMode, error) {
+	info, err := os.Lstat(origin)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return 0o644, nil
+	case err != nil:
+		return 0, err
+	case !info.Mode().IsRegular():
+		return 0, fmt.Errorf("%w: %s is not a regular file", ErrRefused, origin)
+	case info.Mode().Perm()&0o111 != 0:
+		return 0, fmt.Errorf("%w: %s is executable, and nothing executable is written from the box; the box keeps its version", ErrRefused, origin)
+	}
+	return info.Mode().Perm(), nil
+}
+
+// regularSum hashes path, giving "" when it is gone or not a regular file.
+func regularSum(path string) (string, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", 0o644, nil
+		return "", nil
 	}
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
 	if !info.Mode().IsRegular() {
-		return "", 0o644, nil
+		return "", nil
 	}
 	src, err := os.Open(path)
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
 	defer src.Close()
 	h := sha256.New()
 	if _, err := io.Copy(h, src); err != nil {
-		return "", 0, fmt.Errorf("reading %s: %w", path, err)
+		return "", fmt.Errorf("reading %s: %w", path, err)
 	}
-	return hex.EncodeToString(h.Sum(nil)), info.Mode().Perm(), nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // fetchInto fetches into a hidden temporary file in dir, so that it can take
@@ -228,7 +262,7 @@ func (f Files) writeCopy(origin, tmp, lastCopy string, mode fs.FileMode) (string
 	if err := os.Chmod(tmp, mode); err != nil {
 		return "", err
 	}
-	current, _, err := regularSum(path)
+	current, err := regularSum(path)
 	if err != nil {
 		return "", err
 	}
@@ -362,14 +396,8 @@ func (f Files) saveOverPasted(session, origin string, fetch Fetch) (Result, erro
 		if !ok {
 			return fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
 		}
-		info, err := os.Lstat(origin)
-		mode := fs.FileMode(0o644)
-		switch {
-		case err == nil && !info.Mode().IsRegular():
-			return fmt.Errorf("%w: %s is not a regular file", ErrRefused, origin)
-		case err == nil:
-			mode = info.Mode().Perm()
-		case !errors.Is(err, fs.ErrNotExist):
+		mode, err := plainFile(origin)
+		if err != nil {
 			return err
 		}
 		if left, err = f.replace(origin, tmp, mode); err != nil {
