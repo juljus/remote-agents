@@ -276,3 +276,36 @@ func TestPastingAgainOffersARefusedVersionAnew(t *testing.T) {
 		t.Fatalf("PasteFilesInto = %v", err)
 	}
 }
+
+// The link holder's watcher runs on across pastes; a paste that reopens a
+// refused version must reach it too.
+func TestARunningWatcherOffersAReopenedVersion(t *testing.T) {
+	l := testLayout(t)
+	paths := pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	var mu sync.Mutex
+	refusing := true
+	seen := make(chan linkproto.WriteBackRequest, 10)
+	taking := laptopTaking(seen)
+	laptop := &fakeLaptop{writeBack: func(req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
+		mu.Lock()
+		refuse := refusing
+		mu.Unlock()
+		if refuse {
+			seen <- req
+			return linkproto.WriteBackResult{}, fmt.Errorf("laptop: %w: /l/notes.md was not pasted into this session", linkproto.ErrRefused)
+		}
+		return taking.writeBack(req)
+	}}
+	watchLayout(t, l, laptop)
+	if err := os.WriteFile(paths[0], []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/notes.md", BoxPath: paths[0]}
+	expectWriteBack(t, seen, want)
+	expectNone(t, seen)
+	mu.Lock()
+	refusing = false
+	mu.Unlock()
+	pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	expectWriteBack(t, seen, want)
+}

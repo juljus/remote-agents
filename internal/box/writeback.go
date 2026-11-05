@@ -54,10 +54,13 @@ func sigOf(path string) (fileSig, bool, error) {
 // copyWatch is what the watcher knows of one copy: how it looked at the last
 // poll, which version of it the laptop has, and when a failed one goes again.
 type copyWatch struct {
-	seen     fileSig
-	handled  fileSig
-	failures int
-	retryAt  time.Time
+	seen fileSig
+	// handled is the version last dealt with, and the record it left; a paste
+	// changes the record, which makes the version worth another look.
+	handled    fileSig
+	handledRec copyRecord
+	failures   int
+	retryAt    time.Time
 }
 
 // watchSessionCopies sends each session copy the agent changed back to the
@@ -127,7 +130,8 @@ func checkCopy(ctx context.Context, l boxlayout.Layout, laptop Laptop, c pastedC
 		w.seen = sig
 		return nil
 	}
-	if sig == w.handled || time.Now().Before(w.retryAt) {
+	rec := copyRecord{Origin: c.Origin, Synced: c.Synced, Refused: c.Refused}
+	if sig == w.handled && rec == w.handledRec || time.Now().Before(w.retryAt) {
 		return nil
 	}
 	sum, err := fileSum(c.Path)
@@ -141,19 +145,21 @@ func checkCopy(ctx context.Context, l boxlayout.Layout, laptop Laptop, c pastedC
 		switch {
 		case errors.Is(err, linkproto.ErrRefused):
 			// Asking again would be refused again; the next change asks anew.
-			logf("write-back of %s: %v; not asking again until it changes", c.Path, err)
+			logf("write-back of %s: %v; not asking again until it changes or is pasted again", c.Path, err)
 			err = markRefused(l, c, sum)
+			rec.Refused = sum
 		case err != nil:
 			return err
 		default:
 			logf("write-back of %s: %s, %s", c.Path, res.Outcome, res.Path)
 			err = markSynced(l, c, res.SHA256)
+			rec.Synced, rec.Refused = res.SHA256, ""
 		}
 		if err != nil {
 			return err
 		}
 	}
-	w.handled, w.failures = sig, 0
+	w.handled, w.handledRec, w.failures = sig, rec, 0
 	return nil
 }
 

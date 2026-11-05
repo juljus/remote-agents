@@ -75,7 +75,7 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 				}
 			}
 			return path, nil
-		case pending && rec.Refused != "":
+		case pending:
 			copySum, err := fileSum(path)
 			if err != nil {
 				return "", err
@@ -83,8 +83,6 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 			if copySum == rec.Refused {
 				return "", fmt.Errorf("the laptop refused the agent's version of %s, which stays at %s on the box; have the agent laptop-save it, or remove it to paste the file again", filepath.Base(origin), path)
 			}
-			return "", fmt.Errorf("the agent's change to %s has not reached the laptop yet; paste it again once it has", filepath.Base(origin))
-		case pending:
 			return "", fmt.Errorf("the agent's change to %s has not reached the laptop yet; paste it again once it has", filepath.Base(origin))
 		}
 	}
