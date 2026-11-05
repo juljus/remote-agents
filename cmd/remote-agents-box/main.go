@@ -23,7 +23,7 @@ import (
 const shimTimeout = 15 * time.Second
 
 // saveTimeout bounds laptop-save: the user's approval, then a fetch of up to 100 MB.
-const saveTimeout = linkproto.ApprovalTimeout + 10*time.Minute
+const saveTimeout = linkproto.MaxApprovalWait + 10*time.Minute
 
 // forgetTimeout bounds the wait for a reaped session's launcher to exit.
 const forgetTimeout = time.Minute

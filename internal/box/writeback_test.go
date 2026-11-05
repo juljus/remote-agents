@@ -346,3 +346,40 @@ func TestAWriteBackWaitingForTheUserHoldsUpNoOther(t *testing.T) {
 	expectWriteBack(t, seen, linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/.zshrc", BoxPath: paths[0]})
 	expectNone(t, seen)
 }
+
+// A record that cannot be read for a while, as one written meanwhile, must
+// not make the watcher forget a write-back in flight and send it again.
+func TestAListingThatFailsMeanwhileSendsNoCopyTwice(t *testing.T) {
+	l := testLayout(t)
+	paths := pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	calls := make(chan linkproto.WriteBackRequest, 10)
+	release := make(chan struct{})
+	taking := laptopTaking(make(chan linkproto.WriteBackRequest, 10))
+	laptop := &fakeLaptop{writeBack: func(req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
+		calls <- req
+		<-release
+		return taking.writeBack(req)
+	}}
+	watchLayout(t, l, laptop)
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	if err := os.WriteFile(paths[0], []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectWriteBack(t, calls, linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/notes.md", BoxPath: paths[0]})
+	record := filepath.Dir(paths[0]) + ".json"
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := os.WriteFile(record, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectNone(t, calls)
+	once.Do(func() { close(release) })
+	expectNone(t, calls)
+}

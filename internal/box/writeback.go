@@ -24,9 +24,9 @@ const WriteBackRetry = 30 * time.Second
 
 const maxRetryDoublings = 5
 
-// writeBackTimeout bounds one write-back: the user's approval on the
-// laptop, which a risky place needs, then a fetch of up to 100 MB.
-const writeBackTimeout = linkproto.ApprovalTimeout + 10*time.Minute
+// writeBackTimeout bounds one write-back: the wait for the user's approval
+// on the laptop, which a risky place needs, then a fetch of up to 100 MB.
+const writeBackTimeout = linkproto.MaxApprovalWait + 10*time.Minute
 
 // maxWriteBacks bounds the write-backs in flight at once. One may wait for
 // the user to approve it, which the others need not wait for.
@@ -141,6 +141,10 @@ func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, 
 		present := map[string]bool{}
 		for _, c := range copies {
 			present[c.record] = true
+			// At the bound, a changed copy waits unhashed for a slot.
+			if inFlight == maxWriteBacks {
+				continue
+			}
 			w, ok := watched[c.record]
 			if !ok {
 				w = &copyWatch{}
@@ -151,7 +155,7 @@ func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, 
 				w.failed(c.Path, err, retry, logf)
 				continue
 			}
-			if !due || inFlight == maxWriteBacks {
+			if !due {
 				continue
 			}
 			w.sending = true
@@ -166,8 +170,12 @@ func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, 
 				}
 			}(c, w.seen)
 		}
-		for record := range watched {
-			if !present[record] {
+		// A listing with errors may lack copies that are still there.
+		if err != nil {
+			continue
+		}
+		for record, w := range watched {
+			if !present[record] && !w.sending {
 				delete(watched, record)
 			}
 		}

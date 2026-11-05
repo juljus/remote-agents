@@ -28,8 +28,12 @@ const (
 )
 
 // ApprovalTimeout is how long the laptop waits for the user to approve a
-// write of the box's; a request that may need approval waits that long more.
-const ApprovalTimeout = 10 * time.Minute
+// write of the box's, and as long for its turn while another prompt is up;
+// a request that may need approval may wait MaxApprovalWait.
+const (
+	ApprovalTimeout = 10 * time.Minute
+	MaxApprovalWait = 2 * ApprovalTimeout
+)
 
 var (
 	// ErrLinkDown means the laptop socket is not reachable from the box.
