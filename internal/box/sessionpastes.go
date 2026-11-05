@@ -22,7 +22,7 @@ import (
 // the session replaces its copy.
 
 // copyRecord is what the box keeps about a session's copy: its laptop path,
-// and the hash of the content the laptop last took from it or pasted.
+// and the hash of the content the laptop last pasted, took or refused.
 type copyRecord struct {
 	Origin string `json:"origin"`
 	Synced string `json:"synced"`
@@ -43,13 +43,34 @@ func originKey(origin string) string {
 }
 
 // keepSessionCopy copies the stored paste of origin, of content hash sum,
-// over session's copy of it. The caller holds the pasted lock.
+// over session's copy of it. A copy holding a change the laptop lacks yet
+// stays: when the laptop's file is as it was, the change is the newer one and
+// still goes back; when both changed, the paste fails until the change has
+// reached the laptop, where the conflict rule keeps both. The caller holds
+// the pasted lock.
 func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (string, error) {
 	dir := filepath.Join(l.SessionPastesDir(), session, originKey(origin))
+	path := filepath.Join(dir, filepath.Base(origin))
+	var rec copyRecord
+	found, err := jsonfile.Read(dir+".json", &rec)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		pending, err := changedSince(path, rec.Synced)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case pending && sum == rec.Synced:
+			return path, nil
+		case pending:
+			return "", fmt.Errorf("the agent's change to %s has not reached the laptop yet; paste it again once it has", filepath.Base(origin))
+		}
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("creating the session's paste dir: %w", err)
 	}
-	path := filepath.Join(dir, filepath.Base(origin))
 	if err := copyFile(stored, path); err != nil {
 		return "", err
 	}
@@ -57,6 +78,19 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 		return "", err
 	}
 	return path, nil
+}
+
+// changedSince reports whether path holds content other than of hash synced;
+// a copy that is gone holds nothing to lose.
+func changedSince(path, synced string) (bool, error) {
+	sum, err := fileSum(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return sum != synced, nil
 }
 
 // copyFile replaces dst with a copy of src in one rename.
@@ -82,7 +116,8 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// sessionCopies lists every session's copies of pasted files.
+// sessionCopies lists every session's copies of pasted files. A record it
+// cannot read is in the error, and the others are listed all the same.
 func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 	sessions, err := os.ReadDir(l.SessionPastesDir())
 	if errors.Is(err, fs.ErrNotExist) {
@@ -92,6 +127,7 @@ func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 		return nil, fmt.Errorf("listing session pastes: %w", err)
 	}
 	var out []pastedCopy
+	var errs []error
 	for _, s := range sessions {
 		if !s.IsDir() {
 			continue
@@ -105,7 +141,8 @@ func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 			var rec copyRecord
 			found, err := jsonfile.Read(record, &rec)
 			if err != nil {
-				return nil, err
+				errs = append(errs, err)
+				continue
 			}
 			if !found {
 				continue
@@ -120,7 +157,7 @@ func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 			})
 		}
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 // markSynced records that the laptop has content of hash sum for c, unless
@@ -141,10 +178,7 @@ func markSynced(l boxlayout.Layout, c pastedCopy, sum string) error {
 // pastedTTL and that hold what the laptop has, then the session dirs left
 // empty. The caller holds the pasted lock.
 func pruneSessionCopies(l boxlayout.Layout, now time.Time) error {
-	copies, err := sessionCopies(l)
-	if err != nil {
-		return err
-	}
+	copies, listErr := sessionCopies(l)
 	for _, c := range copies {
 		stale, err := staleCopy(c, now)
 		if err != nil {
@@ -176,7 +210,7 @@ func pruneSessionCopies(l boxlayout.Layout, now time.Time) error {
 			}
 		}
 	}
-	return nil
+	return listErr
 }
 
 func staleCopy(c pastedCopy, now time.Time) (bool, error) {

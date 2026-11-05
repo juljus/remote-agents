@@ -104,6 +104,9 @@ func (l Layout) PastedLock() string { return l.state("pasted.lock") }
 // pasted into it, which go back to the laptop when the agent changes them.
 func (l Layout) SessionPastesDir() string { return l.state("session-pastes") }
 
+// WriteBackLock is held by the one link holder that sends the copies back.
+func (l Layout) WriteBackLock() string { return l.state("write-back.lock") }
+
 // The reaper's files: hook reports and the launcher's status per shpool
 // session, records of reaped agent sessions, its log and its config.
 func (l Layout) ActivityDir() string { return l.state("activity") }

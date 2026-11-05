@@ -3,6 +3,7 @@ package box
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -128,4 +129,56 @@ func TestAFailedWriteBackIsTriedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectWriteBack(t, seen, linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/notes.md", BoxPath: paths[0]})
+}
+
+func TestARefusedWriteBackWaitsForTheNextChange(t *testing.T) {
+	l := testLayout(t)
+	paths := pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	seen := make(chan linkproto.WriteBackRequest, 10)
+	laptop := &fakeLaptop{writeBack: func(req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
+		seen <- req
+		return linkproto.WriteBackResult{}, fmt.Errorf("laptop: %w: /l/notes.md was not pasted into this session", linkproto.ErrRefused)
+	}}
+	watchLayout(t, l, laptop)
+	if err := os.WriteFile(paths[0], []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/notes.md", BoxPath: paths[0]}
+	expectWriteBack(t, seen, want)
+	// The retry delay in watchLayout is 50 ms; a refusal is not retried at all.
+	expectNone(t, seen)
+	if err := os.WriteFile(paths[0], []byte("agent 2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectWriteBack(t, seen, want)
+}
+
+// A link holder lingers until its link times out; only one may send write-backs.
+func TestOneWatcherAtATimeSendsWriteBacks(t *testing.T) {
+	l := testLayout(t)
+	paths := pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	older := make(chan linkproto.WriteBackRequest, 10)
+	ctx, stopOlder := context.WithCancel(context.Background())
+	olderDone := make(chan struct{})
+	go func() {
+		defer close(olderDone)
+		watchSessionCopies(ctx, l, laptopTaking(older), 10*time.Millisecond, 50*time.Millisecond, t.Logf)
+	}()
+	t.Cleanup(func() { stopOlder(); <-olderDone })
+	time.Sleep(50 * time.Millisecond)
+	newer := make(chan linkproto.WriteBackRequest, 10)
+	watchLayout(t, l, laptopTaking(newer))
+
+	want := linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/notes.md", BoxPath: paths[0]}
+	if err := os.WriteFile(paths[0], []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectWriteBack(t, older, want)
+	expectNone(t, newer)
+	stopOlder()
+	<-olderDone
+	if err := os.WriteFile(paths[0], []byte("agent 2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectWriteBack(t, newer, want)
 }

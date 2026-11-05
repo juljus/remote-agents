@@ -3,6 +3,7 @@ package box
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"syscall"
@@ -62,11 +63,22 @@ type copyWatch struct {
 // watchSessionCopies sends each session copy the agent changed back to the
 // laptop, until ctx ends. A link holder runs it, so copies changed while the
 // link was down go once it is up; a copy that changed is hashed, and goes
-// only when it holds other content than the laptop's.
+// only when it holds other content than the laptop's. An older link holder
+// lingers until its link times out, so the watchers take turns by a lock:
+// two would fetch one copy twice and could land an older version last.
 func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, poll, retry time.Duration, logf func(string, ...any)) {
-	watched := map[string]*copyWatch{}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	lock, err := awaitFlock(ctx, l.WriteBackLock(), ticker.C)
+	if err != nil {
+		if ctx.Err() == nil {
+			logf("write-back: %v", err)
+		}
+		return
+	}
+	defer lock.Close()
+	watched := map[string]*copyWatch{}
+	listErr := ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -74,9 +86,13 @@ func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, 
 		case <-ticker.C:
 		}
 		copies, err := sessionCopies(l)
-		if err != nil {
+		// A broken record stays broken; once in the log is enough.
+		if err != nil && err.Error() != listErr {
 			logf("write-back: %v", err)
-			continue
+		}
+		listErr = ""
+		if err != nil {
+			listErr = err.Error()
 		}
 		present := map[string]bool{}
 		for _, c := range copies {
@@ -122,14 +138,43 @@ func checkCopy(ctx context.Context, l boxlayout.Layout, laptop Laptop, c pastedC
 		reqCtx, cancel := context.WithTimeout(ctx, writeBackTimeout)
 		defer cancel()
 		res, err := laptop.WriteBack(reqCtx, linkproto.WriteBackRequest{Session: c.Session, Origin: c.Origin, BoxPath: c.Path})
-		if err != nil {
+		switch {
+		case errors.Is(err, linkproto.ErrRefused):
+			// Asking again would be refused again; the next change asks anew.
+			logf("write-back of %s: %v; not asking again until it changes", c.Path, err)
+			res.SHA256 = sum
+		case err != nil:
 			return err
+		default:
+			logf("write-back of %s: %s, %s", c.Path, res.Outcome, res.Path)
 		}
 		if err := markSynced(l, c, res.SHA256); err != nil {
 			return err
 		}
-		logf("write-back of %s: %s, %s", c.Path, res.Outcome, res.Path)
 	}
 	w.handled, w.failures = sig, 0
 	return nil
+}
+
+// awaitFlock takes an exclusive flock on path, trying again at each tick
+// until it gets it or ctx ends. Closing the file releases it.
+func awaitFlock(ctx context.Context, path string, tick <-chan time.Time) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errors.Join(fmt.Errorf("locking %s: %w", path, err), f.Close())
+		}
+		select {
+		case <-ctx.Done():
+			return nil, errors.Join(ctx.Err(), f.Close())
+		case <-tick:
+		}
+	}
 }

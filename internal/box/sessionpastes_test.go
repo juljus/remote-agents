@@ -79,9 +79,6 @@ func TestPasteFilesGivesEachSessionItsOwnCopy(t *testing.T) {
 func TestPastingAFileAgainIntoTheSessionReplacesItsCopy(t *testing.T) {
 	l := testLayout(t)
 	first := pasteInto(t, l, pasteSession, [2]string{"/l/a.csv", "v1"})
-	if err := os.WriteFile(first[0], []byte("edited"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	again := pasteInto(t, l, pasteSession, [2]string{"/l/a.csv", "v2"}, [2]string{"/l/other/a.csv", "other"})
 	if again[0] != first[0] || again[1] == first[0] {
 		t.Fatalf("pasted again to %q, first to %q", again, first)
@@ -97,6 +94,35 @@ func TestPastingAFileAgainIntoTheSessionReplacesItsCopy(t *testing.T) {
 		if c.Path == first[0] && c.Synced != sha("v2") {
 			t.Fatalf("synced %s, want v2's", c.Synced)
 		}
+	}
+}
+
+// An agent's change the laptop lacks yet must survive a paste of the same file.
+func TestPastingAFileAgainKeepsTheAgentsChangeTheLaptopLacks(t *testing.T) {
+	l := testLayout(t)
+	first := pasteInto(t, l, pasteSession, [2]string{"/l/a.csv", "v1"})
+	if err := os.WriteFile(first[0], []byte("edited by the agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The laptop's file is as it was: the agent's change is the newer one, and goes back.
+	if again := pasteInto(t, l, pasteSession, [2]string{"/l/a.csv", "v1"}); again[0] != first[0] {
+		t.Fatalf("pasted again to %q", again)
+	}
+	if got, err := os.ReadFile(first[0]); err != nil || string(got) != "edited by the agent" {
+		t.Fatalf("copy holds %q, %v", got, err)
+	}
+	// Both changed: the paste waits until the agent's change reached the laptop.
+	in := exchange(t, []string{"/l/a.csv"}, [2]string{"/l/a.csv", "v2"})
+	err := PasteFilesInto(l, pasteSession, in, io.Discard, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "not reached the laptop yet") {
+		t.Fatalf("PasteFilesInto = %v", err)
+	}
+	if got, err := os.ReadFile(first[0]); err != nil || string(got) != "edited by the agent" {
+		t.Fatalf("copy holds %q, %v", got, err)
+	}
+	copies, err := sessionCopies(l)
+	if err != nil || len(copies) != 1 || copies[0].Synced != sha("v1") {
+		t.Fatalf("copies %+v, %v", copies, err)
 	}
 }
 
@@ -173,10 +199,8 @@ func TestMarkSyncedOnlyMovesFromWhatTheSenderSaw(t *testing.T) {
 	if err := markSynced(l, c, sha("b")); err != nil {
 		t.Fatal(err)
 	}
-	// A paste in between makes the sender's view stale; its mark must not land.
-	stale := c
-	stale.Synced = sha("a")
-	if err := markSynced(l, stale, sha("c")); err != nil {
+	// The mark made c's view stale; a second mark from it must not land.
+	if err := markSynced(l, c, sha("c")); err != nil {
 		t.Fatal(err)
 	}
 	if copies, err = sessionCopies(l); err != nil || copies[0].Synced != sha("b") {
@@ -187,4 +211,16 @@ func TestMarkSyncedOnlyMovesFromWhatTheSenderSaw(t *testing.T) {
 func sha(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+func TestABrokenRecordHoldsUpNoOtherCopy(t *testing.T) {
+	l := testLayout(t)
+	paths := pasteInto(t, l, pasteSession, [2]string{"/l/a.txt", "a"}, [2]string{"/l/b.txt", "b"})
+	if err := os.WriteFile(filepath.Dir(paths[0])+".json", []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	copies, err := sessionCopies(l)
+	if err == nil || len(copies) != 1 || copies[0].Path != paths[1] {
+		t.Fatalf("copies %+v, %v", copies, err)
+	}
 }
