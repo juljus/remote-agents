@@ -178,11 +178,15 @@ The box account is trusted with the laptop: anyone who can act as the box user c
 the laptop clipboard, open http(s) URLs in the laptop browser, send cmux status events and write the
 files below while the link is up. Use a box account nobody else uses.
 
-Files: the box writes on the laptop only a file pasted into the session asking, its
-`name (box).ext` beside it, and new files inside `~/Downloads`, with symlinks and `..` resolved on
-the laptop. The laptop records each paste itself, so the box cannot add files to that list. A file
-replaced goes to the Trash; the laptop fetches the content over an ssh of its own
-(`remote-agents-box send-file`), up to 100 MB.
+Files: the box writes on the laptop only the files pasted into a session in the last two weeks,
+their `name (box).ext` beside them, and new files inside `~/Downloads`, with symlinks and `..`
+resolved on the laptop. The wrapper records each paste itself, so only a paste adds a file to that
+list; but every box session runs as the same user, so any of them can write any session's pasted
+files. Pasting a path the box can put on the laptop clipboard counts too: a pasted `~/.zshrc` the box
+lacks becomes writable from the box, as text the box put on the clipboard runs when pasted into a
+laptop shell. A file replaced goes to the Trash; the laptop fetches the content over an ssh of its
+own (`remote-agents-box send-file`), up to 100 MB. A refused write is not retried until the copy
+changes again.
 
 URLs: link-local and multicast hosts are refused after resolving the host; LAN and tailnet
 addresses open. The browser resolves again, so DNS rebinding remains possible.
