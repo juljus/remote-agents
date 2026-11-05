@@ -3,7 +3,6 @@ package linkproto
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -85,8 +84,8 @@ func TestRequestValidation(t *testing.T) {
 }
 
 func TestRefusalsKeepTheirCodeAcrossTheLink(t *testing.T) {
-	resp := Failure(fmt.Errorf("%w: /etc/x is not in ~/Downloads", ErrRefused))
-	if err := resp.Err(); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "/etc/x") {
+	resp := Failure(Refusal(errors.New("refused: /etc/x is not in ~/Downloads")))
+	if err := resp.Err(); !errors.Is(err, ErrRefused) || err.Error() != "laptop: refused: /etc/x is not in ~/Downloads" {
 		t.Fatalf("err = %v", err)
 	}
 	if err := Failure(errors.New("disk full")).Err(); errors.Is(err, ErrRefused) {

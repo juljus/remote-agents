@@ -165,7 +165,8 @@ func TestLaptopSaveSavesIntoDownloadsAndRevealsIt(t *testing.T) {
 	if !slices.Equal(f.revealed.paths, []string{want}) {
 		t.Fatalf("revealed %q", f.revealed.paths)
 	}
-	if _, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{BoxPath: "/box/out/report.pdf", Dest: "/etc/report.pdf"}); !errors.Is(err, linkproto.ErrRefused) {
+	_, err = f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{BoxPath: "/box/out/report.pdf", Dest: "/etc/report.pdf"})
+	if !errors.Is(err, linkproto.ErrRefused) || strings.Count(err.Error(), "refused") != 1 {
 		t.Fatalf("save outside Downloads: %v", err)
 	}
 	if _, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{BoxPath: "relative.pdf"}); err == nil {

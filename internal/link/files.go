@@ -81,7 +81,7 @@ func (h *Handler) LaptopSave(ctx context.Context, req linkproto.LaptopSaveReques
 // refusal marks a laptopfiles refusal as one for the box, which then stops asking.
 func refusal(err error) error {
 	if errors.Is(err, laptopfiles.ErrRefused) {
-		return fmt.Errorf("%w: %w", linkproto.ErrRefused, err)
+		return linkproto.Refusal(err)
 	}
 	return err
 }

@@ -147,7 +147,7 @@ func (r Response) Err() error {
 	case codeLinkDown:
 		return fmt.Errorf("%w: %s", ErrLinkDown, r.Error)
 	case codeRefused:
-		return fmt.Errorf("laptop: %w: %s", ErrRefused, r.Error)
+		return refusal{"laptop: " + r.Error}
 	}
 	return fmt.Errorf("laptop: %s", r.Error)
 }
@@ -192,6 +192,15 @@ func dispatch(ctx context.Context, h Handler, req Request) Response {
 	}
 	return resp
 }
+
+// refusal is ErrRefused worded by whoever refused.
+type refusal struct{ text string }
+
+func (r refusal) Error() string { return r.text }
+func (r refusal) Unwrap() error { return ErrRefused }
+
+// Refusal makes err, which says why, a refusal the box sees as one.
+func Refusal(err error) error { return refusal{err.Error()} }
 
 // Failure is the response that carries err; ErrNoTerminal and ErrRefused keep their codes.
 func Failure(err error) Response {
