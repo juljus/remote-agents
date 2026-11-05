@@ -185,7 +185,9 @@ resolved on the laptop. The wrapper records each paste itself, so only a paste a
 list; but every box session runs as the same user, so any of them can write any session's pasted
 files. Pasting a path the box put on the laptop clipboard counts too, so nothing hidden (a path with
 a component starting with `.`, such as `~/.zshrc` or `~/.config/...`) is ever written: the
-write-back is refused with a notice, and the box keeps the agent's version. A file replaced goes to the Trash; the laptop fetches the content over an ssh of its
+write-back is refused with a notice, and the box keeps the agent's version. That covers shell
+and tool configs, not every file that runs: a pasted script, a binary on `PATH` or a file under
+`~/Library/LaunchAgents` stays writable once pasted. A file replaced goes to the Trash; the laptop fetches the content over an ssh of its
 own (`remote-agents-box send-file`), up to 100 MB. A refused write is not retried until the copy
 changes again.
 

@@ -67,7 +67,23 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 		}
 		switch {
 		case pending && sum == rec.Synced:
+			// Pasting again asks the laptop afresh about a version it refused.
+			if rec.Refused != "" {
+				rec.Refused = ""
+				if err := jsonfile.Write(dir+".json", rec); err != nil {
+					return "", err
+				}
+			}
 			return path, nil
+		case pending && rec.Refused != "":
+			copySum, err := fileSum(path)
+			if err != nil {
+				return "", err
+			}
+			if copySum == rec.Refused {
+				return "", fmt.Errorf("the laptop refused the agent's version of %s, which stays at %s on the box; have the agent laptop-save it, or remove it to paste the file again", filepath.Base(origin), path)
+			}
+			return "", fmt.Errorf("the agent's change to %s has not reached the laptop yet; paste it again once it has", filepath.Base(origin))
 		case pending:
 			return "", fmt.Errorf("the agent's change to %s has not reached the laptop yet; paste it again once it has", filepath.Base(origin))
 		}

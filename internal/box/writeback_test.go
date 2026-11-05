@@ -223,10 +223,56 @@ func TestARefusedVersionStaysTheAgentsChange(t *testing.T) {
 		t.Fatalf("the refused change was pruned: %q, %v", got, err)
 	}
 	err := PasteFilesInto(l, pasteSession, exchange(t, []string{"/l/notes.md"}, [2]string{"/l/notes.md", "laptop 2"}), io.Discard, time.Now())
-	if err == nil || !strings.Contains(err.Error(), "not reached the laptop yet") {
+	if err == nil || !strings.Contains(err.Error(), "the laptop refused") {
 		t.Fatalf("a paste over the refused change = %v", err)
 	}
 	if got, _ := os.ReadFile(paths[0]); string(got) != "agent" {
 		t.Fatalf("the paste replaced the refused change with %q", got)
+	}
+}
+
+// A paste of the laptop's unchanged file asks the laptop afresh about the
+// version it refused, as when its record of the paste had run out.
+func TestPastingAgainOffersARefusedVersionAnew(t *testing.T) {
+	l := testLayout(t)
+	paths := pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	if err := os.WriteFile(paths[0], []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	copies, err := sessionCopies(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := markRefused(l, copies[0], sha("agent")); err != nil {
+		t.Fatal(err)
+	}
+	pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	if copies, err = sessionCopies(l); err != nil || copies[0].Refused != "" || copies[0].Synced != sha("laptop") {
+		t.Fatalf("copies %+v, %v", copies, err)
+	}
+	seen := make(chan linkproto.WriteBackRequest, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchSessionCopies(ctx, l, laptopTaking(seen), 10*time.Millisecond, 50*time.Millisecond, t.Logf)
+	}()
+	expectWriteBack(t, seen, linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/notes.md", BoxPath: paths[0]})
+	cancel()
+	<-done
+
+	// Both changed and the laptop refused the agent's version: the paste says where it stays.
+	if err := os.WriteFile(paths[0], []byte("agent 2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if copies, err = sessionCopies(l); err != nil {
+		t.Fatal(err)
+	}
+	if err := markRefused(l, copies[0], sha("agent 2")); err != nil {
+		t.Fatal(err)
+	}
+	err = PasteFilesInto(l, pasteSession, exchange(t, []string{"/l/notes.md"}, [2]string{"/l/notes.md", "laptop 2"}), io.Discard, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "the laptop refused") || !strings.Contains(err.Error(), paths[0]) {
+		t.Fatalf("PasteFilesInto = %v", err)
 	}
 }
