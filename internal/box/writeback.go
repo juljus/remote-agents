@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,8 +24,13 @@ const WriteBackRetry = 30 * time.Second
 
 const maxRetryDoublings = 5
 
-// writeBackTimeout bounds one write-back; the laptop fetches up to 100 MB.
-const writeBackTimeout = 10 * time.Minute
+// writeBackTimeout bounds one write-back: the user's approval on the
+// laptop, which a risky place needs, then a fetch of up to 100 MB.
+const writeBackTimeout = linkproto.ApprovalTimeout + 10*time.Minute
+
+// maxWriteBacks bounds the write-backs in flight at once. One may wait for
+// the user to approve it, which the others need not wait for.
+const maxWriteBacks = 4
 
 // fileSig tells one version of a file from the next without reading it.
 type fileSig struct {
@@ -61,6 +67,25 @@ type copyWatch struct {
 	handledRec copyRecord
 	failures   int
 	retryAt    time.Time
+	sending    bool
+}
+
+// failed puts off the next try of a copy whose last one failed.
+func (w *copyWatch) failed(path string, err error, retry time.Duration, logf func(string, ...any)) {
+	delay := retry << min(w.failures, maxRetryDoublings)
+	w.failures++
+	w.retryAt = time.Now().Add(delay)
+	logf("write-back of %s: %v; trying again in %s", path, err, delay)
+}
+
+// sent is how a write-back of the copy at path, whose record is record,
+// ended: the version sent, the record it left, or why it failed.
+type sent struct {
+	path   string
+	record string
+	sig    fileSig
+	rec    copyRecord
+	err    error
 }
 
 // watchSessionCopies sends each session copy the agent changed back to the
@@ -80,12 +105,28 @@ func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, 
 		return
 	}
 	defer lock.Close()
+	done := make(chan sent)
+	var sending sync.WaitGroup
+	// The lock stays held until every write-back sent has ended.
+	defer sending.Wait()
+	inFlight := 0
 	watched := map[string]*copyWatch{}
 	listErr := ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case s := <-done:
+			inFlight--
+			if w, ok := watched[s.record]; ok {
+				w.sending = false
+				if s.err != nil {
+					w.failed(s.path, s.err, retry, logf)
+				} else {
+					w.handled, w.handledRec, w.failures = s.sig, s.rec, 0
+				}
+			}
+			continue
 		case <-ticker.C:
 		}
 		copies, err := sessionCopies(l)
@@ -105,12 +146,25 @@ func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, 
 				w = &copyWatch{}
 				watched[c.record] = w
 			}
-			if err := checkCopy(ctx, l, laptop, c, w, logf); err != nil {
-				delay := retry << min(w.failures, maxRetryDoublings)
-				w.failures++
-				w.retryAt = time.Now().Add(delay)
-				logf("write-back of %s: %v; trying again in %s", c.Path, err, delay)
+			sum, due, err := checkCopy(c, w)
+			if err != nil {
+				w.failed(c.Path, err, retry, logf)
+				continue
 			}
+			if !due || inFlight == maxWriteBacks {
+				continue
+			}
+			w.sending = true
+			inFlight++
+			sending.Add(1)
+			go func(c pastedCopy, sig fileSig) {
+				defer sending.Done()
+				rec, err := sendCopy(ctx, l, laptop, c, sum, logf)
+				select {
+				case done <- sent{path: c.Path, record: c.record, sig: sig, rec: rec, err: err}:
+				case <-ctx.Done():
+				}
+			}(c, w.seen)
 		}
 		for record := range watched {
 			if !present[record] {
@@ -120,47 +174,54 @@ func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, 
 	}
 }
 
-// checkCopy sends c back when it settled on content the laptop lacks.
-func checkCopy(ctx context.Context, l boxlayout.Layout, laptop Laptop, c pastedCopy, w *copyWatch, logf func(string, ...any)) error {
+// checkCopy reports whether c settled on content the laptop lacks, of hash
+// sum; a copy that holds what the laptop has is dealt with.
+func checkCopy(c pastedCopy, w *copyWatch) (string, bool, error) {
+	if w.sending {
+		return "", false, nil
+	}
 	sig, ok, err := sigOf(c.Path)
 	if err != nil || !ok {
-		return err
+		return "", false, err
 	}
 	if sig != w.seen {
 		w.seen = sig
-		return nil
+		return "", false, nil
 	}
 	rec := copyRecord{Origin: c.Origin, Synced: c.Synced, Refused: c.Refused}
 	if sig == w.handled && rec == w.handledRec || time.Now().Before(w.retryAt) {
-		return nil
+		return "", false, nil
 	}
 	sum, err := fileSum(c.Path)
 	if err != nil {
-		return err
+		return "", false, err
 	}
-	if sum != c.Synced && sum != c.Refused {
-		reqCtx, cancel := context.WithTimeout(ctx, writeBackTimeout)
-		defer cancel()
-		res, err := laptop.WriteBack(reqCtx, linkproto.WriteBackRequest{Session: c.Session, Origin: c.Origin, BoxPath: c.Path})
-		switch {
-		case errors.Is(err, linkproto.ErrRefused):
-			// Asking again would be refused again; the next change asks anew.
-			logf("write-back of %s: %v; not asking again until it changes or is pasted again", c.Path, err)
-			err = markRefused(l, c, sum)
-			rec.Refused = sum
-		case err != nil:
-			return err
-		default:
-			logf("write-back of %s: %s, %s", c.Path, res.Outcome, res.Path)
-			err = markSynced(l, c, res.SHA256)
-			rec.Synced, rec.Refused = res.SHA256, ""
-		}
-		if err != nil {
-			return err
-		}
+	if sum == c.Synced || sum == c.Refused {
+		w.handled, w.handledRec, w.failures = sig, rec, 0
+		return "", false, nil
 	}
-	w.handled, w.handledRec, w.failures = sig, rec, 0
-	return nil
+	return sum, true, nil
+}
+
+// sendCopy sends c, of content hash sum, back to the laptop and gives the
+// record that leaves.
+func sendCopy(ctx context.Context, l boxlayout.Layout, laptop Laptop, c pastedCopy, sum string, logf func(string, ...any)) (copyRecord, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, writeBackTimeout)
+	defer cancel()
+	rec := copyRecord{Origin: c.Origin, Synced: c.Synced, Refused: c.Refused}
+	res, err := laptop.WriteBack(reqCtx, linkproto.WriteBackRequest{Session: c.Session, Origin: c.Origin, BoxPath: c.Path})
+	switch {
+	case errors.Is(err, linkproto.ErrRefused):
+		// Asking again would be refused again; the next change asks anew.
+		logf("write-back of %s: %v; not asking again until it changes or is pasted again", c.Path, err)
+		rec.Refused = sum
+		return rec, markRefused(l, c, sum)
+	case err != nil:
+		return rec, err
+	}
+	logf("write-back of %s: %s, %s", c.Path, res.Outcome, res.Path)
+	rec.Synced, rec.Refused = res.SHA256, ""
+	return rec, markSynced(l, c, res.SHA256)
 }
 
 // awaitFlock takes an exclusive flock on path, trying again at each tick

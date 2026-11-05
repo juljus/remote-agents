@@ -309,3 +309,40 @@ func TestARunningWatcherOffersAReopenedVersion(t *testing.T) {
 	pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
 	expectWriteBack(t, seen, want)
 }
+
+// A write-back may wait up to linkproto.ApprovalTimeout for the user to
+// approve it on the laptop; the other copies go back meanwhile.
+func TestAWriteBackWaitingForTheUserHoldsUpNoOther(t *testing.T) {
+	l := testLayout(t)
+	paths := pasteInto(t, l, pasteSession, [2]string{"/l/.zshrc", "laptop"}, [2]string{"/l/notes.md", "laptop"})
+	seen := make(chan linkproto.WriteBackRequest, 10)
+	taking := laptopTaking(seen)
+	approve := make(chan struct{})
+	asking := make(chan struct{}, 1)
+	laptop := &fakeLaptop{writeBack: func(req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
+		if req.Origin == "/l/.zshrc" {
+			asking <- struct{}{}
+			<-approve
+		}
+		return taking.writeBack(req)
+	}}
+	watchLayout(t, l, laptop)
+	t.Cleanup(func() {
+		select {
+		case <-approve:
+		default:
+			close(approve)
+		}
+	})
+	if err := os.WriteFile(paths[0], []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	<-asking
+	if err := os.WriteFile(paths[1], []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectWriteBack(t, seen, linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/notes.md", BoxPath: paths[1]})
+	close(approve)
+	expectWriteBack(t, seen, linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/.zshrc", BoxPath: paths[0]})
+	expectNone(t, seen)
+}
