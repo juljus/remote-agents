@@ -34,13 +34,16 @@ both.
 You need:
 
 - a Mac with Go and an `ssh` login to the box that asks for no password (keys or an agent);
-- a Linux x86_64 box with systemd and docker, and a user on it with lingering enabled
-  (`loginctl enable-linger <user>`). For `rcodex`, Codex on the box's `/usr/local/bin`.
+- a Linux x86_64 box with systemd, and a user on it who can run docker and has lingering enabled
+  (`loginctl enable-linger <user>`), with the folder your sessions should work in. For `rcodex`,
+  Codex on the box's `/usr/local/bin`.
 
 Starting from a bare Hetzner server? [box/bootstrap](box/bootstrap/README.md) builds such a box
 for you, locked down to your tailnet.
 
-1. Install the box side, from the Mac:
+Clone this repo on the Mac and run these from its root.
+
+1. Install the box side:
 
        make deploy-box HOST=<ssh host>
 
@@ -51,6 +54,9 @@ for you, locked down to your tailnet.
        cp config.example.toml ~/.config/remote-agents/config.toml   # set host and workdir
        cp bin/com.remote-agents.link.plist ~/Library/LaunchAgents/
        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.remote-agents.link.plist
+
+   `rclaude` and `rcodex` land in `~/.local/bin`; put it on your `PATH` if it is not
+   (`make install BINDIR=<dir>` picks another).
 
 3. Log in on the box: run `rclaude` and type `/login`, and run `rcodex login`. The login pages
    open in your Mac browser.
@@ -65,10 +71,13 @@ the `args` lines to get the prompts back.
     rcodex                       # new Codex session
     rcodex resume <id>
     remote-agents ls             # sessions on the box
-    remote-agents attach <name>  # reattach to one
+    remote-agents attach <session>  # reattach to one
     rclaude account              # pick or add a Claude account (rcodex account for Codex)
 
-- When the agent exits, `rclaude` prints the command that resumes the session.
+- When the agent exits, `rclaude` prints the command that resumes the session, once it knows the
+  session's id: after `--resume`, or inside cmux.
+- A session you left idle and detached is ended after 5 minutes to free the box; it resumes on
+  its own when you reconnect.
 - While the connection is down, Ctrl+C detaches; the session keeps running on the box.
 - On the box, `laptop-save <file>` puts a file in your Mac's `~/Downloads`.
 

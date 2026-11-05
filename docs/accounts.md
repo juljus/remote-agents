@@ -56,7 +56,7 @@ it, and any tokens it rotates there all the same go back to the account.
 
 ## Codex
 
-`rcodex account` does the same for Codex's ChatGPT logins, with one difference: a running Codex
+`rcodex account` does the same for Codex's ChatGPT logins. The main difference: a running Codex
 keeps the login it started with, so a switch reaches only the Codex sessions started after it.
 It names the running ones; restart each with `rcodex resume <id>` to move it over. A Codex
 refreshes its login only while `auth.json` still holds that account, so a session left on the old

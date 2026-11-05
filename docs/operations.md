@@ -11,8 +11,7 @@ the [README](../README.md) leaves out. [Accounts](accounts.md) and the
   `com.remote-agents.link`, runs `remote-agents link`: the link daemon that holds the SSH link
   and serves the box's clipboard, browser, login, file and cmux requests.
 - **Box:** `remote-agents-box`, the session launcher and the busybox-style shims (`xclip`,
-  `wl-paste`, `xdg-open`, `laptop-save`, and `cmux` for hooks), plus shpool, which keeps the
-  sessions alive across disconnects. Sessions live in [shpool](https://github.com/shell-pool/shpool)
+  `wl-paste`, `xdg-open`, `laptop-save`, and `cmux` for hooks), plus shpool. Sessions live in [shpool](https://github.com/shell-pool/shpool)
   on the box, so a closed lid, a network change or a dropped SSH link does not stop them: the
   laptop reconnects on its own. While the link is up, the link daemon gives box sessions the
   laptop's clipboard and browser, carries OAuth logins started on the box back to it, and
@@ -56,7 +55,7 @@ sessions:
 | --- | --- |
 | Binaries: `bin/remote-agents-box`, `bin/shpool`, `shims/`, `hookbin/` | `~/.local/share/<name>/` |
 | shpool socket, run records, activity, pasted copies (`session-pastes/`), `reaper.log` | `~/.local/state/<name>/` (mode 0700) |
-| `shpool.toml`, `session.toml`, `reaper.toml`, `accounts.toml` | `~/.config/<name>/` |
+| `shpool.toml`, `session.toml`, `reaper.toml`, `accounts.toml`, the `accounts/` vault | `~/.config/<name>/` |
 | `<name>-shpool.socket`, `<name>-shpool.service` | `~/.config/systemd/user/` |
 | Stage dir during a deploy | `~/.cache/<name>-stage` |
 | Built shpool, shared by every install | `~/.cache/remote-agents/shpool-<sha256>` |
@@ -86,7 +85,7 @@ Log in to Claude once on the box through a session (`rclaude`, then `/login`), a
 
 ## Laptop install
 
-    make install                                   # ~/.local/bin/remote-agents and rclaude
+    make install                                   # ~/.local/bin/remote-agents, rclaude, rcodex
     mkdir -p ~/.config/remote-agents
     cp config.example.toml ~/.config/remote-agents/config.toml   # then set host and workdir
     cp bin/com.remote-agents.link.plist ~/Library/LaunchAgents/
@@ -96,18 +95,19 @@ Log in to Claude once on the box through a session (`rclaude`, then `/login`), a
 links into `~/.local/bin` (`BINDIR`), and writes `bin/com.remote-agents.link.plist` for that
 path. It loads nothing.
 
-No shell setup is needed. Stop the link daemon with
+No shell setup is needed beyond having `~/.local/bin` (or the `BINDIR` you install to) on your
+`PATH`. Stop the link daemon with
 `launchctl bootout gui/$(id -u)/com.remote-agents.link`.
 
 ### Configuration
 
 `~/.config/remote-agents/config.toml`, or the file `REMOTE_AGENTS_CONFIG` names. Unknown keys
-are refused. See `config.example.toml`.
+are refused, and at least one `[agents.<name>]` table is required. See `config.example.toml`.
 
 | Key | Meaning |
 | --- | --- |
 | `host` | ssh destination of the box; required |
-| `workdir` | absolute path on the box every session runs in; required, must exist |
+| `workdir` | absolute path on the box every session runs in; required; a session fails to start while it does not exist |
 | `box_install` | install name on the box; default `remote-agents` |
 | `[link] opener` | absolute path of the laptop command that opens box URLs; default `/usr/bin/open` |
 | `[link] revealer` | laptop command that shows a file `laptop-save` saved; default `["/usr/bin/open", "-R"]` |
@@ -158,13 +158,15 @@ session is OOM-killed.
 A session nobody is attached to is ended once it has been idle for 5 minutes, or 36 hours after
 it was detached even while working. A turn waiting on its user counts as idle; an open turn, a
 running tool, a busy process a tool left behind, a background task or a scheduled task counts as
-working. Ending it also ends idle processes its tools left behind, but not daemons that detached
+working. Ending it also ends the processes its tools left behind, but not daemons that detached
 themselves. When its wrapper reconnects, or on `rclaude --resume <id>` or
 `remote-agents attach <session>`, the agent session resumes with
-`resumed; the session had been ended for inactivity`.
+`resumed; the session had been ended for inactivity` (or `after a long time detached`, for the
+36-hour cap). `remote-agents ls` also lists the sessions reaped in the last 7 days, with the
+command that resumes each. A session whose agent session id is not known yet is never reaped.
 
 Override the policy in `~/.config/<name>/reaper.toml` with Go durations: `idle_after`,
-`working_cap`, `poll` (default 15s). Each reap is logged to `~/.local/state/<name>/reaper.log`.
+`working_cap`, `poll` (default 15s, at most `idle_after`). Each reap is logged to `~/.local/state/<name>/reaper.log`.
 
 ### Lost sessions
 
@@ -198,8 +200,8 @@ before its first turn has no session yet and starts again.
 
 ### Clipboard and browser
 
-Inside a session, `xclip` and `wl-paste` read and set the laptop clipboard (the clipboard
-selection only), images included, and `xdg-open <url>` opens the URL in the laptop browser
+Inside a session, `xclip -selection clipboard` reads (`-o`) and sets the laptop clipboard, and
+`wl-paste` reads it, images included (by MIME type, `-t`); other X selections are refused. And `xdg-open <url>` opens the URL in the laptop browser
 through the configured opener. A login whose URL calls back to `localhost` gets its callback
 forwarded to the box; the [security model](security.md#logins) has the rules.
 
