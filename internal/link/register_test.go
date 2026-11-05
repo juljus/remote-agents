@@ -16,6 +16,13 @@ import (
 // answers its hooks with exec, as a session wrapper does.
 func serveAndRegister(t *testing.T, reg *control.Registry, session string, exec hookexec.Executor) {
 	t.Helper()
+	serveAndRegisterWrapper(t, reg, session, control.Wrapper{RunHook: exec.Run, Notice: func(string) {}})
+}
+
+// serveAndRegisterWrapper registers session with a control server over reg
+// and answers its requests with w.
+func serveAndRegisterWrapper(t *testing.T, reg *control.Registry, session string, w control.Wrapper) {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "ra-link-")
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +43,7 @@ func serveAndRegister(t *testing.T, reg *control.Registry, session string, exec 
 		t.Fatal(err)
 	}
 	served := make(chan error, 1)
-	go func() { served <- held.ServeHooks(ctx, exec.Run, func(error) {}) }()
+	go func() { served <- held.Serve(ctx, w, func(error) {}) }()
 	t.Cleanup(func() { cancel(); <-done; <-served })
 	deadline := time.Now().Add(2 * time.Second)
 	for {

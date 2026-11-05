@@ -1,9 +1,11 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +17,9 @@ import (
 
 	"github.com/creack/pty"
 
+	"remote-agents/internal/control"
+	"remote-agents/internal/laptopfiles"
+	"remote-agents/internal/linkproto"
 	"remote-agents/internal/pastefile"
 )
 
@@ -108,8 +113,20 @@ func TestPastedLaptopFilesTheBoxLacksGoToItUnderTheirBoxPaths(t *testing.T) {
 	if !slices.Equal(query, []string{shot, onBox}) {
 		t.Fatalf("query %q", query)
 	}
-	if len(uploads) != 1 || uploads[0] != [2]string{"my shot.png", string(onePixelPNG)} {
-		t.Fatalf("uploads %q", uploads)
+	origin, err := laptopfiles.Origin(shot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uploads) != 1 || uploads[0] != [2]string{origin, string(onePixelPNG)} {
+		t.Fatalf("uploads %q, want %s by its laptop path", uploads, shot)
+	}
+	// The paste is recorded, so the box may write the file back.
+	res, err := laptopfiles.Files{Records: laptopfiles.Records{Dir: h.pasted}, Trash: os.Remove}.WriteBack("claude-abc", origin, func(w io.Writer) error {
+		_, err := io.WriteString(w, "edited")
+		return err
+	})
+	if err != nil || res.Outcome != laptopfiles.Written {
+		t.Fatalf("write-back after the paste: %+v, %v", res, err)
 	}
 }
 
@@ -202,7 +219,7 @@ func TestAPasteSaysWhyEachFileStayedAndUploadsTheRest(t *testing.T) {
 	if r := wait(t, done); r.err != nil {
 		t.Fatal(r.err)
 	}
-	if _, uploads := received(t, receivedAt); len(uploads) != 1 || uploads[0][0] != "a.png" {
+	if _, uploads := received(t, receivedAt); len(uploads) != 1 || filepath.Base(uploads[0][0]) != "a.png" {
 		t.Fatalf("uploads %q", uploads)
 	}
 }
@@ -507,5 +524,54 @@ func TestALoneEscReachesTheSessionPromptly(t *testing.T) {
 	}
 	if r := wait(t, done); r.err != nil || r.code != 0 {
 		t.Fatalf("Run = %d, %v", r.code, r.err)
+	}
+}
+
+func TestNoticesFromTheLinkDaemonShowOnTheSessionsScreen(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ra-session-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	ln, err := net.Listen("unix", filepath.Join(dir, "c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := control.NewRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() {
+		served <- control.Serve(ctx, ln, reg, func() control.Status { return control.Status{} }, func(error) {})
+	}()
+	t.Cleanup(func() { cancel(); <-served })
+
+	h := newPTY(t)
+	opts := testOptions(fakeBox(t, echoLine+`; exit 0`, `exit 9`), h)
+	// No hooks were injected; the session registers for its notices all the same.
+	opts.Registration = &Registration{Control: control.Client{Socket: filepath.Join(dir, "c")}}
+	done := start(opts)
+	h.waitFor(t, "ready")
+	var wrapper *linkproto.Caller
+	deadline := time.Now().Add(5 * time.Second)
+	for wrapper == nil {
+		if wrapper, err = reg.Lookup("claude-abc"); err != nil && time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	resp, err := wrapper.Call(context.Background(), linkproto.Request{Notice: &linkproto.NoticeRequest{Session: "claude-abc", Text: "notes.md changed on the laptop"}})
+	if err != nil || resp.Err() != nil {
+		t.Fatalf("notice = %+v, %v", resp, err)
+	}
+	h.waitFor(t, "[remote-agents] notes.md changed on the laptop")
+	resp, err = wrapper.Call(context.Background(), linkproto.Request{Hook: &linkproto.HookRequest{Session: "claude-abc"}})
+	if err != nil || !errors.Is(resp.Err(), linkproto.ErrNoTerminal) {
+		t.Fatalf("hook = %+v, %v", resp, err)
+	}
+	if _, err := h.master.Write([]byte("bye\n")); err != nil {
+		t.Fatal(err)
+	}
+	if r := wait(t, done); r.err != nil {
+		t.Fatal(r.err)
 	}
 }

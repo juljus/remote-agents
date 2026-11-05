@@ -51,9 +51,15 @@ func SessionArgv(ssh string, b Box, token string) []string {
 	return argv(ssh, []string{"-tt", "-e", "none"}, b.Host, b.command("attach", token))
 }
 
-// PasteFilesArgv runs the box's side of a paste-files exchange over its stdio.
-func PasteFilesArgv(ssh string, b Box) []string {
-	return argv(ssh, []string{"-T"}, b.Host, b.command("paste-files"))
+// PasteFilesArgv runs the box's side of a paste-files exchange for session
+// over its stdio; session is a valid session name, so shell-safe.
+func PasteFilesArgv(ssh string, b Box, session string) []string {
+	return argv(ssh, []string{"-T"}, b.Host, b.command("paste-files", session))
+}
+
+// SendFileArgv runs the box's side of a send-file exchange over its stdio.
+func SendFileArgv(ssh string, b Box) []string {
+	return argv(ssh, []string{"-T"}, b.Host, b.command("send-file"))
 }
 
 func ExecArgv(ssh string, b Box, token string, tty bool) []string {

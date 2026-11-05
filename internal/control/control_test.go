@@ -65,9 +65,9 @@ func registerServing(t *testing.T, d daemon, session, tag string) (*Held, chan e
 	}
 	served := make(chan error, 1)
 	go func() {
-		served <- held.ServeHooks(context.Background(), func(_ context.Context, req linkproto.HookRequest) (linkproto.HookResult, error) {
+		served <- held.Serve(context.Background(), Wrapper{RunHook: func(_ context.Context, req linkproto.HookRequest) (linkproto.HookResult, error) {
 			return linkproto.HookResult{Stdout: []byte(tag + ":" + string(req.Stdin)), ExitCode: 4}, nil
-		}, func(error) {})
+		}}, func(error) {})
 	}()
 	eventually(t, func() bool { _, err := d.reg.Lookup(session); return err == nil })
 	return held, served
@@ -124,13 +124,43 @@ func TestDaemonNotRunning(t *testing.T) {
 	}
 }
 
-func TestServeHooksEndsWhenTheDaemonGoesAway(t *testing.T) {
+func TestNoticesReachTheRegisteredWrapper(t *testing.T) {
+	d := serve(t, Status{})
+	held, err := Client{Socket: d.sock}.Register(context.Background(), "claude-n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices := make(chan string, 1)
+	go func() {
+		_ = held.Serve(context.Background(), Wrapper{Notice: func(text string) { notices <- text }}, func(error) {})
+	}()
+	t.Cleanup(func() { held.Close() })
+	eventually(t, func() bool { _, err := d.reg.Lookup("claude-n"); return err == nil })
+	c, err := d.reg.Lookup("claude-n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Call(context.Background(), linkproto.Request{Notice: &linkproto.NoticeRequest{Session: "claude-n", Text: "hello"}})
+	if err != nil || resp.Err() != nil {
+		t.Fatalf("notice = %+v, %v", resp, err)
+	}
+	if got := <-notices; got != "hello" {
+		t.Fatalf("notice %q", got)
+	}
+	// This wrapper runs no hooks, so a hook finds no terminal, as with no registration.
+	resp, err = callHook(t, d, "claude-n")
+	if err != nil || !errors.Is(resp.Err(), linkproto.ErrNoTerminal) {
+		t.Fatalf("hook = %+v, %v", resp, err)
+	}
+}
+
+func TestServeEndsWhenTheDaemonGoesAway(t *testing.T) {
 	d := serve(t, Status{})
 	_, served := registerServing(t, d, "claude-y", "w")
 	d.stop()
 	select {
 	case <-served:
 	case <-time.After(2 * time.Second):
-		t.Fatal("ServeHooks did not notice the daemon going away")
+		t.Fatal("Serve did not notice the daemon going away")
 	}
 }

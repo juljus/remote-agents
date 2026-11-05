@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"remote-agents/internal/control"
+	"remote-agents/internal/laptopfiles"
 	"remote-agents/internal/linkproto"
 )
 
@@ -51,6 +52,11 @@ type Handler struct {
 	Forwarder  PortForwarder
 	Registry   *control.Registry
 	Resolve    func(ctx context.Context, host string) ([]netip.Addr, error)
+	// Files is where box files may land on the laptop; Fetcher brings them.
+	Files    laptopfiles.Files
+	Fetcher  Fetcher
+	Revealer Revealer
+	Logf     func(format string, args ...any)
 }
 
 var _ linkproto.Handler = (*Handler)(nil)

@@ -20,6 +20,7 @@ import (
 
 	"remote-agents/internal/control"
 	"remote-agents/internal/corner"
+	"remote-agents/internal/laptopfiles"
 	"remote-agents/internal/linkproto"
 	"remote-agents/internal/paste"
 	"remote-agents/internal/reconnect"
@@ -27,10 +28,12 @@ import (
 	"remote-agents/internal/sshrun"
 )
 
-// Registration makes this terminal the one the session's hooks report to.
+// Registration makes this terminal the one the session's hooks report to
+// and the link daemon's notices for it show on.
 type Registration struct {
 	Control control.Client
-	// RunHook runs a hook the box relays for this session.
+	// RunHook runs a hook the box relays for this session; nil when the
+	// session was given no hooks to relay.
 	RunHook func(context.Context, linkproto.HookRequest) (linkproto.HookResult, error)
 }
 
@@ -44,10 +47,12 @@ type Options struct {
 	ExitHint func() string
 	// Registration, when set, keeps the session's terminal registered with the link daemon.
 	Registration *Registration
-	Triggers     <-chan string
-	Stdin        *os.File
-	Stdout       *os.File
-	Stderr       *os.File
+	// Pasted records the laptop files pasted into the session, which the box may write back.
+	Pasted   laptopfiles.Records
+	Triggers <-chan string
+	Stdin    *os.File
+	Stdout   *os.File
+	Stderr   *os.File
 	// Logf records problems that must not be drawn over the agent's screen.
 	Logf func(format string, args ...any)
 }
@@ -95,12 +100,11 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		}
 	}()
 
+	var held *control.Held
 	if opts.Registration != nil {
-		held, err := opts.Registration.Control.Register(ctx, opts.Spec.Session)
-		if err != nil {
+		if held, err = opts.Registration.Control.Register(ctx, opts.Spec.Session); err != nil {
 			return 0, err
 		}
-		go keepRegistered(ctx, opts, held)
 	}
 
 	keys := &input{fd: fd, logf: opts.Logf, onInterrupt: func() { cancel(detached{syscall.SIGINT}) }, onError: func(err error) { cancel(err) }}
@@ -123,6 +127,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// ssh's stderr is only captured, so the session's output is the one other writer to the terminal.
 	stdout := newScreenOut(screen, status, opts.Logf)
 	defer stdout.close()
+	if held != nil {
+		go keepRegistered(ctx, opts, held, stdout.notify)
+	}
 	// ssh reads a terminal of its own, so the terminal stays raw throughout and resizes are passed on.
 	if _, err := term.MakeRaw(fd); err != nil {
 		return 0, fmt.Errorf("making the terminal raw: %w", err)
@@ -225,12 +232,13 @@ func Run(ctx context.Context, opts Options) (int, error) {
 
 // keepRegistered serves hooks on held and registers again whenever the
 // daemon goes away, until ctx ends.
-func keepRegistered(ctx context.Context, opts Options, held *control.Held) {
+func keepRegistered(ctx context.Context, opts Options, held *control.Held, notify func(string)) {
 	reg := opts.Registration
 	session := opts.Spec.Session
 	logErr := func(err error) { opts.Logf("%s: hook relay: %v", session, err) }
+	wrapper := control.Wrapper{RunHook: reg.RunHook, Notice: notify}
 	for {
-		if err := held.ServeHooks(ctx, reg.RunHook, logErr); ctx.Err() != nil {
+		if err := held.Serve(ctx, wrapper, logErr); ctx.Err() != nil {
 			return
 		} else if err != nil {
 			logErr(err)

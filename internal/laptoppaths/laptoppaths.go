@@ -26,5 +26,9 @@ func Default() (Paths, error) {
 // ControlSocket is where session wrappers reach the link daemon.
 func (p Paths) ControlSocket() string { return filepath.Join(p.StateDir, "control.sock") }
 
+// PastedRecords is where the wrappers record the files pasted into each
+// session, which the link daemon lets the box write back.
+func (p Paths) PastedRecords() string { return filepath.Join(p.StateDir, "pasted") }
+
 // SessionLog collects what session wrappers cannot show over the agent's screen.
 func (p Paths) SessionLog() string { return filepath.Join(p.LogDir, "sessions.log") }

@@ -183,13 +183,18 @@ func dispatch(ctx context.Context, h Handler, req Request) Response {
 		err = errors.New("notices are for session wrappers, not the link daemon")
 	}
 	if err != nil {
-		code := codeFailed
-		if errors.Is(err, ErrNoTerminal) {
-			code = codeNoTerminal
-		}
-		return Response{Error: err.Error(), ErrorCode: code}
+		return Failure(err)
 	}
 	return resp
+}
+
+// Failure is the response that carries err; ErrNoTerminal keeps its code.
+func Failure(err error) Response {
+	code := codeFailed
+	if errors.Is(err, ErrNoTerminal) {
+		code = codeNoTerminal
+	}
+	return Response{Error: err.Error(), ErrorCode: code}
 }
 
 type Client struct {

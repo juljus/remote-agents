@@ -36,6 +36,7 @@ import (
 	"remote-agents/internal/control"
 	"remote-agents/internal/entrypoint"
 	"remote-agents/internal/hookexec"
+	"remote-agents/internal/laptopfiles"
 	"remote-agents/internal/laptoppaths"
 	"remote-agents/internal/link"
 	"remote-agents/internal/linkproto"
@@ -310,6 +311,8 @@ func runSession(e env, s spec.Spec, hint string, hooks *hookexec.Executor, track
 		SSH: e.ssh, Box: e.box(), Spec: s, ReattachHint: hint, Triggers: trig,
 		ExitHint: tracker.Hint,
 		Stdin:    os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Logf: logger.Printf,
+		Registration: &session.Registration{Control: ctl},
+		Pasted:       laptopfiles.Records{Dir: e.paths.PastedRecords()},
 	}
 	if hooks != nil {
 		run := func(ctx context.Context, req linkproto.HookRequest) (linkproto.HookResult, error) {
@@ -322,7 +325,7 @@ func runSession(e env, s spec.Spec, hint string, hooks *hookexec.Executor, track
 			}
 			return res, err
 		}
-		opts.Registration = &session.Registration{Control: ctl, RunHook: run}
+		opts.Registration.RunHook = run
 	}
 	code, err := session.Run(ctx, opts)
 	cancel()
@@ -594,6 +597,17 @@ func runLink() error {
 	reg := control.NewRegistry()
 	forwarder := &link.SSHForwarder{SSH: e.ssh, Box: e.box(), Lifetime: link.ForwardLifetime, ProbeEvery: link.ForwardProbeEvery, Clock: link.SystemClock{}, Logf: logger.Printf}
 	defer forwarder.Close()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	trash := func(path string) error {
+		trashed, err := laptopfiles.Trash(path)
+		if err == nil {
+			logger.Printf("moved %s to the Trash as %s", path, trashed)
+		}
+		return err
+	}
 	d := &link.Daemon{
 		SSH:   e.ssh,
 		Box:   e.box(),
@@ -604,6 +618,10 @@ func runLink() error {
 			Forwarder:  forwarder,
 			Registry:   reg,
 			Resolve:    resolveHost,
+			Files:      laptopfiles.Files{Records: laptopfiles.Records{Dir: e.paths.PastedRecords()}, Home: home, Trash: trash},
+			Fetcher:    link.SSHFetcher{SSH: e.ssh, Box: e.box()},
+			Revealer:   link.FinderRevealer{},
+			Logf:       logger.Printf,
 		},
 		Registry: reg,
 		Triggers: trig,

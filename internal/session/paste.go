@@ -3,6 +3,8 @@ package session
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"remote-agents/internal/corner"
+	"remote-agents/internal/laptopfiles"
 	"remote-agents/internal/paste"
 	"remote-agents/internal/pastefile"
 	"remote-agents/internal/reconnect"
@@ -37,7 +40,8 @@ var errAttemptEnded = errors.New("the attempt ended")
 var errBoxEnded = errors.New("the box ended the exchange early")
 
 // pasteRewriter is the Rewrite of an attempt's paste filter: each laptop path
-// in a paste that the box lacks becomes the box path of its uploaded copy.
+// in a paste that the box lacks becomes the box path of the session's copy,
+// which the box writes back to the laptop file when the agent changes it.
 // A path the box has stays as typed, so the agent works on the box's own
 // file. A file that cannot upload stays as typed too, and the user is told
 // why; when the exchange fails, the whole paste goes on unchanged.
@@ -69,15 +73,24 @@ func pasteRewriter(ctx context.Context, opts Options, out *screenOut) func([]byt
 			opts.Logf("%s: pasted paths not uploaded, they went in as typed: %v", opts.Spec.Session, reasons)
 			out.notify("not uploaded: " + strings.ReplaceAll(reasons.Error(), "\n", "; "))
 		}
+		for i, origin := range up.origins {
+			if err := opts.Pasted.Pasted(opts.Spec.Session, origin, up.sums[i]); err != nil {
+				opts.Logf("%s: %s pasted, but not recorded for write-back: %v", opts.Spec.Session, origin, err)
+				out.notify(filepath.Base(origin) + " will not be written back: " + err.Error())
+			}
+		}
 		return paste.Replace(content, up.sent, up.boxPaths)
 	}
 }
 
 // uploaded is what a paste-files exchange made of a paste's laptop files:
-// boxPaths[i] is where sent[i] landed, and refused says why each file the
-// box lacks did not go.
+// boxPaths[i] is where sent[i] landed, origins[i] is its laptop path with
+// symlinks resolved and sums[i] the hash of what was sent, and refused says
+// why each file the box lacks did not go.
 type uploaded struct {
 	sent     []paste.File
+	origins  []string
+	sums     []string
 	boxPaths []string
 	refused  []error
 }
@@ -102,7 +115,7 @@ func upload(ctx context.Context, opts Options, files []paste.File, lateFailure f
 	var stderr bytes.Buffer
 	ran := make(chan reconnect.Result, 1)
 	go func() {
-		res := sshrun.Run(sshCtx, sshrun.PasteFilesArgv(opts.SSH, opts.Box), sshrun.Stdio{Stdin: stdinR, Stdout: stdoutW, Stderr: &stderr}, 2*time.Second)
+		res := sshrun.Run(sshCtx, sshrun.PasteFilesArgv(opts.SSH, opts.Box, opts.Spec.Session), sshrun.Stdio{Stdin: stdinR, Stdout: stdoutW, Stderr: &stderr}, 2*time.Second)
 		// A process ssh left behind may still hold the pipes; the exchange is over all the same.
 		stdoutW.CloseWithError(errBoxEnded)
 		stdinR.Close()
@@ -199,12 +212,18 @@ func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, erro
 			up.refused = append(up.refused, err)
 			continue
 		}
+		origin, err := laptopfiles.Origin(f.Path)
+		if err != nil {
+			up.refused = append(up.refused, fmt.Errorf("%s cannot be resolved: %w", filepath.Base(f.Path), err))
+			continue
+		}
 		src, err := f.Open()
 		if err != nil {
 			up.refused = append(up.refused, err)
 			continue
 		}
 		up.sent = append(up.sent, f)
+		up.origins = append(up.origins, origin)
 		srcs = append(srcs, src)
 	}
 	stored := make(chan storedResult, 1)
@@ -225,9 +244,11 @@ func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, erro
 			return uploaded{}, errors.New("the box sent where the uploads landed before it had them")
 		default:
 		}
-		if err := send(w, f, srcs[i]); err != nil {
-			return uploaded{}, err
+		sum, err := send(w, up.origins[i], srcs[i])
+		if err != nil {
+			return uploaded{}, fmt.Errorf("uploading %s: %w", f.Path, err)
 		}
+		up.sums = append(up.sums, sum)
 	}
 	if err := w.Close(); err != nil {
 		return uploaded{}, err
@@ -264,19 +285,21 @@ func readStored(frames *pastefile.Reader, n int) ([]string, error) {
 	return paths, nil
 }
 
-// send writes f's base name and its content, read from src, to the box.
-func send(w io.Writer, f paste.File, src *os.File) error {
+// send writes a file's laptop path and its content, read from src, to the
+// box, and returns the content's hash.
+func send(w io.Writer, origin string, src *os.File) (string, error) {
 	info, err := src.Stat()
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := pastefile.WriteFrame(w, []byte(filepath.Base(f.Path))); err != nil {
-		return fmt.Errorf("uploading %s: %w", f.Path, err)
+	if err := pastefile.WriteFrame(w, []byte(origin)); err != nil {
+		return "", err
 	}
-	if err := pastefile.CopyFrame(w, src, info.Size()); err != nil {
-		return fmt.Errorf("uploading %s: %w", f.Path, err)
+	h := sha256.New()
+	if err := pastefile.CopyFrame(w, io.TeeReader(src, h), info.Size()); err != nil {
+		return "", err
 	}
-	return nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // movingWriter and movingReader hold off the stall timer while bytes move through them.

@@ -1,8 +1,9 @@
 // Package control is the laptop-local protocol between session wrappers and
 // the link daemon. A wrapper registers its session and keeps the connection
 // open; the daemon forwards the session's hook requests over it, so hooks run
-// inside the wrapper's terminal, where cmux accepts them. The registration
-// ends when the connection does.
+// inside the wrapper's terminal, where cmux accepts them, and sends the
+// notices meant for the session's screen. The registration ends when the
+// connection does.
 package control
 
 import (
@@ -192,12 +193,38 @@ func (c Client) Register(ctx context.Context, session string) (*Held, error) {
 	return &Held{conn: conn, reader: reader}, nil
 }
 
-// ServeHooks answers the daemon's hook requests on h with run until the
-// daemon goes away or ctx ends.
-func (h *Held) ServeHooks(ctx context.Context, run func(context.Context, linkproto.HookRequest) (linkproto.HookResult, error), logf func(error)) error {
+// Wrapper is what a registered session wrapper does with the daemon's requests.
+type Wrapper struct {
+	// RunHook runs a hook the box relays for the session; nil when the
+	// wrapper injected none, and the session has no terminal for hooks.
+	RunHook func(context.Context, linkproto.HookRequest) (linkproto.HookResult, error)
+	// Notice shows a notice from the daemon on the session's bottom row.
+	Notice func(text string)
+}
+
+func (w Wrapper) dispatch(ctx context.Context, req linkproto.Request) linkproto.Response {
+	switch {
+	case req.Hook != nil && w.RunHook == nil:
+		return linkproto.Failure(fmt.Errorf("%w: this terminal runs no hooks", linkproto.ErrNoTerminal))
+	case req.Hook != nil:
+		res, err := w.RunHook(ctx, *req.Hook)
+		if err != nil {
+			return linkproto.Failure(err)
+		}
+		return linkproto.Response{Hook: &res}
+	case req.Notice != nil:
+		w.Notice(req.Notice.Text)
+		return linkproto.Response{}
+	}
+	return linkproto.Refused("only hooks and notices are served here")
+}
+
+// Serve answers the daemon's requests on h with w until the daemon goes
+// away or ctx ends.
+func (h *Held) Serve(ctx context.Context, w Wrapper, logf func(error)) error {
 	stop := context.AfterFunc(ctx, func() { h.conn.Close() })
 	defer stop()
-	err := linkproto.ServeMux(ctx, h, h, linkproto.HookOnly(run), linkproto.HeartbeatInterval, func() {}, logf)
+	err := linkproto.ServeMux(ctx, h, h, w.dispatch, linkproto.HeartbeatInterval, func() {}, logf)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

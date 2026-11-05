@@ -22,6 +22,9 @@ import (
 
 const shimTimeout = 15 * time.Second
 
+// saveTimeout bounds laptop-save, whose file of up to 100 MB the laptop fetches.
+const saveTimeout = 10 * time.Minute
+
 // forgetTimeout bounds the wait for a reaped session's launcher to exit.
 const forgetTimeout = time.Minute
 
@@ -66,8 +69,12 @@ func runShim(name string, layout boxlayout.Layout, stdio box.IO) int {
 	defer stop()
 	// Hooks are bounded by the agent's own hook timeout; a permission prompt may legitimately wait long.
 	if name != "cmux" {
+		timeout := shimTimeout
+		if name == "laptop-save" {
+			timeout = saveTimeout
+		}
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, shimTimeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 	laptop := linkproto.Client{Socket: layout.LaptopSocket(), DialTimeout: 3 * time.Second}

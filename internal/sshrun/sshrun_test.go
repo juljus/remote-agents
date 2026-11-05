@@ -47,9 +47,18 @@ func TestLinkArgv(t *testing.T) {
 }
 
 func TestPasteFilesArgv(t *testing.T) {
-	got := PasteFilesArgv("ssh", testBox)
+	got := PasteFilesArgv("ssh", testBox, "claude-abc")
 	want := append(append([]string{"ssh"}, commonOptions...), "-T", "box",
-		`exec "$HOME/.local/share/ra-test/bin/remote-agents-box" paste-files`)
+		`exec "$HOME/.local/share/ra-test/bin/remote-agents-box" paste-files claude-abc`)
+	if !slices.Equal(got, want) {
+		t.Fatalf("argv =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestSendFileArgv(t *testing.T) {
+	got := SendFileArgv("ssh", testBox)
+	want := append(append([]string{"ssh"}, commonOptions...), "-T", "box",
+		`exec "$HOME/.local/share/ra-test/bin/remote-agents-box" send-file`)
 	if !slices.Equal(got, want) {
 		t.Fatalf("argv =\n%q\nwant\n%q", got, want)
 	}

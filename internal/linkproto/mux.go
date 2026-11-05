@@ -58,20 +58,6 @@ func Refused(reason string) Response {
 	return Response{Error: reason, ErrorCode: codeFailed}
 }
 
-// HookOnly answers hook requests with run and refuses every other operation.
-func HookOnly(run func(context.Context, HookRequest) (HookResult, error)) Dispatch {
-	return func(ctx context.Context, req Request) Response {
-		if req.Hook == nil {
-			return Refused("only hook requests are served here")
-		}
-		res, err := run(ctx, *req.Hook)
-		if err != nil {
-			return Refused(err.Error())
-		}
-		return Response{Hook: &res}
-	}
-}
-
 func readFrames(ctx context.Context, in io.Reader) (<-chan Frame, <-chan error) {
 	frames := make(chan Frame)
 	errs := make(chan error, 1)

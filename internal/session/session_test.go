@@ -17,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"remote-agents/internal/corner"
+	"remote-agents/internal/laptopfiles"
 	"remote-agents/internal/spec"
 	"remote-agents/internal/sshrun"
 )
@@ -24,6 +25,8 @@ import (
 type ptyHarness struct {
 	master *os.File
 	slave  *os.File
+	// pasted holds the session's pasted records.
+	pasted string
 	mu     sync.Mutex
 	out    bytes.Buffer
 }
@@ -37,7 +40,7 @@ func newPTY(t *testing.T) *ptyHarness {
 	if err := pty.Setsize(master, &pty.Winsize{Rows: 24, Cols: 80}); err != nil {
 		t.Fatal(err)
 	}
-	h := &ptyHarness{master: master, slave: slave}
+	h := &ptyHarness{master: master, slave: slave, pasted: filepath.Join(t.TempDir(), "pasted")}
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -118,7 +121,8 @@ func testOptions(ssh string, h *ptyHarness) Options {
 		ReattachHint: "claude --resume abc",
 		Triggers:     make(chan string),
 		Stdin:        h.slave, Stdout: h.slave, Stderr: h.slave,
-		Logf: func(string, ...any) {},
+		Logf:   func(string, ...any) {},
+		Pasted: laptopfiles.Records{Dir: h.pasted},
 	}
 }
 
