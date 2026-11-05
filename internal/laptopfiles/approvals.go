@@ -21,8 +21,8 @@ type Approver interface {
 var ErrDeclined = errors.New("declined")
 
 // DeclineCoolDown is how long a session's path, once the user declined it,
-// is refused unasked: a box asking again at once must not get a string of
-// prompts that one touch ends.
+// is refused unasked, so that asking again for it at once gets no new
+// prompt. Other paths and sessions, both of which the box picks, still ask.
 const DeclineCoolDown = 5 * time.Minute
 
 // ApproverFunc is a function that approves.
