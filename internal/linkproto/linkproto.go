@@ -27,6 +27,10 @@ const (
 	HeartbeatTimeout  = 6 * time.Second
 )
 
+// ApprovalTimeout is how long the laptop waits for the user to approve a
+// write of the box's; a request that may need approval waits that long more.
+const ApprovalTimeout = 10 * time.Minute
+
 var (
 	// ErrLinkDown means the laptop socket is not reachable from the box.
 	ErrLinkDown = errors.New("laptop link is down")

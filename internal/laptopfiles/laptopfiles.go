@@ -1,14 +1,15 @@
 // Package laptopfiles is where the box may write on the laptop, and how. Box
 // agents run without permission prompts, so the box gets no other way in: a
 // file pasted into a session is written back over its laptop origin, or
-// beside it as "name (box).ext" when the laptop's copy changed since; other
-// files the box saves land in ~/Downloads, or over a file pasted into the
-// session. Only plain files of the user's are written back: none outside
-// home, under ~/Library, hidden or executable. A file replaced goes to the
-// Trash.
+// beside it as "name (box).ext" when the laptop's copy changed since, and a
+// file the box saves goes where the user approves. A write-back lands on its
+// own only on a plain file of the user's: one outside home, under ~/Library,
+// hidden, executable or reached through a symlink waits for the user's
+// approval, as every save does. A file replaced goes to the Trash.
 package laptopfiles
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -17,7 +18,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // ErrRefused means the box asked to write where it may not.
@@ -54,18 +58,44 @@ type Files struct {
 	Home    string
 	// Trash moves a file to the Trash.
 	Trash func(path string) error
+	// Gate asks the user before the writes that need their approval.
+	Gate *Gate
+}
+
+// place is where a write lands, and why it needs the user's approval if it does.
+type place struct {
+	path  string
+	risks []string
 }
 
 // WriteBack writes the content fetch gives for a file pasted into session
-// from origin: over origin while it holds its base, else beside it.
-func (f Files) WriteBack(session, origin string, fetch Fetch) (Result, error) {
+// from origin: over origin while it holds its base, else beside it. A risky
+// place waits for the user's approval, once per session.
+func (f Files) WriteBack(ctx context.Context, session, origin string, fetch Fetch) (Result, error) {
 	if err := checkPath(origin); err != nil {
 		return Result{}, err
 	}
-	if _, err := f.pastedEntry(session, origin); err != nil {
+	e, ok, err := f.Records.lookup(session, origin)
+	if err != nil {
 		return Result{}, err
 	}
-	tmp, sum, err := fetchInto(filepath.Dir(origin), fetch)
+	if !ok {
+		return Result{}, notPasted(origin)
+	}
+	asked, err := f.writeBackPlace(origin)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(asked.risks) > 0 {
+		reason, err := writeBackReason(session, asked, e.Base)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := f.Gate.ask(ctx, session, writeBackUse, asked.path, reason); err != nil {
+			return Result{}, err
+		}
+	}
+	tmp, sum, err := fetchInto(filepath.Dir(asked.path), fetch)
 	if err != nil {
 		return Result{}, err
 	}
@@ -74,29 +104,38 @@ func (f Files) WriteBack(session, origin string, fetch Fetch) (Result, error) {
 	err = f.Records.update(session, func(rec *sessionRecord) error {
 		e, ok := rec.Files[origin]
 		if !ok {
-			return fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
+			return notPasted(origin)
 		}
-		mode, err := plainFile(origin)
+		// What the user approved, or saw no need to, must be where the write lands.
+		now, err := f.writeBackPlace(origin)
 		if err != nil {
 			return err
 		}
-		current, err := regularSum(origin)
+		if now.path != asked.path || len(now.risks) > 0 && !f.Gate.approved(session, writeBackUse, now.path) {
+			return fmt.Errorf("%w: %s changed while the box wrote it back; paste it again to offer the box's version anew", ErrRefused, origin)
+		}
+		target := now.path
+		mode, err := modeFor(target)
+		if err != nil {
+			return err
+		}
+		current, err := regularSum(target)
 		if err != nil {
 			return err
 		}
 		switch current {
 		case sum:
 			e.Base = sum
-			res = Result{Outcome: Unchanged, Path: origin, Sum: sum}
+			res = Result{Outcome: Unchanged, Path: target, Sum: sum}
 		case e.Base:
-			left, err := f.replace(origin, tmp, mode)
+			left, err := f.replace(target, tmp, mode)
 			if err != nil {
 				return err
 			}
 			e.Base = sum
-			res = Result{Outcome: Written, Path: origin, Sum: sum, Leftover: left.path, LeftoverErr: left.err}
+			res = Result{Outcome: Written, Path: target, Sum: sum, Leftover: left.path, LeftoverErr: left.err}
 		default:
-			path, err := f.writeCopy(origin, tmp, e.Copy, mode)
+			path, err := f.writeCopy(target, tmp, e.Copy, mode)
 			if err != nil {
 				return err
 			}
@@ -109,72 +148,121 @@ func (f Files) WriteBack(session, origin string, fetch Fetch) (Result, error) {
 	return res, err
 }
 
-// pastedEntry is the record of origin in session, refusing a file not pasted
-// into it and one whose dir no longer resolves where it did.
-func (f Files) pastedEntry(session, origin string) (entry, error) {
-	e, ok, err := f.Records.lookup(session, origin)
-	if err != nil {
-		return entry{}, err
-	}
-	if !ok {
-		return entry{}, fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
-	}
-	if err := f.inPlainPlace(origin); err != nil {
-		return entry{}, err
-	}
+func notPasted(origin string) error {
+	return fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
+}
+
+// writeBackPlace is where a write-back of origin lands: origin, with its dir
+// resolved. A dir that cannot be resolved now, such as one on a volume not
+// mounted, may be back later, so that fails without refusing.
+func (f Files) writeBackPlace(origin string) (place, error) {
 	dir := filepath.Dir(origin)
-	// A dir that cannot be resolved now, such as one on a volume not mounted, may be back later.
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return entry{}, err
+		return place{}, err
+	}
+	p, err := f.placeOf(filepath.Join(resolved, filepath.Base(origin)))
+	if err != nil {
+		return place{}, err
 	}
 	if resolved != dir {
-		return entry{}, fmt.Errorf("%w: %s now leads to %s", ErrRefused, dir, resolved)
+		p.risks = append(p.risks, fmt.Sprintf("%s now leads to %s", dir, resolved))
 	}
-	return e, nil
+	return p, nil
 }
 
-// inPlainPlace refuses a pasted origin outside the user's home, under
-// ~/Library or with a hidden component: the box can put any path on the
-// clipboard for the user to paste, and a file there, such as a dotfile or a
-// launch agent, may run as code once written.
-func (f Files) inPlainPlace(origin string) error {
+// placeOf says why writing path, whose dir has its symlinks resolved, needs
+// the user's approval. The box can put any path on the clipboard for the
+// user to paste, and a file outside home, under ~/Library, hidden or
+// executable, such as a dotfile or a launch agent, may run as code once
+// written; a symlink stands for a file elsewhere.
+func (f Files) placeOf(path string) (place, error) {
 	home, err := filepath.EvalSymlinks(f.Home)
 	if err != nil {
-		return fmt.Errorf("finding your home: %w", err)
+		return place{}, fmt.Errorf("finding your home: %w", err)
 	}
-	rel, err := filepath.Rel(home, origin)
+	p := place{path: path}
+	rel, err := filepath.Rel(home, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
-		return fmt.Errorf("%w: %s is outside your home, where nothing is written from the box; the box keeps its version", ErrRefused, origin)
-	}
-	parts := strings.Split(rel, string(filepath.Separator))
-	// The spelling is the file system's when Origin recorded it; a case-blind check costs nothing more.
-	if strings.EqualFold(parts[0], "Library") {
-		return fmt.Errorf("%w: %s is under ~/Library, where nothing is written from the box; the box keeps its version", ErrRefused, origin)
-	}
-	for _, part := range parts {
-		if strings.HasPrefix(part, ".") {
-			return fmt.Errorf("%w: %s is hidden, and nothing hidden is written from the box; the box keeps its version", ErrRefused, origin)
+		p.risks = append(p.risks, "outside your home")
+	} else {
+		parts := strings.Split(rel, string(filepath.Separator))
+		// The spelling is the file system's when Origin recorded it; a case-blind check costs nothing more.
+		if strings.EqualFold(parts[0], "Library") {
+			p.risks = append(p.risks, "under ~/Library")
+		}
+		if slices.ContainsFunc(parts, func(part string) bool { return strings.HasPrefix(part, ".") }) {
+			p.risks = append(p.risks, "hidden")
 		}
 	}
-	return nil
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return place{}, err
+	case info.Mode()&fs.ModeSymlink != 0:
+		p.risks = append(p.risks, "a symlink")
+	case !info.Mode().IsRegular():
+		return place{}, fmt.Errorf("%w: %s is not a regular file", ErrRefused, path)
+	case info.Mode().Perm()&0o111 != 0:
+		p.risks = append(p.risks, "executable")
+	}
+	return p, nil
 }
 
-// plainFile refuses an origin that is there but not a regular file without
-// execute bits, and gives the mode a file written in its place gets.
-func plainFile(origin string) (fs.FileMode, error) {
-	info, err := os.Lstat(origin)
+// modeFor is the mode a file written in place of path gets: that of the
+// regular file there, else 0o644.
+func modeFor(path string) (fs.FileMode, error) {
+	info, err := os.Lstat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return 0o644, nil
 	case err != nil:
 		return 0, err
-	case !info.Mode().IsRegular():
-		return 0, fmt.Errorf("%w: %s is not a regular file", ErrRefused, origin)
-	case info.Mode().Perm()&0o111 != 0:
-		return 0, fmt.Errorf("%w: %s is executable, and nothing executable is written from the box; the box keeps its version", ErrRefused, origin)
+	case info.Mode().IsRegular():
+		return info.Mode().Perm(), nil
 	}
-	return info.Mode().Perm(), nil
+	return 0o644, nil
+}
+
+// writeBackReason is the prompt for writing back over p, whose content at
+// the paste had hash base, for session.
+func writeBackReason(session string, p place, base string) (string, error) {
+	current, err := regularSum(p.path)
+	if err != nil {
+		return "", err
+	}
+	by := "with the edit of box session " + session
+	if current == base {
+		return reason("replace", p.path, by, p.risks, trashNote), nil
+	}
+	copyPath := conflictPath(p.path)
+	action := "create"
+	if _, err := os.Lstat(copyPath); err == nil {
+		action = "replace"
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	return reason(action, copyPath, by+" beside "+p.path, p.risks, ""), nil
+}
+
+const trashNote = "the old version goes to the Trash"
+
+// reason is a prompt's text, which follows "remote-agents is trying to":
+// action on path by whom, then the risks and the note in brackets.
+func reason(action, path, by string, risks []string, note string) string {
+	text := action + " " + path + " " + by
+	var notes []string
+	if len(risks) > 0 {
+		notes = append(notes, strings.Join(risks, ", "))
+	}
+	if note != "" {
+		notes = append(notes, note)
+	}
+	if len(notes) > 0 {
+		text += " (" + strings.Join(notes, "; ") + ")"
+	}
+	return text
 }
 
 // regularSum hashes path, giving "" when it is gone or not a regular file.
@@ -225,9 +313,10 @@ type leftover struct {
 }
 
 // replace puts tmp in place of path in one rename and moves what path held
-// to the Trash. A hard link keeps the old version through the rename. Past
-// the rename the content is in place, so what fails then is a leftover, not
-// a failed replace.
+// to the Trash. A hard link keeps the old version through the rename, of a
+// symlink itself when path is one, never of its target. Past the rename the
+// content is in place, so what fails then is a leftover, not a failed
+// replace.
 func (f Files) replace(path, tmp string, mode fs.FileMode) (leftover, error) {
 	if err := os.Chmod(tmp, mode); err != nil {
 		return leftover{}, err
@@ -240,7 +329,7 @@ func (f Files) replace(path, tmp string, mode fs.FileMode) (leftover, error) {
 		return leftover{}, fmt.Errorf("keeping the old %s: %w", filepath.Base(path), err)
 	}
 	old := filepath.Join(held, filepath.Base(path))
-	if err := os.Link(path, old); err != nil {
+	if err := unix.Linkat(unix.AT_FDCWD, path, unix.AT_FDCWD, old, 0); err != nil {
 		return leftover{}, errors.Join(fmt.Errorf("keeping the old %s: %w", filepath.Base(path), err), os.Remove(held))
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -259,7 +348,7 @@ func (f Files) replace(path, tmp string, mode fs.FileMode) (leftover, error) {
 // holds what the last one written held is replaced; anything else there goes
 // to the Trash first.
 func (f Files) writeCopy(origin, tmp, lastCopy string, mode fs.FileMode) (string, error) {
-	path := filepath.Join(filepath.Dir(origin), conflictName(filepath.Base(origin)))
+	path := conflictPath(origin)
 	if err := os.Chmod(tmp, mode); err != nil {
 		return "", err
 	}
@@ -278,6 +367,11 @@ func (f Files) writeCopy(origin, tmp, lastCopy string, mode fs.FileMode) (string
 		return "", err
 	}
 	return path, linkNew(tmp, path)
+}
+
+// conflictPath is where the conflict copy of origin goes.
+func conflictPath(origin string) string {
+	return filepath.Join(filepath.Dir(origin), conflictName(filepath.Base(origin)))
 }
 
 // conflictName is "name (box).ext" for name.
@@ -307,22 +401,69 @@ func removeIfThere(path string) {
 	_ = os.Remove(path)
 }
 
-// maxNumbered bounds the "name (n).ext" a save tries before giving up.
-const maxNumbered = 1000
-
-// Save writes the content fetch gives, named name unless dest names the
-// file, to dest: a file pasted into session (replacing it, its old version
-// to the Trash), or a path in ~/Downloads under a name no file there has.
-// dest may start with ~/, is relative to ~/Downloads, and when it names a
-// dir the file goes into it; empty, it is ~/Downloads. The result says where
-// the file went.
-func (f Files) Save(session, name, dest string, fetch Fetch) (Result, error) {
+// Save writes the content fetch gives to dest once the user approves, at
+// most once per destination and session. dest names the file, or a dir that
+// takes it under name, or a free "name (n).ext" when a file there has name.
+// dest may start with ~/ or be absolute; relative, it is in ~/Downloads,
+// which it is when empty. A file dest names is replaced, its old version to
+// the Trash; one pasted into session takes the content saved as its base.
+func (f Files) Save(ctx context.Context, session, name, dest string, fetch Fetch) (Result, error) {
 	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, '/') {
 		return Result{}, fmt.Errorf("%w: %q is not one file name", ErrRefused, name)
 	}
+	p, existing, err := f.savePlace(name, dest)
+	if err != nil {
+		return Result{}, err
+	}
+	by := "with a file from the box"
+	if session != "" {
+		by = "with a file from box session " + session
+	}
+	action, note := "create", ""
+	if existing {
+		action, note = "replace", trashNote
+	}
+	if err := f.Gate.ask(ctx, session, saveUse, p.path, reason(action, p.path, by, p.risks, note)); err != nil {
+		return Result{}, err
+	}
+	tmp, sum, err := fetchInto(filepath.Dir(p.path), fetch)
+	if err != nil {
+		return Result{}, err
+	}
+	defer removeIfThere(tmp)
+	pasted := false
+	if session != "" {
+		if _, pasted, err = f.Records.lookup(session, p.path); err != nil {
+			return Result{}, err
+		}
+	}
+	var left leftover
+	if !pasted {
+		left, err = f.put(p.path, tmp, existing)
+	} else {
+		err = f.Records.update(session, func(rec *sessionRecord) error {
+			var err error
+			if left, err = f.put(p.path, tmp, existing); err != nil {
+				return err
+			}
+			if e, ok := rec.Files[p.path]; ok {
+				e.Base = sum
+				rec.Files[p.path] = e
+			}
+			return nil
+		})
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Outcome: Written, Path: p.path, Sum: sum, Leftover: left.path, LeftoverErr: left.err}, nil
+}
+
+// savePlace is where a save of name to dest lands, and whether a file is there.
+func (f Files) savePlace(name, dest string) (place, bool, error) {
 	downloads, err := filepath.EvalSymlinks(filepath.Join(f.Home, "Downloads"))
 	if err != nil {
-		return Result{}, fmt.Errorf("finding ~/Downloads: %w", err)
+		return place{}, false, fmt.Errorf("finding ~/Downloads: %w", err)
 	}
 	path := downloads
 	switch {
@@ -333,83 +474,84 @@ func (f Files) Save(session, name, dest string, fetch Fetch) (Result, error) {
 	case dest != "":
 		path = filepath.Join(downloads, dest)
 	}
-	asDir := strings.HasSuffix(dest, "/")
-	if session != "" && dest != "" && !asDir {
-		if _, err := f.pastedEntry(session, path); err == nil {
-			return f.saveOverPasted(session, path, fetch)
-		} else if !errors.Is(err, ErrRefused) {
-			return Result{}, err
-		}
-	}
-	dir, file := path, name
+	dir, file, intoDir := path, name, true
 	info, err := os.Stat(path)
 	switch {
 	case err == nil && info.IsDir():
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
-		return Result{}, err
-	case asDir:
-		return Result{}, fmt.Errorf("%w: %s is not a dir", ErrRefused, dest)
+		return place{}, false, err
+	case strings.HasSuffix(dest, "/"):
+		return place{}, false, fmt.Errorf("%w: %s is not a dir", ErrRefused, dest)
 	default:
-		dir, file = filepath.Dir(path), filepath.Base(path)
+		dir, file, intoDir = filepath.Dir(path), filepath.Base(path), false
 	}
 	if dir, err = filepath.EvalSymlinks(dir); err != nil {
-		return Result{}, fmt.Errorf("%w: %v", ErrRefused, err)
+		return place{}, false, fmt.Errorf("%w: %v", ErrRefused, err)
 	}
-	if dir != downloads && !strings.HasPrefix(dir, downloads+string(filepath.Separator)) {
-		return Result{}, fmt.Errorf("%w: %s is neither in ~/Downloads nor a file pasted into this session", ErrRefused, dest)
+	if intoDir {
+		if file, err = freeName(dir, file); err != nil {
+			return place{}, false, err
+		}
 	}
-	tmp, _, err := fetchInto(dir, fetch)
+	p, err := f.placeOf(filepath.Join(dir, file))
 	if err != nil {
-		return Result{}, err
+		return place{}, false, err
 	}
-	defer removeIfThere(tmp)
-	if err := os.Chmod(tmp, 0o644); err != nil {
-		return Result{}, err
+	_, err = os.Lstat(p.path)
+	switch {
+	case err == nil:
+		return p, true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return p, false, nil
 	}
-	stem, ext := splitExt(file)
-	for n := 0; n < maxNumbered; n++ {
-		candidate := filepath.Join(dir, file)
-		if n > 0 {
-			candidate = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", stem, n, ext))
-		}
-		err := linkNew(tmp, candidate)
-		if err == nil {
-			return Result{Outcome: Written, Path: candidate}, nil
-		}
-		if !errors.Is(err, fs.ErrExist) {
-			return Result{}, err
-		}
-	}
-	return Result{}, fmt.Errorf("%s and %d numbered names are all taken", filepath.Join(dir, file), maxNumbered)
+	return place{}, false, err
 }
 
-// saveOverPasted replaces a file pasted into session, whatever it holds now,
-// and makes the content saved its base.
-func (f Files) saveOverPasted(session, origin string, fetch Fetch) (Result, error) {
-	tmp, sum, err := fetchInto(filepath.Dir(origin), fetch)
-	if err != nil {
-		return Result{}, err
-	}
-	defer removeIfThere(tmp)
-	var left leftover
-	err = f.Records.update(session, func(rec *sessionRecord) error {
-		e, ok := rec.Files[origin]
-		if !ok {
-			return fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
+// maxNumbered bounds the "name (n).ext" a save tries before giving up.
+const maxNumbered = 1000
+
+// freeName is the first of name, "name (1).ext", ... that nothing in dir has.
+func freeName(dir, name string) (string, error) {
+	stem, ext := splitExt(name)
+	for n := range maxNumbered {
+		candidate := name
+		if n > 0 {
+			candidate = fmt.Sprintf("%s (%d)%s", stem, n, ext)
 		}
-		mode, err := plainFile(origin)
+		_, err := os.Lstat(filepath.Join(dir, candidate))
+		if errors.Is(err, fs.ErrNotExist) {
+			return candidate, nil
+		}
 		if err != nil {
-			return err
+			return "", err
 		}
-		if left, err = f.replace(origin, tmp, mode); err != nil {
-			return err
-		}
-		e.Base = sum
-		rec.Files[origin] = e
-		return nil
-	})
-	if err != nil {
-		return Result{}, err
 	}
-	return Result{Outcome: Written, Path: origin, Sum: sum, Leftover: left.path, LeftoverErr: left.err}, nil
+	return "", fmt.Errorf("%s and %d numbered names are all taken", filepath.Join(dir, name), maxNumbered)
+}
+
+// put writes tmp to the path a save got approved for, as a new file or over
+// the one there when the user was asked, as they were told. What changed
+// since leads elsewhere, so it is refused.
+func (f Files) put(path, tmp string, existing bool) (leftover, error) {
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err != nil || dir != filepath.Dir(path) {
+		return leftover{}, fmt.Errorf("%w: %s moved since you approved the save; save again", ErrRefused, filepath.Dir(path))
+	}
+	if _, err := f.placeOf(path); err != nil {
+		return leftover{}, err
+	}
+	if existing {
+		mode, err := modeFor(path)
+		if err != nil {
+			return leftover{}, err
+		}
+		return f.replace(path, tmp, mode)
+	}
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return leftover{}, err
+	}
+	err := linkNew(tmp, path)
+	if errors.Is(err, fs.ErrExist) {
+		return leftover{}, fmt.Errorf("%w: %s appeared since you approved the save; save again", ErrRefused, path)
+	}
+	return leftover{}, err
 }

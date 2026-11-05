@@ -45,6 +45,8 @@ type filesFixture struct {
 	reg      *control.Registry
 	home     string
 	revealed *recordRevealer
+	// declined, when set, is the user's answer to every prompt; else they approve.
+	declined error
 }
 
 func newFilesFixture(t *testing.T, box fakeFetcher) *filesFixture {
@@ -64,6 +66,7 @@ func newFilesFixture(t *testing.T, box fakeFetcher) *filesFixture {
 		Records: laptopfiles.Records{Dir: filepath.Join(root, "pasted")},
 		Home:    f.home,
 		Trash:   func(p string) error { return os.Rename(p, filepath.Join(root, "trash", filepath.Base(p))) },
+		Gate:    laptopfiles.NewGate(laptopfiles.ApproverFunc(func(context.Context, string) error { return f.declined }), time.Minute),
 	}
 	h.Fetcher = box
 	h.Revealer = f.revealed
@@ -165,9 +168,14 @@ func TestLaptopSaveSavesIntoDownloadsAndRevealsIt(t *testing.T) {
 	if !slices.Equal(f.revealed.paths, []string{want}) {
 		t.Fatalf("revealed %q", f.revealed.paths)
 	}
-	_, err = f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{BoxPath: "/box/out/report.pdf", Dest: "/etc/report.pdf"})
+	notices := f.wrapper(t)
+	f.declined = errors.New("Canceled by user.")
+	_, err = f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{Session: filesSession, BoxPath: "/box/out/report.pdf", Dest: "/etc/report.pdf"})
 	if !errors.Is(err, linkproto.ErrRefused) || strings.Count(err.Error(), "refused") != 1 {
-		t.Fatalf("save outside Downloads: %v", err)
+		t.Fatalf("declined save: %v", err)
+	}
+	if n := <-notices; !strings.Contains(n, "report.pdf not saved") || !strings.Contains(n, "Canceled by user.") {
+		t.Fatalf("notice %q", n)
 	}
 	if _, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{BoxPath: "relative.pdf"}); err == nil {
 		t.Fatal("saved a relative box path")

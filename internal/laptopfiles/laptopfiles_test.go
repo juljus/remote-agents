@@ -17,10 +17,11 @@ import (
 const session = "claude-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
 type fixture struct {
-	files   Files
-	home    string
-	trashed []string
-	trash   string
+	files    Files
+	home     string
+	trashed  []string
+	trash    string
+	approver *answers
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -29,7 +30,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{home: filepath.Join(root, "home"), trash: filepath.Join(root, "trash")}
+	f := &fixture{home: filepath.Join(root, "home"), trash: filepath.Join(root, "trash"), approver: &answers{}}
 	for _, dir := range []string{f.home, filepath.Join(f.home, "Downloads"), filepath.Join(f.home, "docs"), f.trash} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -46,6 +47,7 @@ func newFixture(t *testing.T) *fixture {
 			f.trashed = append(f.trashed, filepath.Base(path)+"="+string(data))
 			return os.Rename(path, filepath.Join(f.trash, filepath.Base(path)))
 		},
+		Gate: NewGate(f.approver, time.Minute),
 	}
 	return f
 }
@@ -109,7 +111,7 @@ func TestWriteBackReplacesAnUnchangedOriginAndTrashesItsOldVersion(t *testing.T)
 	origin := filepath.Join(f.home, "docs", "notes.md")
 	f.pasted(t, origin, "laptop")
 
-	res, err := f.files.WriteBack(session, origin, content("agent"))
+	res, err := f.files.WriteBack(t.Context(), session, origin, content("agent"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +131,7 @@ func TestWriteBackReplacesAnUnchangedOriginAndTrashesItsOldVersion(t *testing.T)
 	onlyFiles(t, filepath.Join(f.home, "docs"), "notes.md")
 
 	// The written version is the new base: the next save replaces it too.
-	if res, err := f.files.WriteBack(session, origin, content("agent 2")); err != nil || res.Outcome != Written {
+	if res, err := f.files.WriteBack(t.Context(), session, origin, content("agent 2")); err != nil || res.Outcome != Written {
 		t.Fatalf("second write-back %+v, %v", res, err)
 	}
 	if got := read(t, origin); got != "agent 2" {
@@ -143,7 +145,7 @@ func TestWriteBackOfWhatTheLaptopHasChangesNothing(t *testing.T) {
 	f.pasted(t, origin, "laptop")
 	write(t, origin, "same")
 
-	res, err := f.files.WriteBack(session, origin, content("same"))
+	res, err := f.files.WriteBack(t.Context(), session, origin, content("same"))
 	if err != nil || res.Outcome != Unchanged {
 		t.Fatalf("result %+v, %v", res, err)
 	}
@@ -152,7 +154,7 @@ func TestWriteBackOfWhatTheLaptopHasChangesNothing(t *testing.T) {
 	}
 	onlyFiles(t, filepath.Join(f.home, "docs"), "notes.md")
 	// The laptop's content is the base now, so the next save replaces it.
-	if res, err := f.files.WriteBack(session, origin, content("agent")); err != nil || res.Outcome != Written {
+	if res, err := f.files.WriteBack(t.Context(), session, origin, content("agent")); err != nil || res.Outcome != Written {
 		t.Fatalf("next write-back %+v, %v", res, err)
 	}
 }
@@ -164,7 +166,7 @@ func TestWriteBackOverALaptopChangeGoesBesideIt(t *testing.T) {
 	f.pasted(t, origin, "laptop")
 	write(t, origin, "edited on the laptop")
 
-	res, err := f.files.WriteBack(session, origin, content("agent"))
+	res, err := f.files.WriteBack(t.Context(), session, origin, content("agent"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +182,7 @@ func TestWriteBackOverALaptopChangeGoesBesideIt(t *testing.T) {
 	}
 
 	// The next save refreshes the copy it wrote, without trashing it.
-	if _, err := f.files.WriteBack(session, origin, content("agent 2")); err != nil {
+	if _, err := f.files.WriteBack(t.Context(), session, origin, content("agent 2")); err != nil {
 		t.Fatal(err)
 	}
 	if got := read(t, copyPath); got != "agent 2" || len(f.trashed) != 0 {
@@ -189,7 +191,7 @@ func TestWriteBackOverALaptopChangeGoesBesideIt(t *testing.T) {
 
 	// A copy the user changed goes to the Trash before the next one lands.
 	write(t, copyPath, "user's")
-	if _, err := f.files.WriteBack(session, origin, content("agent 3")); err != nil {
+	if _, err := f.files.WriteBack(t.Context(), session, origin, content("agent 3")); err != nil {
 		t.Fatal(err)
 	}
 	if got := read(t, copyPath); got != "agent 3" || !slices.Equal(f.trashed, []string{"notes (box).md=user's"}) {
@@ -205,7 +207,7 @@ func TestWriteBackOfAnOriginGoneFromTheLaptopGoesBesideIt(t *testing.T) {
 	if err := os.Remove(origin); err != nil {
 		t.Fatal(err)
 	}
-	res, err := f.files.WriteBack(session, origin, content("agent"))
+	res, err := f.files.WriteBack(t.Context(), session, origin, content("agent"))
 	if err != nil || res.Outcome != Conflict {
 		t.Fatalf("result %+v, %v", res, err)
 	}
@@ -247,7 +249,7 @@ func TestWriteBackRefusesWhatWasNotPastedIntoTheSession(t *testing.T) {
 		"an invalid session":      {"../x", origin},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := f.files.WriteBack(tc.session, tc.path, content("agent"))
+			_, err := f.files.WriteBack(t.Context(), tc.session, tc.path, content("agent"))
 			if !errors.Is(err, ErrRefused) {
 				t.Fatalf("err = %v, want ErrRefused", err)
 			}
@@ -257,27 +259,6 @@ func TestWriteBackRefusesWhatWasNotPastedIntoTheSession(t *testing.T) {
 		t.Fatal("a refused write-back changed a file")
 	}
 	onlyFiles(t, docs, "link.md", "notes.md", "other.md")
-}
-
-func TestWriteBackRefusesAnOriginWhoseDirIsNowASymlink(t *testing.T) {
-	f := newFixture(t)
-	docs := filepath.Join(f.home, "docs")
-	origin := filepath.Join(docs, "notes.md")
-	f.pasted(t, origin, "laptop")
-	if err := os.Rename(docs, filepath.Join(f.home, "moved")); err != nil {
-		t.Fatal(err)
-	}
-	elsewhere := filepath.Join(f.home, "elsewhere")
-	if err := os.Mkdir(elsewhere, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(elsewhere, docs); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.files.WriteBack(session, origin, content("agent")); !errors.Is(err, ErrRefused) {
-		t.Fatalf("err = %v, want ErrRefused", err)
-	}
-	onlyFiles(t, elsewhere)
 }
 
 func TestAFailedFetchLeavesNothingBehind(t *testing.T) {
@@ -290,10 +271,10 @@ func TestAFailedFetchLeavesNothingBehind(t *testing.T) {
 		_, _ = io.WriteString(w, "half")
 		return boom
 	}
-	if _, err := f.files.WriteBack(session, origin, fetch); !errors.Is(err, boom) {
+	if _, err := f.files.WriteBack(t.Context(), session, origin, fetch); !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
 	}
-	if _, err := f.files.Save(session, "x.txt", "", fetch); !errors.Is(err, boom) {
+	if _, err := f.files.Save(t.Context(), session, "x.txt", "", fetch); !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
 	}
 	onlyFiles(t, docs, "notes.md")
@@ -306,7 +287,7 @@ func TestSaveGoesToDownloadsUnderAFreeName(t *testing.T) {
 	write(t, filepath.Join(downloads, "report.pdf"), "older")
 
 	for _, want := range []string{"report (1).pdf", "report (2).pdf"} {
-		saved, err := f.files.Save(session, "report.pdf", "", content("new"))
+		saved, err := f.files.Save(t.Context(), session, "report.pdf", "", content("new"))
 		path := saved.Path
 		if err != nil {
 			t.Fatal(err)
@@ -335,7 +316,7 @@ func TestSaveToAPathInDownloads(t *testing.T) {
 		{filepath.Join(downloads, "z.txt"), filepath.Join(downloads, "z.txt")},
 		{"~/Downloads", filepath.Join(downloads, "x.txt")},
 	} {
-		saved, err := f.files.Save(session, "x.txt", tc.dest, content("c"))
+		saved, err := f.files.Save(t.Context(), session, "x.txt", tc.dest, content("c"))
 		path := saved.Path
 		if err != nil {
 			t.Fatalf("Save to %q: %v", tc.dest, err)
@@ -352,7 +333,7 @@ func TestSaveOverAPastedOriginTrashesTheOldVersion(t *testing.T) {
 	f.pasted(t, origin, "laptop")
 	write(t, origin, "edited on the laptop")
 
-	saved, err := f.files.Save(session, "whatever.md", origin, content("agent"))
+	saved, err := f.files.Save(t.Context(), session, "whatever.md", origin, content("agent"))
 	path := saved.Path
 	if err != nil {
 		t.Fatal(err)
@@ -364,57 +345,9 @@ func TestSaveOverAPastedOriginTrashesTheOldVersion(t *testing.T) {
 		t.Fatalf("trashed %q", f.trashed)
 	}
 	// It is the new base, so a write-back of the next save replaces it.
-	if res, err := f.files.WriteBack(session, origin, content("agent 2")); err != nil || res.Outcome != Written {
+	if res, err := f.files.WriteBack(t.Context(), session, origin, content("agent 2")); err != nil || res.Outcome != Written {
 		t.Fatalf("write-back %+v, %v", res, err)
 	}
-}
-
-func TestSaveRefusesEverythingOutsideDownloadsAndThePastedFiles(t *testing.T) {
-	f := newFixture(t)
-	downloads := filepath.Join(f.home, "Downloads")
-	docs := filepath.Join(f.home, "docs")
-	origin := filepath.Join(docs, "notes.md")
-	f.pasted(t, origin, "laptop")
-	if err := os.Symlink(docs, filepath.Join(downloads, "escape")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(docs, "planted.txt"), filepath.Join(downloads, "dangling.txt")); err != nil {
-		t.Fatal(err)
-	}
-
-	for name, tc := range map[string]struct{ session, name, dest string }{
-		"another dir":                   {session, "x.txt", filepath.Join(docs, "x.txt")},
-		"home":                          {session, "x.txt", "~/x.txt"},
-		"up out of Downloads":           {session, "x.txt", "../docs/x.txt"},
-		"an absolute path with ..":      {session, "x.txt", downloads + "/../docs/x.txt"},
-		"a symlinked dir":               {session, "x.txt", "escape/x.txt"},
-		"through a symlinked dir":       {session, "x.txt", filepath.Join(downloads, "escape")},
-		"another session's origin":      {"codex-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "x.txt", origin},
-		"a missing dir":                 {session, "x.txt", "nope/x.txt"},
-		"a name that is a path":         {session, "../x.txt", ""},
-		"a name that is ..":             {session, "..", ""},
-		"an empty name":                 {session, "", ""},
-		"an origin beside a pasted one": {session, "x.txt", filepath.Join(docs, "notes (box).md")},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := f.files.Save(tc.session, tc.name, tc.dest, content("agent")); !errors.Is(err, ErrRefused) {
-				t.Fatalf("err = %v, want ErrRefused", err)
-			}
-		})
-	}
-	if read(t, origin) != "laptop" || len(f.trashed) != 0 {
-		t.Fatal("a refused save changed a file")
-	}
-	onlyFiles(t, docs, "notes.md")
-	onlyFiles(t, downloads, "dangling.txt", "escape")
-
-	// A symlink in Downloads is a taken name, never a way out.
-	saved, err := f.files.Save(session, "dangling.txt", "", content("agent"))
-	path := saved.Path
-	if err != nil || path != filepath.Join(downloads, "dangling (1).txt") {
-		t.Fatalf("saved to %s, %v", path, err)
-	}
-	onlyFiles(t, docs, "notes.md")
 }
 
 func TestRecordsKeepEachSessionsPastes(t *testing.T) {
@@ -427,7 +360,7 @@ func TestRecordsKeepEachSessionsPastes(t *testing.T) {
 	f.pasted(t, a, "a2")
 
 	for path, c := range map[string]string{a: "a2", b: "b"} {
-		res, err := f.files.WriteBack(session, path, content("agent"))
+		res, err := f.files.WriteBack(t.Context(), session, path, content("agent"))
 		if err != nil || res.Outcome != Written {
 			t.Fatalf("%s: %+v, %v; want the base to be %q", path, res, err, c)
 		}
@@ -445,7 +378,7 @@ func TestAWriteBackWhoseOldVersionCannotGoToTheTrashSaysWhereItStays(t *testing.
 	f.pasted(t, origin, "laptop")
 	f.files.Trash = func(string) error { return errors.New("the volume has no Trash") }
 
-	res, err := f.files.WriteBack(session, origin, content("agent"))
+	res, err := f.files.WriteBack(t.Context(), session, origin, content("agent"))
 	if err != nil || res.Outcome != Written || read(t, origin) != "agent" {
 		t.Fatalf("result %+v, %v; origin holds %q", res, err, read(t, origin))
 	}
@@ -453,7 +386,7 @@ func TestAWriteBackWhoseOldVersionCannotGoToTheTrashSaysWhereItStays(t *testing.
 		t.Fatalf("old version kept at %q (%v)", res.Leftover, res.LeftoverErr)
 	}
 	// The record moved on, so the next save is no conflict.
-	if res, err := f.files.WriteBack(session, origin, content("agent 2")); err != nil || res.Outcome != Written {
+	if res, err := f.files.WriteBack(t.Context(), session, origin, content("agent 2")); err != nil || res.Outcome != Written {
 		t.Fatalf("next write-back %+v, %v", res, err)
 	}
 }
@@ -469,7 +402,7 @@ func TestAConflictCopyThatIsASymlinkGoesToTheTrashNotItsTarget(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(docs, "notes (box).md")); err != nil {
 		t.Fatal(err)
 	}
-	res, err := f.files.WriteBack(session, origin, content("agent"))
+	res, err := f.files.WriteBack(t.Context(), session, origin, content("agent"))
 	if err != nil || res.Outcome != Conflict || read(t, res.Path) != "agent" {
 		t.Fatalf("result %+v, %v", res, err)
 	}
@@ -481,24 +414,12 @@ func TestAConflictCopyThatIsASymlinkGoesToTheTrashNotItsTarget(t *testing.T) {
 	}
 }
 
-func TestSaveWithoutASessionGoesOnlyToDownloads(t *testing.T) {
-	f := newFixture(t)
-	origin := filepath.Join(f.home, "docs", "notes.md")
-	f.pasted(t, origin, "laptop")
-	if _, err := f.files.Save("", "x.md", origin, content("agent")); !errors.Is(err, ErrRefused) {
-		t.Fatalf("saved over a pasted file without a session: %v", err)
-	}
-	if saved, err := f.files.Save("", "x.md", "", content("agent")); err != nil || saved.Path != filepath.Join(f.home, "Downloads", "x.md") {
-		t.Fatalf("saved to %+v, %v", saved, err)
-	}
-}
-
 // A trailing slash says the path is a dir, so it is never the pasted file.
 func TestSaveToAPastedFileAsADirIsRefused(t *testing.T) {
 	f := newFixture(t)
 	origin := filepath.Join(f.home, "docs", "notes.md")
 	f.pasted(t, origin, "laptop")
-	if _, err := f.files.Save(session, "x.md", origin+"/", content("agent")); !errors.Is(err, ErrRefused) {
+	if _, err := f.files.Save(t.Context(), session, "x.md", origin+"/", content("agent")); !errors.Is(err, ErrRefused) {
 		t.Fatalf("err = %v", err)
 	}
 	if read(t, origin) != "laptop" {
@@ -510,7 +431,7 @@ func TestALongNameCanBeWrittenBack(t *testing.T) {
 	f := newFixture(t)
 	origin := filepath.Join(f.home, "docs", strings.Repeat("n", 240)+".md")
 	f.pasted(t, origin, "laptop")
-	if res, err := f.files.WriteBack(session, origin, content("agent")); err != nil || res.Outcome != Written {
+	if res, err := f.files.WriteBack(t.Context(), session, origin, content("agent")); err != nil || res.Outcome != Written {
 		t.Fatalf("result %+v, %v", res, err)
 	}
 }
@@ -528,7 +449,7 @@ func TestRecordsOfSessionsUntouchedForTwoWeeksGo(t *testing.T) {
 	if err := f.files.Records.Pasted("codex-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", other, sum("o")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.files.WriteBack(session, origin, content("agent")); !errors.Is(err, ErrRefused) {
+	if _, err := f.files.WriteBack(t.Context(), session, origin, content("agent")); !errors.Is(err, ErrRefused) {
 		t.Fatalf("a pruned session's paste was written back: %v", err)
 	}
 }
@@ -544,7 +465,7 @@ func TestConcurrentWriteBacksOfOneFileLeaveOneOfThem(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := f.files.WriteBack(session, origin, content(c))
+			_, err := f.files.WriteBack(t.Context(), session, origin, content(c))
 			errs <- err
 		}()
 	}
@@ -571,71 +492,9 @@ func TestAWriteBackIntoAMissingDirFailsWithoutRefusing(t *testing.T) {
 	if err := os.RemoveAll(docs); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.files.WriteBack(session, origin, content("agent"))
+	_, err := f.files.WriteBack(t.Context(), session, origin, content("agent"))
 	if err == nil || errors.Is(err, ErrRefused) {
 		t.Fatalf("err = %v, want a failure that is no refusal", err)
-	}
-}
-
-// A box that puts ~/.zshrc on the clipboard for the user to paste must not
-// get to write it: nothing hidden is written back or saved over.
-func TestNothingHiddenIsWrittenBack(t *testing.T) {
-	f := newFixture(t)
-	hiddenDir := filepath.Join(f.home, ".config", "app")
-	if err := os.MkdirAll(hiddenDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, origin := range []string{filepath.Join(f.home, ".zshrc"), filepath.Join(hiddenDir, "config.toml")} {
-		f.pasted(t, origin, "laptop")
-		if _, err := f.files.WriteBack(session, origin, content("agent")); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "hidden") {
-			t.Fatalf("write-back of %s: %v", origin, err)
-		}
-		if _, err := f.files.Save(session, "x", origin, content("agent")); !errors.Is(err, ErrRefused) {
-			t.Fatalf("save over %s: %v", origin, err)
-		}
-		if read(t, origin) != "laptop" {
-			t.Fatalf("%s changed", origin)
-		}
-	}
-	onlyFiles(t, f.home, ".config", ".zshrc", "Downloads", "docs")
-}
-
-// Write-backs land only on plain files of the user's: a script, a launch
-// agent or a file outside home may run as code once written.
-func TestWriteBackLandsOnlyOnAPlainFileInHomeOutsideLibrary(t *testing.T) {
-	f := newFixture(t)
-	library := filepath.Join(f.home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(library, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	outside := filepath.Join(filepath.Dir(f.home), "outside")
-	if err := os.Mkdir(outside, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	script := filepath.Join(f.home, "docs", "run.sh")
-	for name, origin := range map[string]string{
-		"under ~/Library":    filepath.Join(library, "agent.plist"),
-		"outside home":       filepath.Join(outside, "notes.md"),
-		"an executable file": script,
-	} {
-		t.Run(name, func(t *testing.T) {
-			f.pasted(t, origin, "laptop")
-			if origin == script {
-				if err := os.Chmod(script, 0o750); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err := f.files.WriteBack(session, origin, content("agent")); !errors.Is(err, ErrRefused) {
-				t.Fatalf("write-back: %v", err)
-			}
-			if _, err := f.files.Save(session, "x", origin, content("agent")); !errors.Is(err, ErrRefused) {
-				t.Fatalf("save over it: %v", err)
-			}
-			if read(t, origin) != "laptop" {
-				t.Fatal("it changed")
-			}
-			onlyFiles(t, filepath.Dir(origin), filepath.Base(origin))
-		})
 	}
 }
 
@@ -662,17 +521,373 @@ func TestAPathTypedInAnotherCaseIsRecordedAsTheDiskSpellsIt(t *testing.T) {
 	if err := f.files.Records.Pasted(session, origin, sum("laptop")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.files.WriteBack(session, origin, content("agent")); !errors.Is(err, ErrRefused) {
+	declined := errors.New("Canceled by user.")
+	f.approver.next = []error{declined, declined}
+	if _, err := f.files.WriteBack(t.Context(), session, origin, content("agent")); !errors.Is(err, ErrRefused) {
 		t.Fatalf("write-back under ~/Library: %v", err)
 	}
 	// Recorded as typed, as an older wrapper would, the check still holds.
 	if err := f.files.Records.Pasted(session, filepath.Join(f.home, "library", "LaunchAgents", "com.x.plist"), sum("laptop")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.files.WriteBack(session, filepath.Join(f.home, "library", "LaunchAgents", "com.x.plist"), content("agent")); !errors.Is(err, ErrRefused) {
+	if _, err := f.files.WriteBack(t.Context(), session, filepath.Join(f.home, "library", "LaunchAgents", "com.x.plist"), content("agent")); !errors.Is(err, ErrRefused) {
 		t.Fatalf("write-back under ~/library: %v", err)
 	}
 	if read(t, plist) != "laptop" {
 		t.Fatal("the plist changed")
+	}
+	for _, reason := range f.approver.asked() {
+		if !strings.Contains(reason, "under ~/Library") {
+			t.Fatalf("asked %q, which does not say it is under ~/Library", reason)
+		}
+	}
+}
+
+func TestAnOrdinaryWriteBackAsksNobody(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, "docs", "notes.md")
+	f.pasted(t, origin, "laptop")
+	if res, err := f.files.WriteBack(t.Context(), session, origin, content("agent")); err != nil || res.Outcome != Written {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	write(t, origin, "edited on the laptop")
+	if res, err := f.files.WriteBack(t.Context(), session, origin, content("agent 2")); err != nil || res.Outcome != Conflict {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	if got := f.approver.asked(); len(got) != 0 {
+		t.Fatalf("asked %q", got)
+	}
+}
+
+// A box that puts ~/.zshrc on the clipboard for the user to paste gets to
+// write it only once the user approves; then for the rest of the session.
+func TestAHiddenFileIsWrittenBackOnceTheUserApproves(t *testing.T) {
+	f := newFixture(t)
+	hiddenDir := filepath.Join(f.home, ".config", "app")
+	if err := os.MkdirAll(hiddenDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, origin := range []string{filepath.Join(f.home, ".zshrc"), filepath.Join(hiddenDir, "config.toml")} {
+		t.Run(filepath.Base(origin), func(t *testing.T) {
+			f.pasted(t, origin, "laptop")
+			before := len(f.approver.asked())
+			f.approver.next = []error{errors.New("Canceled by user.")}
+			if _, err := f.files.WriteBack(t.Context(), session, origin, content("agent")); !errors.Is(err, ErrRefused) {
+				t.Fatalf("declined write-back: %v", err)
+			}
+			if read(t, origin) != "laptop" {
+				t.Fatal("a declined write-back changed the file")
+			}
+			for _, c := range []string{"agent", "agent 2"} {
+				if res, err := f.files.WriteBack(t.Context(), session, origin, content(c)); err != nil || res.Outcome != Written || read(t, origin) != c {
+					t.Fatalf("approved write-back %+v, %v", res, err)
+				}
+			}
+			asked := f.approver.asked()[before:]
+			if len(asked) != 2 {
+				t.Fatalf("asked %q, want the declined prompt and one more", asked)
+			}
+			want := "replace " + origin + " with the edit of box session " + session + " (hidden; the old version goes to the Trash)"
+			if asked[1] != want {
+				t.Fatalf("asked %q, want %q", asked[1], want)
+			}
+		})
+	}
+}
+
+// A script, a launch agent or a file outside home may run as code once
+// written, so writing back over one waits for the user.
+func TestRiskyWriteBacksAskTheUserFirst(t *testing.T) {
+	f := newFixture(t)
+	library := filepath.Join(f.home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(library, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(f.home), "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(f.home, "docs", "run.sh")
+	for name, tc := range map[string]struct{ origin, risk string }{
+		"under ~/Library":    {filepath.Join(library, "agent.plist"), "under ~/Library"},
+		"outside home":       {filepath.Join(outside, "notes.md"), "outside your home"},
+		"an executable file": {script, "executable"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f.pasted(t, tc.origin, "laptop")
+			if tc.origin == script {
+				if err := os.Chmod(script, 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.approver.next = []error{errors.New("Canceled by user.")}
+			if _, err := f.files.WriteBack(t.Context(), session, tc.origin, content("agent")); !errors.Is(err, ErrRefused) {
+				t.Fatalf("declined write-back: %v", err)
+			}
+			if read(t, tc.origin) != "laptop" {
+				t.Fatal("it changed")
+			}
+			onlyFiles(t, filepath.Dir(tc.origin), filepath.Base(tc.origin))
+			if res, err := f.files.WriteBack(t.Context(), session, tc.origin, content("agent")); err != nil || res.Outcome != Written {
+				t.Fatalf("approved write-back %+v, %v", res, err)
+			}
+			asked := f.approver.asked()
+			if last := asked[len(asked)-1]; !strings.Contains(last, tc.risk) || !strings.Contains(last, tc.origin) {
+				t.Fatalf("asked %q, want it to name %s and say %q", last, tc.origin, tc.risk)
+			}
+		})
+	}
+	if info, err := os.Stat(script); err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("script mode %v, %v; want it kept", info.Mode(), err)
+	}
+}
+
+func TestAnApprovedWriteBackHoldsForThatSessionOnly(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, ".zshrc")
+	f.pasted(t, origin, "laptop")
+	if err := f.files.Records.Pasted(otherSession, origin, sum("laptop")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.files.WriteBack(t.Context(), session, origin, content("agent")); err != nil {
+		t.Fatal(err)
+	}
+	f.approver.next = []error{errors.New("Canceled by user.")}
+	if _, err := f.files.WriteBack(t.Context(), otherSession, origin, content("other")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("another session wrote with the first one's approval: %v", err)
+	}
+	if read(t, origin) != "agent" || len(f.approver.asked()) != 2 {
+		t.Fatalf("origin holds %q, asked %q", read(t, origin), f.approver.asked())
+	}
+}
+
+// What the user approved is where the write lands: a dir swapped for a
+// symlink between the prompt and the write leads elsewhere, so it is refused.
+func TestAWriteBackWhoseTargetMovedAfterTheApprovalIsRefused(t *testing.T) {
+	f := newFixture(t)
+	dir := filepath.Join(f.home, ".config")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	origin := filepath.Join(dir, "app.toml")
+	f.pasted(t, origin, "laptop")
+	elsewhere := filepath.Join(f.home, "elsewhere")
+	if err := os.Mkdir(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(elsewhere, "app.toml"), "laptop")
+	swap := func(w io.Writer) error {
+		if err := os.Rename(dir, filepath.Join(f.home, "moved")); err != nil {
+			return err
+		}
+		if err := os.Symlink(elsewhere, dir); err != nil {
+			return err
+		}
+		_, err := io.WriteString(w, "agent")
+		return err
+	}
+	if _, err := f.files.WriteBack(t.Context(), session, origin, swap); !errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+	if read(t, filepath.Join(elsewhere, "app.toml")) != "laptop" || read(t, filepath.Join(f.home, "moved", "app.toml")) != "laptop" {
+		t.Fatal("the write landed")
+	}
+	onlyFiles(t, elsewhere, "app.toml")
+}
+
+// A pasted file's dir that now leads elsewhere is written only once the user
+// approves the place it leads to.
+func TestAWriteBackThroughADirNowASymlinkAsksWhereItLands(t *testing.T) {
+	f := newFixture(t)
+	docs := filepath.Join(f.home, "docs")
+	origin := filepath.Join(docs, "notes.md")
+	f.pasted(t, origin, "laptop")
+	if err := os.Rename(docs, filepath.Join(f.home, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(f.home, "elsewhere")
+	if err := os.Mkdir(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, docs); err != nil {
+		t.Fatal(err)
+	}
+	f.approver.next = []error{errors.New("Canceled by user.")}
+	if _, err := f.files.WriteBack(t.Context(), session, origin, content("agent")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused", err)
+	}
+	onlyFiles(t, elsewhere)
+	res, err := f.files.WriteBack(t.Context(), session, origin, content("agent"))
+	if err != nil || res.Outcome != Conflict || res.Path != filepath.Join(elsewhere, "notes (box).md") {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	asked := f.approver.asked()
+	if want := "create " + filepath.Join(elsewhere, "notes (box).md") + " with the edit of box session " + session + " beside " + filepath.Join(elsewhere, "notes.md") + " (" + docs + " now leads to " + elsewhere + ")"; asked[1] != want {
+		t.Fatalf("asked %q, want %q", asked[1], want)
+	}
+}
+
+// An origin swapped for a symlink changed on the laptop: the box's version
+// goes beside it, never through it.
+func TestAWriteBackOverAnOriginNowASymlinkGoesBesideIt(t *testing.T) {
+	f := newFixture(t)
+	docs := filepath.Join(f.home, "docs")
+	origin := filepath.Join(docs, "notes.md")
+	f.pasted(t, origin, "laptop")
+	target := filepath.Join(f.home, "target.txt")
+	write(t, target, "untouched")
+	if err := os.Remove(origin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, origin); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.files.WriteBack(t.Context(), session, origin, content("agent"))
+	if err != nil || res.Outcome != Conflict || read(t, res.Path) != "agent" {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	if read(t, target) != "untouched" {
+		t.Fatal("the write went through the symlink")
+	}
+	if asked := f.approver.asked(); len(asked) != 1 || !strings.Contains(asked[0], "beside "+origin+" (a symlink)") {
+		t.Fatalf("asked %q", asked)
+	}
+}
+
+// Every save asks first, ~/Downloads included, once per destination and session.
+func TestEverySaveAsksOncePerDestinationAndSession(t *testing.T) {
+	f := newFixture(t)
+	downloads := filepath.Join(f.home, "Downloads")
+	for range 2 {
+		if _, err := f.files.Save(t.Context(), session, "x.txt", "", content("c")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dest := filepath.Join(f.home, "docs", "out.txt")
+	for _, c := range []string{"one", "two"} {
+		if _, err := f.files.Save(t.Context(), session, "x.txt", dest, content(c)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.files.Save(t.Context(), otherSession, "x.txt", dest, content("three")); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"create " + filepath.Join(downloads, "x.txt") + " with a file from box session " + session,
+		"create " + filepath.Join(downloads, "x (1).txt") + " with a file from box session " + session,
+		"create " + dest + " with a file from box session " + session,
+		"replace " + dest + " with a file from box session " + otherSession + " (the old version goes to the Trash)",
+	}
+	if got := f.approver.asked(); !slices.Equal(got, want) {
+		t.Fatalf("asked\n%q\nwant\n%q", got, want)
+	}
+	if read(t, dest) != "three" || !slices.Equal(f.trashed, []string{"out.txt=one", "out.txt=two"}) {
+		t.Fatalf("%s holds %q, trashed %q", dest, read(t, dest), f.trashed)
+	}
+}
+
+func TestADeclinedSaveWritesNothing(t *testing.T) {
+	f := newFixture(t)
+	f.approver.next = []error{errors.New("Canceled by user.")}
+	if _, err := f.files.Save(t.Context(), session, "x.txt", "", content("c")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+	onlyFiles(t, filepath.Join(f.home, "Downloads"))
+}
+
+// Once approved, a save may go anywhere on the laptop; the prompt names the
+// place it lands, with symlinks in its dir resolved.
+func TestASaveGoesWhereverTheUserApproves(t *testing.T) {
+	f := newFixture(t)
+	downloads := filepath.Join(f.home, "Downloads")
+	docs := filepath.Join(f.home, "docs")
+	if err := os.Symlink(docs, filepath.Join(downloads, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(f.home), "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ dest, want, risk string }{
+		{filepath.Join(docs, "a.txt"), filepath.Join(docs, "a.txt"), ""},
+		{"~/b.txt", filepath.Join(f.home, "b.txt"), ""},
+		{"../docs/c.txt", filepath.Join(docs, "c.txt"), ""},
+		{"escape/d.txt", filepath.Join(docs, "d.txt"), ""},
+		{filepath.Join(downloads, "escape"), filepath.Join(docs, "x.txt"), ""},
+		{filepath.Join(outside, "e.txt"), filepath.Join(outside, "e.txt"), " (outside your home)"},
+		{"~/.zshenv", filepath.Join(f.home, ".zshenv"), " (hidden)"},
+	} {
+		saved, err := f.files.Save(t.Context(), session, "x.txt", tc.dest, content("c"))
+		if err != nil || saved.Path != tc.want || read(t, tc.want) != "c" {
+			t.Fatalf("Save to %q: %+v, %v; want %s", tc.dest, saved, err, tc.want)
+		}
+		asked := f.approver.asked()
+		if want := "create " + tc.want + " with a file from box session " + session + tc.risk; asked[len(asked)-1] != want {
+			t.Fatalf("Save to %q asked %q, want %q", tc.dest, asked[len(asked)-1], want)
+		}
+	}
+}
+
+func TestSaveRefusesWhatNamesNoFileItCanWrite(t *testing.T) {
+	f := newFixture(t)
+	docs := filepath.Join(f.home, "docs")
+	if err := os.Mkdir(filepath.Join(docs, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct{ name, dest string }{
+		"a missing dir":         {"x.txt", "nope/x.txt"},
+		"a file as a dir":       {"x.txt", filepath.Join(docs, "missing.txt") + "/"},
+		"a name that is a path": {"../x.txt", ""},
+		"a name that is ..":     {"..", ""},
+		"an empty name":         {"", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := f.files.Save(t.Context(), session, tc.name, tc.dest, content("agent")); !errors.Is(err, ErrRefused) {
+				t.Fatalf("err = %v, want ErrRefused", err)
+			}
+		})
+	}
+	if got := f.approver.asked(); len(got) != 0 {
+		t.Fatalf("asked %q", got)
+	}
+	onlyFiles(t, docs, "sub")
+}
+
+// A symlink is a taken name in a dir, and a file of its own when named: a
+// save replaces the link, never its target.
+func TestASaveNeverWritesThroughASymlink(t *testing.T) {
+	f := newFixture(t)
+	downloads := filepath.Join(f.home, "Downloads")
+	target := filepath.Join(f.home, "docs", "target.txt")
+	write(t, target, "untouched")
+	link := filepath.Join(downloads, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := f.files.Save(t.Context(), session, "link.txt", "", content("agent")); err != nil || saved.Path != filepath.Join(downloads, "link (1).txt") {
+		t.Fatalf("saved to %+v, %v", saved, err)
+	}
+	saved, err := f.files.Save(t.Context(), session, "x", link, content("agent"))
+	if err != nil || saved.Path != link || read(t, link) != "agent" {
+		t.Fatalf("saved to %+v, %v", saved, err)
+	}
+	if info, err := os.Lstat(link); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("%s is %v, %v", link, info.Mode(), err)
+	}
+	if read(t, target) != "untouched" {
+		t.Fatal("the save went through the symlink")
+	}
+	if asked := f.approver.asked(); !strings.HasPrefix(asked[1], "replace "+link) || !strings.Contains(asked[1], "a symlink") {
+		t.Fatalf("asked %q", asked)
+	}
+}
+
+func TestASaveWithoutASessionAsksForTheBox(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.files.Save(t.Context(), "", "x.md", "", content("agent")); err != nil {
+		t.Fatal(err)
+	}
+	if asked := f.approver.asked(); len(asked) != 1 || asked[0] != "create "+filepath.Join(f.home, "Downloads", "x.md")+" with a file from the box" {
+		t.Fatalf("asked %q", asked)
 	}
 }

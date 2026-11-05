@@ -39,7 +39,7 @@ func (h *Handler) fetch(ctx context.Context, boxPath string) laptopfiles.Fetch {
 // a conflict or a failure.
 func (h *Handler) WriteBack(ctx context.Context, req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
 	name := filepath.Base(req.Origin)
-	res, err := h.Files.WriteBack(req.Session, req.Origin, h.fetch(ctx, req.BoxPath))
+	res, err := h.Files.WriteBack(ctx, req.Session, req.Origin, h.fetch(ctx, req.BoxPath))
 	if err != nil {
 		h.notify(ctx, req.Session, fmt.Sprintf("%s not written back: %v", name, err))
 		return linkproto.WriteBackResult{}, refusal(err)
@@ -60,12 +60,17 @@ func (h *Handler) reportLeftover(ctx context.Context, session string, res laptop
 	h.notify(ctx, session, fmt.Sprintf("%s is written, but %s stays: %v", filepath.Base(res.Path), res.Leftover, res.LeftoverErr))
 }
 
-// LaptopSave fetches a box file to where laptopfiles lets it go, and shows it in Finder.
+// LaptopSave fetches a box file to where the user lets it go, and shows it
+// in Finder. The session's screen hears of a refusal, which may come from
+// a prompt nobody answered.
 func (h *Handler) LaptopSave(ctx context.Context, req linkproto.LaptopSaveRequest) (string, error) {
 	if !filepath.IsAbs(req.BoxPath) {
 		return "", fmt.Errorf("box path %q is not absolute", req.BoxPath)
 	}
-	res, err := h.Files.Save(req.Session, filepath.Base(req.BoxPath), req.Dest, h.fetch(ctx, req.BoxPath))
+	res, err := h.Files.Save(ctx, req.Session, filepath.Base(req.BoxPath), req.Dest, h.fetch(ctx, req.BoxPath))
+	if errors.Is(err, laptopfiles.ErrRefused) && req.Session != "" {
+		h.notify(ctx, req.Session, fmt.Sprintf("%s not saved: %v", filepath.Base(req.BoxPath), err))
+	}
 	if err != nil {
 		return "", refusal(err)
 	}

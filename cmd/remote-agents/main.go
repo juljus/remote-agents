@@ -618,7 +618,7 @@ func runLink() error {
 			Forwarder:  forwarder,
 			Registry:   reg,
 			Resolve:    resolveHost,
-			Files:      laptopfiles.Files{Records: laptopfiles.Records{Dir: e.paths.PastedRecords()}, Home: home, Trash: trash},
+			Files:      laptopfiles.Files{Records: laptopfiles.Records{Dir: e.paths.PastedRecords()}, Home: home, Trash: trash, Gate: laptopfiles.NewGate(approver(), linkproto.ApprovalTimeout)},
 			Fetcher:    link.SSHFetcher{SSH: e.ssh, Box: e.box()},
 			Revealer:   link.CommandRevealer{Argv: e.cfg.Link.Revealer},
 			Logf:       logger.Printf,

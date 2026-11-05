@@ -15,6 +15,11 @@ type Approver interface {
 	Approve(ctx context.Context, reason string) error
 }
 
+// ApproverFunc is a function that approves.
+type ApproverFunc func(ctx context.Context, reason string) error
+
+func (f ApproverFunc) Approve(ctx context.Context, reason string) error { return f(ctx, reason) }
+
 // purpose is what a session got approved to do to a path.
 type purpose int
 
