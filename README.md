@@ -71,7 +71,8 @@ the `args` lines to get the prompts back.
   session's id: after `--resume`, or inside cmux.
 - A detached session that has been idle for 5 minutes is ended. A still-running `rclaude`
   resumes it when it reconnects; after closing that terminal, use `rclaude --resume <id>` or
-  `remote-agents attach <session>`.
+  `remote-agents attach <session>`; `remote-agents ls` prints the resume command for each session
+  ended in the last 7 days.
 - While the connection is down, Ctrl+C detaches; the session keeps running on the box.
 - On the box, `laptop-save <file>` puts a file in your Mac's `~/Downloads`.
 
