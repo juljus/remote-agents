@@ -148,7 +148,8 @@ func (f Files) inPlainPlace(origin string) error {
 		return fmt.Errorf("%w: %s is outside your home, where nothing is written from the box; the box keeps its version", ErrRefused, origin)
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
-	if parts[0] == "Library" {
+	// The spelling is the file system's when Origin recorded it; a case-blind check costs nothing more.
+	if strings.EqualFold(parts[0], "Library") {
 		return fmt.Errorf("%w: %s is under ~/Library, where nothing is written from the box; the box keeps its version", ErrRefused, origin)
 	}
 	for _, part := range parts {

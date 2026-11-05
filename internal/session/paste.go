@@ -212,14 +212,14 @@ func exchange(w io.WriteCloser, r io.Reader, files []paste.File) (uploaded, erro
 			up.refused = append(up.refused, err)
 			continue
 		}
-		origin, err := laptopfiles.Origin(f.Path)
-		if err != nil {
-			up.refused = append(up.refused, fmt.Errorf("%s cannot be resolved: %w", filepath.Base(f.Path), err))
-			continue
-		}
 		src, err := f.Open()
 		if err != nil {
 			up.refused = append(up.refused, err)
+			continue
+		}
+		origin, err := laptopfiles.Origin(f.Path)
+		if err != nil {
+			up.refused = append(up.refused, errors.Join(fmt.Errorf("%s cannot be resolved: %w", filepath.Base(f.Path), err), src.Close()))
 			continue
 		}
 		up.sent = append(up.sent, f)

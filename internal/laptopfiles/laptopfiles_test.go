@@ -638,3 +638,41 @@ func TestWriteBackLandsOnlyOnAPlainFileInHomeOutsideLibrary(t *testing.T) {
 		})
 	}
 }
+
+// APFS ignores case, and the box picks the spelling of a path it plants.
+func TestAPathTypedInAnotherCaseIsRecordedAsTheDiskSpellsIt(t *testing.T) {
+	f := newFixture(t)
+	library := filepath.Join(f.home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(library, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plist := filepath.Join(library, "com.x.plist")
+	write(t, plist, "laptop")
+	typed := filepath.Join(f.home, "LIBRARY", "launchagents", "COM.X.PLIST")
+	if _, err := os.Stat(typed); err != nil {
+		t.Skipf("the temp dir's volume is case-sensitive: %v", err)
+	}
+	origin, err := Origin(typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if origin != plist {
+		t.Fatalf("Origin(%s) = %s, want %s", typed, origin, plist)
+	}
+	if err := f.files.Records.Pasted(session, origin, sum("laptop")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.files.WriteBack(session, origin, content("agent")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("write-back under ~/Library: %v", err)
+	}
+	// Recorded as typed, as an older wrapper would, the check still holds.
+	if err := f.files.Records.Pasted(session, filepath.Join(f.home, "library", "LaunchAgents", "com.x.plist"), sum("laptop")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.files.WriteBack(session, filepath.Join(f.home, "library", "LaunchAgents", "com.x.plist"), content("agent")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("write-back under ~/library: %v", err)
+	}
+	if read(t, plist) != "laptop" {
+		t.Fatal("the plist changed")
+	}
+}

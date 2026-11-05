@@ -44,13 +44,18 @@ func (r Records) Pasted(session, origin, sum string) error {
 	})
 }
 
-// Origin is how a pasted path is recorded: absolute, with its symlinks resolved.
+// Origin is how a pasted file's path is recorded: absolute, with its
+// symlinks resolved, spelled as the file system holds it.
 func Origin(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	return filepath.EvalSymlinks(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	return diskPath(resolved)
 }
 
 func checkPath(path string) error {
