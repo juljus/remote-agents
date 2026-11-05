@@ -1271,7 +1271,12 @@ func TestAgentSavesReachTheLaptop(t *testing.T) {
 	waitContent(t, conf, "agent-conf", 10*time.Second)
 	tm.send("edit " + confCopy + " agent-conf-2\r")
 	waitContent(t, conf, "agent-conf-2", 10*time.Second)
-	want := []string{"write back the edits of box session " + session + " to " + strconv.Quote(conf) + " (hidden): replace it now, the old version to the Trash"}
+	// The prompt names the file where the write lands: /tmp is /private/tmp.
+	confPath, err := filepath.EvalSymlinks(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"write back the edits of box session " + session + " to " + strconv.Quote(confPath) + " (hidden): replace it now, the old version to the Trash"}
 	if got := approvals(t)[len(prompts):]; !slices.Equal(got, want) {
 		t.Fatalf("asked %q, want %q", got, want)
 	}
