@@ -194,10 +194,13 @@ naming the session, whether it creates or replaces, and the full path where the 
 `laptop-save` asks the same way. Prompts show one at a time; one declined, failed or unanswered
 for 10 minutes is refused with a notice, and the box keeps the agent's version: a new change, a
 new paste or a new save offers it anew. A daemon that cannot ask, as with no one logged in at the
-screen, refuses. An approval holds for that file (or save destination) and session until the link
-daemon restarts: it lives only in the daemon's memory, as a grant kept in a file could be forged
-by a write to it. The place is checked again where the write lands; one that changed since
-the prompt is refused. Sessions name themselves to the laptop, and every box session runs as the
+screen, refuses. An approval holds for that file's write-backs (or that save destination) and
+session, on the terms its prompt named, until the link daemon restarts: what makes the place
+risky changing, or a save that would now replace the file it was approved to create, asks again.
+It lives only in the daemon's memory, as a grant kept in a file could be forged by a write to it.
+The place is checked again where the write lands; one that changed since the prompt is refused.
+At most 8 prompts wait at once; a request past that, or one that waited its turn 10 minutes,
+fails without a refusal, and the box tries again later. Sessions name themselves to the laptop, and every box session runs as the
 same user, so one box session can claim another's name and with it that session's pasted files
 and approvals: the approvals scope prompts, not box sessions from each other. A file replaced
 goes to the Trash. A write never follows a symlink at the file's own name: a write-back goes
