@@ -1,33 +1,25 @@
 # remote-agents
 
-Run Claude Code and Codex on a remote Linux box, and use them from your Mac terminal as if they
-ran on your laptop.
+Runs Claude Code and Codex on a remote Linux box and shows them in your Mac terminal.
 
-Type `rclaude` instead of `claude`, or `rcodex` instead of `codex`. The agent runs on the box;
-your terminal only shows it. Your local `claude` and `codex` stay as they are.
+`rclaude` starts Claude Code on the box, `rcodex` starts Codex; the Mac only displays the
+session. Your local `claude` and `codex` are not changed.
 
-## Why
+## What it does
 
-Long agent runs want a machine that stays on and has cores, memory and disk to spare. You still
-want to work with them from your own terminal, clipboard and browser. remote-agents gives you
-both.
-
-## What you get
-
-- **Sessions that outlive your laptop.** Close the lid, switch networks, lose the connection: the
-  agent keeps working on the box, and `rclaude` reconnects to it on its own when you are back.
-- **Your clipboard and browser.** The agent copies to and pastes from your Mac clipboard, images
-  included, and links it opens open in your Mac browser. Logins that call back to `localhost`,
-  such as Claude's `/login` or `rcodex login`, finish through the same link.
-- **Your files.** Paste or drag a Mac file into the session and the agent gets its own copy. When
-  the agent edits it, the change goes back to the file on your Mac. The agent can also hand you a
-  new file with `laptop-save`. Anything new or risky waits for your Touch ID first.
-- **Several accounts.** Keep more than one Claude or ChatGPT login on the box and switch between
-  them in a picker that shows how much of each one's weekly limit is left.
-- **No session takes the box down.** Each session has its own memory cap, so a runaway process is
-  killed alone.
-- A small cloud in the terminal's bottom-right corner tells you a session is remote. cmux works
-  too: its tabs show the remote sessions' status.
+- Sessions run on the box in [shpool](https://github.com/shell-pool/shpool). When the laptop sleeps, changes network or loses the
+  connection, the agent keeps running, and `rclaude` reconnects to it when the link is back.
+- Box sessions use the Mac's clipboard (text and images) and open links in the Mac's browser.
+  Logins that call back to `localhost`, such as Claude's `/login` or `rcodex login`, complete
+  through the link.
+- A Mac file pasted or dragged into a session is uploaded, and the agent works on its own copy.
+  Edits to that copy are written back to the Mac file. `laptop-save` on the box saves a new file
+  to the Mac. New or risky writes on the Mac ask for Touch ID first.
+- The box can hold several Claude and ChatGPT logins; `rclaude account` and `rcodex account`
+  switch between them and show each one's remaining weekly usage.
+- Each session has its own memory limit, so the kernel kills only the process that exceeded it.
+- A cloud in the terminal's bottom-right corner marks a remote session. With cmux, its tabs show
+  the remote sessions' status.
 
 ## Setup
 
@@ -38,8 +30,8 @@ You need:
   (`loginctl enable-linger <user>`), with the folder your sessions should work in. For `rcodex`,
   Codex on the box's `/usr/local/bin`.
 
-Starting from a bare Hetzner server? [box/bootstrap](box/bootstrap/README.md) builds such a box
-for you, locked down to your tailnet.
+[box/bootstrap](box/bootstrap/README.md) sets up such a box on a Hetzner dedicated server, reachable
+only over Tailscale.
 
 Clone this repo on the Mac and run these from its root.
 
@@ -76,8 +68,7 @@ the `args` lines to get the prompts back.
 
 - When the agent exits, `rclaude` prints the command that resumes the session, once it knows the
   session's id: after `--resume`, or inside cmux.
-- A session you left idle and detached is ended after 5 minutes to free the box; it resumes on
-  its own when you reconnect.
+- A detached session that has been idle for 5 minutes is ended; it resumes when you reconnect.
 - While the connection is down, Ctrl+C detaches; the session keeps running on the box.
 - On the box, `laptop-save <file>` puts a file in your Mac's `~/Downloads`.
 
