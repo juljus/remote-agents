@@ -3,6 +3,7 @@ package linkproto
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -80,5 +81,15 @@ func TestRequestValidation(t *testing.T) {
 		if err := r.Validate(); err == nil {
 			t.Fatalf("request %d: expected validation error", i)
 		}
+	}
+}
+
+func TestRefusalsKeepTheirCodeAcrossTheLink(t *testing.T) {
+	resp := Failure(fmt.Errorf("%w: /etc/x is not in ~/Downloads", ErrRefused))
+	if err := resp.Err(); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "/etc/x") {
+		t.Fatalf("err = %v", err)
+	}
+	if err := Failure(errors.New("disk full")).Err(); errors.Is(err, ErrRefused) {
+		t.Fatalf("a failure read as a refusal: %v", err)
 	}
 }

@@ -135,14 +135,23 @@ func TestARefusedWriteBackFailsAndSaysWhy(t *testing.T) {
 	notices := f.wrapper(t)
 	other := filepath.Join(f.home, "docs", "other.md")
 	_, err := f.h.WriteBack(context.Background(), linkproto.WriteBackRequest{Session: filesSession, Origin: other, BoxPath: "/box/x"})
-	if !errors.Is(err, laptopfiles.ErrRefused) {
-		t.Fatalf("err = %v", err)
+	if !errors.Is(err, linkproto.ErrRefused) {
+		t.Fatalf("err = %v, want a refusal the box sees as one", err)
 	}
 	if n := <-notices; !strings.Contains(n, "other.md not written back") {
 		t.Fatalf("notice %q", n)
 	}
 	if _, err := os.Stat(other); !os.IsNotExist(err) {
 		t.Fatalf("refused write-back created %s", other)
+	}
+}
+
+func TestAFailedFetchIsNoRefusal(t *testing.T) {
+	f := newFilesFixture(t, fakeFetcher{})
+	origin := f.paste(t, "notes.md", "laptop")
+	_, err := f.h.WriteBack(context.Background(), linkproto.WriteBackRequest{Session: filesSession, Origin: origin, BoxPath: "/box/gone"})
+	if err == nil || errors.Is(err, linkproto.ErrRefused) {
+		t.Fatalf("err = %v, want a failure the box tries again", err)
 	}
 }
 
@@ -156,7 +165,7 @@ func TestLaptopSaveSavesIntoDownloadsAndRevealsIt(t *testing.T) {
 	if !slices.Equal(f.revealed.paths, []string{want}) {
 		t.Fatalf("revealed %q", f.revealed.paths)
 	}
-	if _, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{BoxPath: "/box/out/report.pdf", Dest: "/etc/report.pdf"}); !errors.Is(err, laptopfiles.ErrRefused) {
+	if _, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{BoxPath: "/box/out/report.pdf", Dest: "/etc/report.pdf"}); !errors.Is(err, linkproto.ErrRefused) {
 		t.Fatalf("save outside Downloads: %v", err)
 	}
 	if _, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{BoxPath: "relative.pdf"}); err == nil {

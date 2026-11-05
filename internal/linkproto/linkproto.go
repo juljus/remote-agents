@@ -32,6 +32,8 @@ var (
 	ErrLinkDown = errors.New("laptop link is down")
 	// ErrNoTerminal means no laptop terminal is registered for the hook's session.
 	ErrNoTerminal = errors.New("no laptop terminal registered for this session")
+	// ErrRefused means the laptop will not do what was asked, however often it is asked.
+	ErrRefused = errors.New("refused")
 )
 
 type OpenURLRequest struct {
@@ -121,6 +123,7 @@ const (
 	codeFailed     errorCode = "failed"
 	codeNoTerminal errorCode = "no_terminal"
 	codeLinkDown   errorCode = "link_down"
+	codeRefused    errorCode = "refused"
 )
 
 type Response struct {
@@ -143,6 +146,8 @@ func (r Response) Err() error {
 		return fmt.Errorf("%w: %s", ErrNoTerminal, r.Error)
 	case codeLinkDown:
 		return fmt.Errorf("%w: %s", ErrLinkDown, r.Error)
+	case codeRefused:
+		return fmt.Errorf("laptop: %w: %s", ErrRefused, r.Error)
 	}
 	return fmt.Errorf("laptop: %s", r.Error)
 }
@@ -188,11 +193,14 @@ func dispatch(ctx context.Context, h Handler, req Request) Response {
 	return resp
 }
 
-// Failure is the response that carries err; ErrNoTerminal keeps its code.
+// Failure is the response that carries err; ErrNoTerminal and ErrRefused keep their codes.
 func Failure(err error) Response {
 	code := codeFailed
-	if errors.Is(err, ErrNoTerminal) {
+	switch {
+	case errors.Is(err, ErrNoTerminal):
 		code = codeNoTerminal
+	case errors.Is(err, ErrRefused):
+		code = codeRefused
 	}
 	return Response{Error: err.Error(), ErrorCode: code}
 }

@@ -42,13 +42,22 @@ func (h *Handler) WriteBack(ctx context.Context, req linkproto.WriteBackRequest)
 	res, err := h.Files.WriteBack(req.Session, req.Origin, h.fetch(ctx, req.BoxPath))
 	if err != nil {
 		h.notify(ctx, req.Session, fmt.Sprintf("%s not written back: %v", name, err))
-		return linkproto.WriteBackResult{}, err
+		return linkproto.WriteBackResult{}, refusal(err)
 	}
 	h.Logf("%s: write-back of %s: %s, %s", req.Session, req.BoxPath, res.Outcome, res.Path)
 	if res.Outcome == laptopfiles.Conflict {
 		h.notify(ctx, req.Session, fmt.Sprintf("%s changed on the laptop since the paste; the box's version is in %s", name, filepath.Base(res.Path)))
 	}
+	h.reportLeftover(ctx, req.Session, res)
 	return linkproto.WriteBackResult{Outcome: string(res.Outcome), Path: res.Path, SHA256: res.Sum}, nil
+}
+
+// reportLeftover tells the session what a write left behind on the laptop, if anything.
+func (h *Handler) reportLeftover(ctx context.Context, session string, res laptopfiles.Result) {
+	if res.Leftover == "" {
+		return
+	}
+	h.notify(ctx, session, fmt.Sprintf("%s is written, but %s stays: %v", filepath.Base(res.Path), res.Leftover, res.LeftoverErr))
 }
 
 // LaptopSave fetches a box file to where laptopfiles lets it go, and shows it in Finder.
@@ -56,16 +65,25 @@ func (h *Handler) LaptopSave(ctx context.Context, req linkproto.LaptopSaveReques
 	if !filepath.IsAbs(req.BoxPath) {
 		return "", fmt.Errorf("box path %q is not absolute", req.BoxPath)
 	}
-	path, err := h.Files.Save(req.Session, filepath.Base(req.BoxPath), req.Dest, h.fetch(ctx, req.BoxPath))
+	res, err := h.Files.Save(req.Session, filepath.Base(req.BoxPath), req.Dest, h.fetch(ctx, req.BoxPath))
 	if err != nil {
-		return "", err
+		return "", refusal(err)
 	}
-	h.Logf("saved %s from the box to %s", req.BoxPath, path)
+	h.Logf("saved %s from the box to %s", req.BoxPath, res.Path)
+	h.reportLeftover(ctx, req.Session, res)
 	// The file is saved; showing it is a courtesy whose failure the box need not hear of.
-	if err := h.Revealer.Reveal(ctx, path); err != nil {
-		h.Logf("showing %s in Finder: %v", path, err)
+	if err := h.Revealer.Reveal(ctx, res.Path); err != nil {
+		h.Logf("showing %s in Finder: %v", res.Path, err)
 	}
-	return path, nil
+	return res.Path, nil
+}
+
+// refusal marks a laptopfiles refusal as one for the box, which then stops asking.
+func refusal(err error) error {
+	if errors.Is(err, laptopfiles.ErrRefused) {
+		return fmt.Errorf("%w: %w", linkproto.ErrRefused, err)
+	}
+	return err
 }
 
 // notify shows text on the screen of the wrapper showing session, if one does.

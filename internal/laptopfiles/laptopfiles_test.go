@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 const session = "claude-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -304,7 +306,8 @@ func TestSaveGoesToDownloadsUnderAFreeName(t *testing.T) {
 	write(t, filepath.Join(downloads, "report.pdf"), "older")
 
 	for _, want := range []string{"report (1).pdf", "report (2).pdf"} {
-		path, err := f.files.Save(session, "report.pdf", "", content("new"))
+		saved, err := f.files.Save(session, "report.pdf", "", content("new"))
+		path := saved.Path
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -332,7 +335,8 @@ func TestSaveToAPathInDownloads(t *testing.T) {
 		{filepath.Join(downloads, "z.txt"), filepath.Join(downloads, "z.txt")},
 		{"~/Downloads", filepath.Join(downloads, "x.txt")},
 	} {
-		path, err := f.files.Save(session, "x.txt", tc.dest, content("c"))
+		saved, err := f.files.Save(session, "x.txt", tc.dest, content("c"))
+		path := saved.Path
 		if err != nil {
 			t.Fatalf("Save to %q: %v", tc.dest, err)
 		}
@@ -348,7 +352,8 @@ func TestSaveOverAPastedOriginTrashesTheOldVersion(t *testing.T) {
 	f.pasted(t, origin, "laptop")
 	write(t, origin, "edited on the laptop")
 
-	path, err := f.files.Save(session, "whatever.md", origin, content("agent"))
+	saved, err := f.files.Save(session, "whatever.md", origin, content("agent"))
+	path := saved.Path
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +409,8 @@ func TestSaveRefusesEverythingOutsideDownloadsAndThePastedFiles(t *testing.T) {
 	onlyFiles(t, downloads, "dangling.txt", "escape")
 
 	// A symlink in Downloads is a taken name, never a way out.
-	path, err := f.files.Save(session, "dangling.txt", "", content("agent"))
+	saved, err := f.files.Save(session, "dangling.txt", "", content("agent"))
+	path := saved.Path
 	if err != nil || path != filepath.Join(downloads, "dangling (1).txt") {
 		t.Fatalf("saved to %s, %v", path, err)
 	}
@@ -429,4 +435,129 @@ func TestRecordsKeepEachSessionsPastes(t *testing.T) {
 	if err := f.files.Records.Pasted(session, "docs/a.md", sum("a")); err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("recorded a relative origin: %v", err)
 	}
+}
+
+// Without a Trash, as on some network volumes, the write-back still lands and
+// says where the old version stays.
+func TestAWriteBackWhoseOldVersionCannotGoToTheTrashSaysWhereItStays(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, "docs", "notes.md")
+	f.pasted(t, origin, "laptop")
+	f.files.Trash = func(string) error { return errors.New("the volume has no Trash") }
+
+	res, err := f.files.WriteBack(session, origin, content("agent"))
+	if err != nil || res.Outcome != Written || read(t, origin) != "agent" {
+		t.Fatalf("result %+v, %v; origin holds %q", res, err, read(t, origin))
+	}
+	if res.Leftover == "" || read(t, res.Leftover) != "laptop" || !strings.Contains(res.LeftoverErr.Error(), "no Trash") {
+		t.Fatalf("old version kept at %q (%v)", res.Leftover, res.LeftoverErr)
+	}
+	// The record moved on, so the next save is no conflict.
+	if res, err := f.files.WriteBack(session, origin, content("agent 2")); err != nil || res.Outcome != Written {
+		t.Fatalf("next write-back %+v, %v", res, err)
+	}
+}
+
+func TestAConflictCopyThatIsASymlinkGoesToTheTrashNotItsTarget(t *testing.T) {
+	f := newFixture(t)
+	docs := filepath.Join(f.home, "docs")
+	origin := filepath.Join(docs, "notes.md")
+	f.pasted(t, origin, "laptop")
+	write(t, origin, "edited on the laptop")
+	target := filepath.Join(f.home, "target.txt")
+	write(t, target, "untouched")
+	if err := os.Symlink(target, filepath.Join(docs, "notes (box).md")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.files.WriteBack(session, origin, content("agent"))
+	if err != nil || res.Outcome != Conflict || read(t, res.Path) != "agent" {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	if read(t, target) != "untouched" {
+		t.Fatal("the write went through the symlink")
+	}
+	if info, err := os.Lstat(res.Path); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("copy is %v, %v", info.Mode(), err)
+	}
+}
+
+func TestSaveWithoutASessionGoesOnlyToDownloads(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, "docs", "notes.md")
+	f.pasted(t, origin, "laptop")
+	if _, err := f.files.Save("", "x.md", origin, content("agent")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("saved over a pasted file without a session: %v", err)
+	}
+	if saved, err := f.files.Save("", "x.md", "", content("agent")); err != nil || saved.Path != filepath.Join(f.home, "Downloads", "x.md") {
+		t.Fatalf("saved to %+v, %v", saved, err)
+	}
+}
+
+// A trailing slash says the path is a dir, so it is never the pasted file.
+func TestSaveToAPastedFileAsADirIsRefused(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, "docs", "notes.md")
+	f.pasted(t, origin, "laptop")
+	if _, err := f.files.Save(session, "x.md", origin+"/", content("agent")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v", err)
+	}
+	if read(t, origin) != "laptop" {
+		t.Fatal("the pasted file changed")
+	}
+}
+
+func TestALongNameCanBeWrittenBack(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, "docs", strings.Repeat("n", 240)+".md")
+	f.pasted(t, origin, "laptop")
+	if res, err := f.files.WriteBack(session, origin, content("agent")); err != nil || res.Outcome != Written {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+}
+
+func TestRecordsOfSessionsUntouchedForTwoWeeksGo(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, "docs", "notes.md")
+	f.pasted(t, origin, "laptop")
+	old := time.Now().Add(-15 * 24 * time.Hour)
+	if err := os.Chtimes(f.files.Records.path(session), old, old); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(f.home, "docs", "other.md")
+	write(t, other, "o")
+	if err := f.files.Records.Pasted("codex-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", other, sum("o")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.files.WriteBack(session, origin, content("agent")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("a pruned session's paste was written back: %v", err)
+	}
+}
+
+func TestConcurrentWriteBacksOfOneFileLeaveOneOfThem(t *testing.T) {
+	f := newFixture(t)
+	docs := filepath.Join(f.home, "docs")
+	origin := filepath.Join(docs, "notes.md")
+	f.pasted(t, origin, "laptop")
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, c := range []string{"one", "two"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := f.files.WriteBack(session, origin, content(c))
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The second to commit saw the first's write as the base, so it replaced it too.
+	if got := read(t, origin); got != "one" && got != "two" {
+		t.Fatalf("origin holds %q", got)
+	}
+	onlyFiles(t, docs, "notes.md")
 }

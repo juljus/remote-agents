@@ -35,11 +35,15 @@ const (
 	Conflict Outcome = "conflict"
 )
 
-// Result is where a write-back's content went, and its hash.
+// Result is where a write-back's content went, and its hash. Leftover, when
+// set, is what the write-back left behind once the content was in place, such
+// as an old version the Trash refused, and LeftoverErr says why.
 type Result struct {
-	Outcome Outcome
-	Path    string
-	Sum     string
+	Outcome     Outcome
+	Path        string
+	Sum         string
+	Leftover    string
+	LeftoverErr error
 }
 
 // Files writes what the box sends, within the bounds of the package doc.
@@ -59,7 +63,7 @@ func (f Files) WriteBack(session, origin string, fetch Fetch) (Result, error) {
 	if _, err := f.pastedEntry(session, origin); err != nil {
 		return Result{}, err
 	}
-	tmp, sum, err := fetchInto(filepath.Dir(origin), filepath.Base(origin), fetch)
+	tmp, sum, err := fetchInto(filepath.Dir(origin), fetch)
 	if err != nil {
 		return Result{}, err
 	}
@@ -79,11 +83,12 @@ func (f Files) WriteBack(session, origin string, fetch Fetch) (Result, error) {
 			e.Base = sum
 			res = Result{Outcome: Unchanged, Path: origin, Sum: sum}
 		case e.Base:
-			if err := f.replace(origin, tmp, mode); err != nil {
+			left, err := f.replace(origin, tmp, mode)
+			if err != nil {
 				return err
 			}
 			e.Base = sum
-			res = Result{Outcome: Written, Path: origin, Sum: sum}
+			res = Result{Outcome: Written, Path: origin, Sum: sum, Leftover: left.path, LeftoverErr: left.err}
 		default:
 			path, err := f.writeCopy(origin, tmp, e.Copy, mode)
 			if err != nil {
@@ -146,8 +151,8 @@ func regularSum(path string) (string, fs.FileMode, error) {
 
 // fetchInto fetches into a hidden temporary file in dir, so that it can take
 // the place of a file there in one rename.
-func fetchInto(dir, name string, fetch Fetch) (string, string, error) {
-	tmp, err := os.CreateTemp(dir, "."+name+".remote-agents-*")
+func fetchInto(dir string, fetch Fetch) (string, string, error) {
+	tmp, err := os.CreateTemp(dir, ".remote-agents-*")
 	if err != nil {
 		return "", "", fmt.Errorf("creating a file in %s: %w", dir, err)
 	}
@@ -161,31 +166,41 @@ func fetchInto(dir, name string, fetch Fetch) (string, string, error) {
 	return tmp.Name(), hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// leftover is what a replace left behind after its rename, and why.
+type leftover struct {
+	path string
+	err  error
+}
+
 // replace puts tmp in place of path in one rename and moves what path held
-// to the Trash. A hard link keeps the old version through the rename.
-func (f Files) replace(path, tmp string, mode fs.FileMode) error {
+// to the Trash. A hard link keeps the old version through the rename. Past
+// the rename the content is in place, so what fails then is a leftover, not
+// a failed replace.
+func (f Files) replace(path, tmp string, mode fs.FileMode) (leftover, error) {
 	if err := os.Chmod(tmp, mode); err != nil {
-		return err
+		return leftover{}, err
 	}
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
-		return linkNew(tmp, path)
+		return leftover{}, linkNew(tmp, path)
 	}
 	held, err := os.MkdirTemp(filepath.Dir(path), ".remote-agents-old-*")
 	if err != nil {
-		return fmt.Errorf("keeping the old %s: %w", filepath.Base(path), err)
+		return leftover{}, fmt.Errorf("keeping the old %s: %w", filepath.Base(path), err)
 	}
-	defer os.Remove(held)
 	old := filepath.Join(held, filepath.Base(path))
 	if err := os.Link(path, old); err != nil {
-		return fmt.Errorf("keeping the old %s: %w", filepath.Base(path), err)
+		return leftover{}, errors.Join(fmt.Errorf("keeping the old %s: %w", filepath.Base(path), err), os.Remove(held))
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return errors.Join(fmt.Errorf("replacing %s: %w", path, err), os.Remove(old))
+		return leftover{}, errors.Join(fmt.Errorf("replacing %s: %w", path, err), os.Remove(old), os.Remove(held))
 	}
 	if err := f.Trash(old); err != nil {
-		return fmt.Errorf("%s is replaced, but its old version stays at %s: moving it to the Trash: %w", path, old, err)
+		return leftover{old, fmt.Errorf("moving the old version to the Trash: %w", err)}, nil
 	}
-	return nil
+	if err := os.Remove(held); err != nil {
+		return leftover{held, err}, nil
+	}
+	return leftover{}, nil
 }
 
 // writeCopy puts tmp beside origin as its conflict copy. A copy there that
@@ -247,15 +262,15 @@ const maxNumbered = 1000
 // file, to dest: a file pasted into session (replacing it, its old version
 // to the Trash), or a path in ~/Downloads under a name no file there has.
 // dest may start with ~/, is relative to ~/Downloads, and when it names a
-// dir the file goes into it; empty, it is ~/Downloads. Save returns where
+// dir the file goes into it; empty, it is ~/Downloads. The result says where
 // the file went.
-func (f Files) Save(session, name, dest string, fetch Fetch) (string, error) {
+func (f Files) Save(session, name, dest string, fetch Fetch) (Result, error) {
 	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, '/') {
-		return "", fmt.Errorf("%w: %q is not one file name", ErrRefused, name)
+		return Result{}, fmt.Errorf("%w: %q is not one file name", ErrRefused, name)
 	}
 	downloads, err := filepath.EvalSymlinks(filepath.Join(f.Home, "Downloads"))
 	if err != nil {
-		return "", fmt.Errorf("finding ~/Downloads: %w", err)
+		return Result{}, fmt.Errorf("finding ~/Downloads: %w", err)
 	}
 	path := downloads
 	switch {
@@ -266,33 +281,38 @@ func (f Files) Save(session, name, dest string, fetch Fetch) (string, error) {
 	case dest != "":
 		path = filepath.Join(downloads, dest)
 	}
-	if session != "" && dest != "" {
+	asDir := strings.HasSuffix(dest, "/")
+	if session != "" && dest != "" && !asDir {
 		if _, err := f.pastedEntry(session, path); err == nil {
 			return f.saveOverPasted(session, path, fetch)
 		} else if !errors.Is(err, ErrRefused) {
-			return "", err
+			return Result{}, err
 		}
 	}
 	dir, file := path, name
-	if info, err := os.Stat(path); err != nil || !info.IsDir() {
-		if strings.HasSuffix(dest, "/") {
-			return "", fmt.Errorf("%w: %s is not a dir", ErrRefused, dest)
-		}
+	info, err := os.Stat(path)
+	switch {
+	case err == nil && info.IsDir():
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return Result{}, err
+	case asDir:
+		return Result{}, fmt.Errorf("%w: %s is not a dir", ErrRefused, dest)
+	default:
 		dir, file = filepath.Dir(path), filepath.Base(path)
 	}
 	if dir, err = filepath.EvalSymlinks(dir); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrRefused, err)
+		return Result{}, fmt.Errorf("%w: %v", ErrRefused, err)
 	}
 	if dir != downloads && !strings.HasPrefix(dir, downloads+string(filepath.Separator)) {
-		return "", fmt.Errorf("%w: %s is neither in ~/Downloads nor a file pasted into this session", ErrRefused, dest)
+		return Result{}, fmt.Errorf("%w: %s is neither in ~/Downloads nor a file pasted into this session", ErrRefused, dest)
 	}
-	tmp, _, err := fetchInto(dir, file, fetch)
+	tmp, _, err := fetchInto(dir, fetch)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	defer removeIfThere(tmp)
 	if err := os.Chmod(tmp, 0o644); err != nil {
-		return "", err
+		return Result{}, err
 	}
 	stem, ext := splitExt(file)
 	for n := 0; n < maxNumbered; n++ {
@@ -302,23 +322,24 @@ func (f Files) Save(session, name, dest string, fetch Fetch) (string, error) {
 		}
 		err := linkNew(tmp, candidate)
 		if err == nil {
-			return candidate, nil
+			return Result{Outcome: Written, Path: candidate}, nil
 		}
 		if !errors.Is(err, fs.ErrExist) {
-			return "", err
+			return Result{}, err
 		}
 	}
-	return "", fmt.Errorf("%s and %d numbered names are all taken", filepath.Join(dir, file), maxNumbered)
+	return Result{}, fmt.Errorf("%s and %d numbered names are all taken", filepath.Join(dir, file), maxNumbered)
 }
 
 // saveOverPasted replaces a file pasted into session, whatever it holds now,
 // and makes the content saved its base.
-func (f Files) saveOverPasted(session, origin string, fetch Fetch) (string, error) {
-	tmp, sum, err := fetchInto(filepath.Dir(origin), filepath.Base(origin), fetch)
+func (f Files) saveOverPasted(session, origin string, fetch Fetch) (Result, error) {
+	tmp, sum, err := fetchInto(filepath.Dir(origin), fetch)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	defer removeIfThere(tmp)
+	var left leftover
 	err = f.Records.update(session, func(rec *sessionRecord) error {
 		e, ok := rec.Files[origin]
 		if !ok {
@@ -334,12 +355,15 @@ func (f Files) saveOverPasted(session, origin string, fetch Fetch) (string, erro
 		case !errors.Is(err, fs.ErrNotExist):
 			return err
 		}
-		if err := f.replace(origin, tmp, mode); err != nil {
+		if left, err = f.replace(origin, tmp, mode); err != nil {
 			return err
 		}
 		e.Base = sum
 		rec.Files[origin] = e
 		return nil
 	})
-	return origin, err
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Outcome: Written, Path: origin, Sum: sum, Leftover: left.path, LeftoverErr: left.err}, nil
 }
