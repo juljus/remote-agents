@@ -588,7 +588,7 @@ func TestAHiddenFileIsWrittenBackOnceTheUserApproves(t *testing.T) {
 			if len(asked) != 2 {
 				t.Fatalf("asked %q, want the declined prompt and one more", asked)
 			}
-			want := "replace " + strconv.Quote(origin) + " with the edit of box session " + session + " (hidden; the old version goes to the Trash)"
+			want := "write back the edits of box session " + session + " to " + strconv.Quote(origin) + " (hidden): replace it now, the old version to the Trash"
 			if asked[1] != want {
 				t.Fatalf("asked %q, want %q", asked[1], want)
 			}
@@ -723,7 +723,7 @@ func TestAWriteBackThroughADirNowASymlinkAsksWhereItLands(t *testing.T) {
 		t.Fatalf("result %+v, %v", res, err)
 	}
 	asked := f.approver.asked()
-	if want := "create " + strconv.Quote(filepath.Join(elsewhere, "notes (box).md")) + " with the edit of box session " + session + " beside " + strconv.Quote(filepath.Join(elsewhere, "notes.md")) + " (" + strconv.Quote(docs) + " now leads to " + strconv.Quote(elsewhere) + ")"; asked[1] != want {
+	if want := "write back the edits of box session " + session + " to " + strconv.Quote(filepath.Join(elsewhere, "notes.md")) + " (" + strconv.Quote(docs) + " now leads to " + strconv.Quote(elsewhere) + "): create " + strconv.Quote(filepath.Join(elsewhere, "notes (box).md")) + " beside it now, as it changed on the laptop"; asked[1] != want {
 		t.Fatalf("asked %q, want %q", asked[1], want)
 	}
 }
@@ -750,7 +750,7 @@ func TestAWriteBackOverAnOriginNowASymlinkGoesBesideIt(t *testing.T) {
 	if read(t, target) != "untouched" {
 		t.Fatal("the write went through the symlink")
 	}
-	if asked := f.approver.asked(); len(asked) != 1 || !strings.Contains(asked[0], "beside "+strconv.Quote(origin)+" (a symlink)") {
+	if asked := f.approver.asked(); len(asked) != 1 || !strings.Contains(asked[0], "to "+strconv.Quote(origin)+" (a symlink): create") {
 		t.Fatalf("asked %q", asked)
 	}
 }
@@ -765,24 +765,26 @@ func TestEverySaveAsksOncePerDestinationAndSession(t *testing.T) {
 		}
 	}
 	dest := filepath.Join(f.home, "docs", "out.txt")
-	for _, c := range []string{"one", "two"} {
+	// Creating it is approved once, replacing it once more: by then it may hold the user's work.
+	for _, c := range []string{"one", "two", "three"} {
 		if _, err := f.files.Save(t.Context(), session, "x.txt", dest, content(c)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := f.files.Save(t.Context(), otherSession, "x.txt", dest, content("three")); err != nil {
+	if _, err := f.files.Save(t.Context(), otherSession, "x.txt", dest, content("four")); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
 		"create " + strconv.Quote(filepath.Join(downloads, "x.txt")) + " with a file from box session " + session,
 		"create " + strconv.Quote(filepath.Join(downloads, "x (1).txt")) + " with a file from box session " + session,
 		"create " + strconv.Quote(dest) + " with a file from box session " + session,
+		"replace " + strconv.Quote(dest) + " with a file from box session " + session + " (the old version goes to the Trash)",
 		"replace " + strconv.Quote(dest) + " with a file from box session " + otherSession + " (the old version goes to the Trash)",
 	}
 	if got := f.approver.asked(); !slices.Equal(got, want) {
 		t.Fatalf("asked\n%q\nwant\n%q", got, want)
 	}
-	if read(t, dest) != "three" || !slices.Equal(f.trashed, []string{"out.txt=one", "out.txt=two"}) {
+	if read(t, dest) != "four" || !slices.Equal(f.trashed, []string{"out.txt=one", "out.txt=two", "out.txt=three"}) {
 		t.Fatalf("%s holds %q, trashed %q", dest, read(t, dest), f.trashed)
 	}
 }
@@ -910,5 +912,44 @@ func TestAPromptQuotesWhatTheBoxNamed(t *testing.T) {
 	}
 	if len(f.approver.asked()) != 1 {
 		t.Fatalf("asked for an invalid session: %q", f.approver.asked())
+	}
+}
+
+// An approval holds on the terms its prompt named: a file that became
+// executable since asks again.
+func TestAWriteBackWhoseRisksChangedAsksAgain(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, ".notes")
+	f.pasted(t, origin, "laptop")
+	if _, err := f.files.WriteBack(t.Context(), session, origin, content("agent")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(origin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.approver.next = []error{errors.New("Canceled by user.")}
+	if _, err := f.files.WriteBack(t.Context(), session, origin, content("agent 2")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v, want the new risk asked about and declined", err)
+	}
+	if asked := f.approver.asked(); len(asked) != 2 || !strings.Contains(asked[1], "(hidden, executable)") {
+		t.Fatalf("asked %q", asked)
+	}
+}
+
+// A save approved to create a file that someone else creates meanwhile is
+// refused rather than replacing it unasked.
+func TestASaveWhosePlaceChangedSinceTheApprovalIsRefused(t *testing.T) {
+	f := newFixture(t)
+	dest := filepath.Join(f.home, "docs", "new.txt")
+	sneak := func(w io.Writer) error {
+		write(t, dest, "the user's")
+		_, err := io.WriteString(w, "agent")
+		return err
+	}
+	if _, err := f.files.Save(t.Context(), session, "x", dest, sneak); !errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+	if read(t, dest) != "the user's" || len(f.trashed) != 0 {
+		t.Fatalf("%s holds %q, trashed %q", dest, read(t, dest), f.trashed)
 	}
 }

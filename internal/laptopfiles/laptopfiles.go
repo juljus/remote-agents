@@ -69,6 +69,12 @@ type place struct {
 	risks []string
 }
 
+// writeBackGrant is what lets session write back to p: its write-backs of
+// the file, on the risks the prompt named.
+func (p place) writeBackGrant(session string) grant {
+	return grant{session: session, use: writeBackUse, path: p.path, terms: strings.Join(p.risks, ", ")}
+}
+
 // WriteBack writes the content fetch gives for a file pasted into session
 // from origin: over origin while it holds its base, else beside it. A risky
 // place waits for the user's approval, once per session.
@@ -92,7 +98,7 @@ func (f Files) WriteBack(ctx context.Context, session, origin string, fetch Fetc
 		if err != nil {
 			return Result{}, err
 		}
-		if err := f.Gate.ask(ctx, session, writeBackUse, asked.path, reason); err != nil {
+		if err := f.Gate.ask(ctx, asked.writeBackGrant(session), reason); err != nil {
 			return Result{}, err
 		}
 	}
@@ -112,7 +118,7 @@ func (f Files) WriteBack(ctx context.Context, session, origin string, fetch Fetc
 		if err != nil {
 			return err
 		}
-		if now.path != asked.path || len(now.risks) > 0 && !f.Gate.approved(session, writeBackUse, now.path) {
+		if now.path != asked.path || len(now.risks) > 0 && !f.Gate.approved(now.writeBackGrant(session)) {
 			return fmt.Errorf("%w: %s changed while the box wrote it back; paste it again to offer the box's version anew", ErrRefused, origin)
 		}
 		target := now.path
@@ -226,16 +232,18 @@ func modeFor(path string) (fs.FileMode, error) {
 	return 0o644, nil
 }
 
-// writeBackReason is the prompt for writing back over p, whose content at
-// the paste had hash base, for session.
+// writeBackReason is the prompt for the write-backs of session to p, whose
+// content at the paste had hash base, and says what the first does. The box
+// picks the paths, so they are quoted: a name holding a newline or a bracket
+// cannot pass for more of the text.
 func writeBackReason(session string, p place, base string) (string, error) {
 	current, err := regularSum(p.path)
 	if err != nil {
 		return "", err
 	}
-	by := "with the edit of box session " + session
+	head := fmt.Sprintf("write back the edits of box session %s to %s (%s)", session, strconv.Quote(p.path), strings.Join(p.risks, ", "))
 	if current == base {
-		return reason("replace", p.path, by, p.risks, trashNote), nil
+		return head + ": replace it now, the old version to the Trash", nil
 	}
 	copyPath := conflictPath(p.path)
 	action := "create"
@@ -244,26 +252,25 @@ func writeBackReason(session string, p place, base string) (string, error) {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
-	return reason(action, copyPath, by+" beside "+strconv.Quote(p.path), p.risks, ""), nil
+	return fmt.Sprintf("%s: %s %s beside it now, as it changed on the laptop", head, action, strconv.Quote(copyPath)), nil
 }
 
-const trashNote = "the old version goes to the Trash"
-
-// reason is a prompt's text, which follows "remote-agents is trying to":
-// action on path by whom, then the risks and the note in brackets. The box
-// picks the paths, so they are quoted: a name holding a newline or a
-// bracket cannot pass for more of the text.
-func reason(action, path, by string, risks []string, note string) string {
-	text := action + " " + strconv.Quote(path) + " " + by
-	var notes []string
-	if len(risks) > 0 {
-		notes = append(notes, strings.Join(risks, ", "))
+// saveReason is the prompt for a save of session to p, which replaces a file
+// there when existing.
+func saveReason(session string, p place, existing bool) string {
+	from := "the box"
+	if session != "" {
+		from = "box session " + session
 	}
-	if note != "" {
-		notes = append(notes, note)
+	action := "create"
+	notes := slices.Clone(p.risks)
+	if existing {
+		action = "replace"
+		notes = append(notes, "the old version goes to the Trash")
 	}
+	text := fmt.Sprintf("%s %s with a file from %s", action, strconv.Quote(p.path), from)
 	if len(notes) > 0 {
-		text += " (" + strings.Join(notes, "; ") + ")"
+		text += " (" + strings.Join(notes, ", ") + ")"
 	}
 	return text
 }
@@ -423,15 +430,8 @@ func (f Files) Save(ctx context.Context, session, name, dest string, fetch Fetch
 	if err != nil {
 		return Result{}, err
 	}
-	by := "with a file from the box"
-	if session != "" {
-		by = "with a file from box session " + session
-	}
-	action, note := "create", ""
-	if existing {
-		action, note = "replace", trashNote
-	}
-	if err := f.Gate.ask(ctx, session, saveUse, p.path, reason(action, p.path, by, p.risks, note)); err != nil {
+	gr := saveGrant(session, p, existing)
+	if err := f.Gate.ask(ctx, gr, saveReason(session, p, existing)); err != nil {
 		return Result{}, err
 	}
 	tmp, sum, err := fetchInto(filepath.Dir(p.path), fetch)
@@ -447,11 +447,11 @@ func (f Files) Save(ctx context.Context, session, name, dest string, fetch Fetch
 	}
 	var left leftover
 	if !pasted {
-		left, err = f.put(p.path, tmp, existing)
+		left, err = f.put(gr, tmp)
 	} else {
 		err = f.Records.update(session, func(rec *sessionRecord) error {
 			var err error
-			if left, err = f.put(p.path, tmp, existing); err != nil {
+			if left, err = f.put(gr, tmp); err != nil {
 				return err
 			}
 			if e, ok := rec.Files[p.path]; ok {
@@ -537,15 +537,31 @@ func freeName(dir, name string) (string, error) {
 	return "", fmt.Errorf("%s and %d numbered names are all taken", filepath.Join(dir, name), maxNumbered)
 }
 
-// put writes tmp to the path a save got approved for, as a new file or over
-// the one there when the user was asked, as they were told. What changed
-// since leads elsewhere, so it is refused.
-func (f Files) put(path, tmp string, existing bool) (leftover, error) {
+// saveGrant is what lets session save to p. A create approved does not
+// cover a replace: the user may have put work in the file since.
+func saveGrant(session string, p place, existing bool) grant {
+	return grant{session: session, use: saveUse, path: p.path, terms: fmt.Sprintf("existing=%t; %s", existing, strings.Join(p.risks, ", "))}
+}
+
+// put writes tmp where gr let a save go, as a new file or over the one
+// there, as the user was told. A place that changed since leads elsewhere or
+// to something else, so it is refused.
+func (f Files) put(gr grant, tmp string) (leftover, error) {
+	path := gr.path
 	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err != nil || dir != filepath.Dir(path) {
 		return leftover{}, fmt.Errorf("%w: %s moved since you approved the save; save again", ErrRefused, filepath.Dir(path))
 	}
-	if _, err := f.placeOf(path); err != nil {
+	now, err := f.placeOf(path)
+	if err != nil {
 		return leftover{}, err
+	}
+	_, err = os.Lstat(path)
+	existing := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return leftover{}, err
+	}
+	if saveGrant(gr.session, now, existing) != gr {
+		return leftover{}, fmt.Errorf("%w: %s changed since you approved the save; save again", ErrRefused, path)
 	}
 	if existing {
 		mode, err := modeFor(path)
@@ -557,9 +573,9 @@ func (f Files) put(path, tmp string, existing bool) (leftover, error) {
 	if err := os.Chmod(tmp, 0o644); err != nil {
 		return leftover{}, err
 	}
-	err := linkNew(tmp, path)
+	err = linkNew(tmp, path)
 	if errors.Is(err, fs.ErrExist) {
-		return leftover{}, fmt.Errorf("%w: %s appeared since you approved the save; save again", ErrRefused, path)
+		return leftover{}, fmt.Errorf("%w: %s changed since you approved the save; save again", ErrRefused, path)
 	}
 	return leftover{}, err
 }

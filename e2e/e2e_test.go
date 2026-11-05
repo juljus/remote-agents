@@ -1271,7 +1271,7 @@ func TestAgentSavesReachTheLaptop(t *testing.T) {
 	waitContent(t, conf, "agent-conf", 10*time.Second)
 	tm.send("edit " + confCopy + " agent-conf-2\r")
 	waitContent(t, conf, "agent-conf-2", 10*time.Second)
-	want := []string{"replace " + strconv.Quote(conf) + " with the edit of box session " + session + " (hidden; the old version goes to the Trash)"}
+	want := []string{"write back the edits of box session " + session + " to " + strconv.Quote(conf) + " (hidden): replace it now, the old version to the Trash"}
 	if got := approvals(t)[len(prompts):]; !slices.Equal(got, want) {
 		t.Fatalf("asked %q, want %q", got, want)
 	}

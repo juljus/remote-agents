@@ -28,11 +28,19 @@ const (
 	saveUse
 )
 
+// grant is what a session gets approved: a use of a path, on the terms the
+// prompt named beyond it, such as the risks and whether a save replaces a
+// file. Other terms ask again.
 type grant struct {
 	session string
 	use     purpose
 	path    string
+	terms   string
 }
+
+// maxWaiting bounds the prompts shown or waiting their turn, so that a box
+// sending request after request cannot hold every slot of the link.
+const maxWaiting = 8
 
 // Gate asks the user, one prompt at a time, before the box writes where it
 // may not on its own, and remembers what each session got approved. The
@@ -46,35 +54,53 @@ type Gate struct {
 
 	mu      sync.Mutex
 	granted map[grant]bool
+	waiting int
 }
 
-// NewGate asks approver, giving each prompt timeout for the user's answer.
+// NewGate asks approver, giving each prompt timeout for the user's answer
+// and each request as long to wait its turn.
 func NewGate(approver Approver, timeout time.Duration) *Gate {
 	return &Gate{approver: approver, timeout: timeout, turn: make(chan struct{}, 1), granted: map[grant]bool{}}
 }
 
-// approved reports whether session got approved to put use to path.
-func (g *Gate) approved(session string, use purpose, path string) bool {
+func (g *Gate) approved(gr grant) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.granted[grant{session, use, path}]
+	return g.granted[gr]
 }
 
-// ask makes sure session may put use to path, asking the user with reason
-// unless it got approved already. A prompt declined, failed or unanswered is
-// a refusal; ctx ending first is not, as the user gave no answer.
-func (g *Gate) ask(ctx context.Context, session string, use purpose, path, reason string) error {
-	if g.approved(session, use, path) {
+// ask makes sure gr is granted, asking the user with reason unless it is
+// already. A prompt declined, failed or unanswered is a refusal. A request
+// that ends first, or never gets its turn, is not, as the user gave no answer.
+func (g *Gate) ask(ctx context.Context, gr grant, reason string) error {
+	g.mu.Lock()
+	if g.granted[gr] {
+		g.mu.Unlock()
 		return nil
 	}
+	if g.waiting == maxWaiting {
+		g.mu.Unlock()
+		return fmt.Errorf("%d prompts are waiting for you already; asking about %s later", maxWaiting, gr.path)
+	}
+	g.waiting++
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.waiting--
+	}()
+	queued := time.NewTimer(g.timeout)
+	defer queued.Stop()
 	select {
 	case g.turn <- struct{}{}:
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-queued.C:
+		return fmt.Errorf("another prompt held the screen for %s; asking about %s later", g.timeout, gr.path)
 	}
 	defer func() { <-g.turn }()
-	// The prompt before this one may have been for the same path.
-	if g.approved(session, use, path) {
+	// The prompt before this one may have granted it.
+	if g.approved(gr) {
 		return nil
 	}
 	promptCtx, cancel := context.WithTimeout(ctx, g.timeout)
@@ -84,12 +110,12 @@ func (g *Gate) ask(ctx context.Context, session string, use purpose, path, reaso
 	case err == nil:
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		g.granted[grant{session, use, path}] = true
+		g.granted[gr] = true
 		return nil
 	case ctx.Err() != nil:
 		return ctx.Err()
 	case errors.Is(promptCtx.Err(), context.DeadlineExceeded):
-		return fmt.Errorf("%w: nobody approved %s within %s; the box keeps its version", ErrRefused, path, g.timeout)
+		return fmt.Errorf("%w: nobody approved %s within %s; the box keeps its version", ErrRefused, gr.path, g.timeout)
 	}
-	return fmt.Errorf("%w: %s not approved: %v; the box keeps its version", ErrRefused, path, err)
+	return fmt.Errorf("%w: %s not approved: %v; the box keeps its version", ErrRefused, gr.path, err)
 }
