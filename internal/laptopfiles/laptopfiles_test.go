@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -587,7 +588,7 @@ func TestAHiddenFileIsWrittenBackOnceTheUserApproves(t *testing.T) {
 			if len(asked) != 2 {
 				t.Fatalf("asked %q, want the declined prompt and one more", asked)
 			}
-			want := "replace " + origin + " with the edit of box session " + session + " (hidden; the old version goes to the Trash)"
+			want := "replace " + strconv.Quote(origin) + " with the edit of box session " + session + " (hidden; the old version goes to the Trash)"
 			if asked[1] != want {
 				t.Fatalf("asked %q, want %q", asked[1], want)
 			}
@@ -722,7 +723,7 @@ func TestAWriteBackThroughADirNowASymlinkAsksWhereItLands(t *testing.T) {
 		t.Fatalf("result %+v, %v", res, err)
 	}
 	asked := f.approver.asked()
-	if want := "create " + filepath.Join(elsewhere, "notes (box).md") + " with the edit of box session " + session + " beside " + filepath.Join(elsewhere, "notes.md") + " (" + docs + " now leads to " + elsewhere + ")"; asked[1] != want {
+	if want := "create " + strconv.Quote(filepath.Join(elsewhere, "notes (box).md")) + " with the edit of box session " + session + " beside " + strconv.Quote(filepath.Join(elsewhere, "notes.md")) + " (" + strconv.Quote(docs) + " now leads to " + strconv.Quote(elsewhere) + ")"; asked[1] != want {
 		t.Fatalf("asked %q, want %q", asked[1], want)
 	}
 }
@@ -749,7 +750,7 @@ func TestAWriteBackOverAnOriginNowASymlinkGoesBesideIt(t *testing.T) {
 	if read(t, target) != "untouched" {
 		t.Fatal("the write went through the symlink")
 	}
-	if asked := f.approver.asked(); len(asked) != 1 || !strings.Contains(asked[0], "beside "+origin+" (a symlink)") {
+	if asked := f.approver.asked(); len(asked) != 1 || !strings.Contains(asked[0], "beside "+strconv.Quote(origin)+" (a symlink)") {
 		t.Fatalf("asked %q", asked)
 	}
 }
@@ -773,10 +774,10 @@ func TestEverySaveAsksOncePerDestinationAndSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"create " + filepath.Join(downloads, "x.txt") + " with a file from box session " + session,
-		"create " + filepath.Join(downloads, "x (1).txt") + " with a file from box session " + session,
-		"create " + dest + " with a file from box session " + session,
-		"replace " + dest + " with a file from box session " + otherSession + " (the old version goes to the Trash)",
+		"create " + strconv.Quote(filepath.Join(downloads, "x.txt")) + " with a file from box session " + session,
+		"create " + strconv.Quote(filepath.Join(downloads, "x (1).txt")) + " with a file from box session " + session,
+		"create " + strconv.Quote(dest) + " with a file from box session " + session,
+		"replace " + strconv.Quote(dest) + " with a file from box session " + otherSession + " (the old version goes to the Trash)",
 	}
 	if got := f.approver.asked(); !slices.Equal(got, want) {
 		t.Fatalf("asked\n%q\nwant\n%q", got, want)
@@ -822,7 +823,7 @@ func TestASaveGoesWhereverTheUserApproves(t *testing.T) {
 			t.Fatalf("Save to %q: %+v, %v; want %s", tc.dest, saved, err, tc.want)
 		}
 		asked := f.approver.asked()
-		if want := "create " + tc.want + " with a file from box session " + session + tc.risk; asked[len(asked)-1] != want {
+		if want := "create " + strconv.Quote(tc.want) + " with a file from box session " + session + tc.risk; asked[len(asked)-1] != want {
 			t.Fatalf("Save to %q asked %q, want %q", tc.dest, asked[len(asked)-1], want)
 		}
 	}
@@ -877,7 +878,7 @@ func TestASaveNeverWritesThroughASymlink(t *testing.T) {
 	if read(t, target) != "untouched" {
 		t.Fatal("the save went through the symlink")
 	}
-	if asked := f.approver.asked(); !strings.HasPrefix(asked[1], "replace "+link) || !strings.Contains(asked[1], "a symlink") {
+	if asked := f.approver.asked(); !strings.HasPrefix(asked[1], "replace "+strconv.Quote(link)) || !strings.Contains(asked[1], "a symlink") {
 		t.Fatalf("asked %q", asked)
 	}
 }
@@ -887,7 +888,27 @@ func TestASaveWithoutASessionAsksForTheBox(t *testing.T) {
 	if _, err := f.files.Save(t.Context(), "", "x.md", "", content("agent")); err != nil {
 		t.Fatal(err)
 	}
-	if asked := f.approver.asked(); len(asked) != 1 || asked[0] != "create "+filepath.Join(f.home, "Downloads", "x.md")+" with a file from the box" {
+	if asked := f.approver.asked(); len(asked) != 1 || asked[0] != "create "+strconv.Quote(filepath.Join(f.home, "Downloads", "x.md"))+" with a file from the box" {
 		t.Fatalf("asked %q", asked)
+	}
+}
+
+// The box picks the names in a prompt: quoted, they cannot pass for more of
+// its text.
+func TestAPromptQuotesWhatTheBoxNamed(t *testing.T) {
+	f := newFixture(t)
+	dest := filepath.Join(f.home, "Downloads", "a.txt) with nothing risky\n\nOK to")
+	if _, err := f.files.Save(t.Context(), session, "x", dest, content("c")); err != nil {
+		t.Fatal(err)
+	}
+	asked := f.approver.asked()
+	if want := "create " + strconv.Quote(dest) + " with a file from box session " + session; len(asked) != 1 || asked[0] != want {
+		t.Fatalf("asked %q, want %q", asked, want)
+	}
+	if _, err := f.files.Save(t.Context(), "claude-x (approved)", "x", "", content("c")); !errors.Is(err, ErrRefused) {
+		t.Fatalf("saved for an invalid session: %v", err)
+	}
+	if len(f.approver.asked()) != 1 {
+		t.Fatalf("asked for an invalid session: %q", f.approver.asked())
 	}
 }

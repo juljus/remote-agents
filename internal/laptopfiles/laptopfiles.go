@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -166,7 +167,7 @@ func (f Files) writeBackPlace(origin string) (place, error) {
 		return place{}, err
 	}
 	if resolved != dir {
-		p.risks = append(p.risks, fmt.Sprintf("%s now leads to %s", dir, resolved))
+		p.risks = append(p.risks, fmt.Sprintf("%q now leads to %q", dir, resolved))
 	}
 	return p, nil
 }
@@ -243,15 +244,17 @@ func writeBackReason(session string, p place, base string) (string, error) {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
-	return reason(action, copyPath, by+" beside "+p.path, p.risks, ""), nil
+	return reason(action, copyPath, by+" beside "+strconv.Quote(p.path), p.risks, ""), nil
 }
 
 const trashNote = "the old version goes to the Trash"
 
 // reason is a prompt's text, which follows "remote-agents is trying to":
-// action on path by whom, then the risks and the note in brackets.
+// action on path by whom, then the risks and the note in brackets. The box
+// picks the paths, so they are quoted: a name holding a newline or a
+// bracket cannot pass for more of the text.
 func reason(action, path, by string, risks []string, note string) string {
-	text := action + " " + path + " " + by
+	text := action + " " + strconv.Quote(path) + " " + by
 	var notes []string
 	if len(risks) > 0 {
 		notes = append(notes, strings.Join(risks, ", "))
@@ -410,6 +413,11 @@ func removeIfThere(path string) {
 func (f Files) Save(ctx context.Context, session, name, dest string, fetch Fetch) (Result, error) {
 	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, '/') {
 		return Result{}, fmt.Errorf("%w: %q is not one file name", ErrRefused, name)
+	}
+	if session != "" {
+		if err := checkSession(session); err != nil {
+			return Result{}, err
+		}
 	}
 	p, existing, err := f.savePlace(name, dest)
 	if err != nil {
