@@ -7,6 +7,7 @@ package touchid
 #cgo LDFLAGS: -framework Foundation -framework LocalAuthentication
 #import <Foundation/Foundation.h>
 #import <LocalAuthentication/LocalAuthentication.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,32 +24,34 @@ static void cancelContext(void *c) {
 	[(__bridge LAContext *)c invalidate];
 }
 
-// Shows the authentication sheet with reason and waits for the user. Returns 0 once they
-// authenticated, else the LAError code with *err set, which the caller frees.
-static long evaluate(void *c, const char *reason, char **err) {
+// Shows the authentication sheet with reason and waits for the user. Returns true only once
+// they authenticated; else sets *code and *err, which the caller frees, to the LAError.
+static bool evaluate(void *c, const char *reason, long *code, char **err) {
 	@autoreleasepool {
 		LAContext *context = (__bridge LAContext *)c;
 		NSError *e = nil;
 		if (![context canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&e]) {
+			*code = e.code;
 			*err = strdup(e.localizedDescription.UTF8String);
-			return e.code;
+			return false;
 		}
 		dispatch_semaphore_t done = dispatch_semaphore_create(0);
+		__block BOOL succeeded = NO;
 		__block NSError *failure = nil;
 		[context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
 		        localizedReason:[NSString stringWithUTF8String:reason]
 		                  reply:^(BOOL success, NSError *error) {
-			if (!success) {
-				failure = error;
-			}
+			succeeded = success;
+			failure = error;
 			dispatch_semaphore_signal(done);
 		}];
 		dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
-		if (failure == nil) {
-			return 0;
+		if (succeeded) {
+			return true;
 		}
-		*err = strdup(failure.localizedDescription.UTF8String);
-		return failure.code;
+		*code = failure.code;
+		*err = strdup(failure == nil ? "LocalAuthentication gave no reason" : failure.localizedDescription.UTF8String);
+		return false;
 	}
 }
 */
@@ -84,9 +87,9 @@ func Ask(ctx context.Context, reason string) error {
 	defer C.free(unsafe.Pointer(creason))
 	done := make(chan error, 1)
 	go func() {
+		var code C.long
 		var cerr *C.char
-		code := C.evaluate(la, creason, &cerr)
-		if code == 0 {
+		if C.evaluate(la, creason, &code, &cerr) {
 			done <- nil
 			return
 		}
