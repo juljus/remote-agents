@@ -80,11 +80,22 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   it, and the cloud then returns to the new corner. Output that is not redrawn keeps the moved
   copy until it is overwritten.
 - `remote-agents ls` lists sessions on the box; `remote-agents attach <session>` reattaches.
-- Pasting or dragging laptop files into a session uploads each one the box lacks to
-  `~/.local/state/remote-agents/pasted/<sha256>/<name>` and pastes that path instead, so Claude can
-  read it and attaches images. A path that exists on the box stays as typed: the box's own file
-  wins. Directories and files over 100 MB are not uploaded; a notice on the bottom row says so.
-  Copies go 7 days after their last paste.
+- Pasting or dragging laptop files into a session uploads each one the box lacks and pastes the
+  path of the session's own copy instead,
+  `~/.local/state/remote-agents/session-pastes/<session>/<key>/<name>`, so Claude can read it and
+  attaches images. A path that exists on the box stays as typed: the box's own file wins.
+  Directories and files over 100 MB are not uploaded; a notice on the bottom row says so.
+- When the agent saves its copy of a pasted file, the box sends it back over the laptop file
+  within about a second, and the laptop file's previous version goes to the Trash. If the laptop
+  file changed since the paste (or since the last write-back), it stays as it is: the agent's
+  version goes beside it as `name (box).ext`, with a notice on the bottom row. Paste the file
+  again to write back over it once more. Copies changed while the link is down go when it is
+  back. A copy goes 7 days after its last paste or change, once the laptop has it.
+- `laptop-save <file> [<laptop path>]` on the box saves a file to the laptop: into `~/Downloads`
+  under its name, or a free `name (1).ext`, and shows it in Finder (`[link] revealer`). A laptop
+  path may name a place in `~/Downloads` (a relative one is) or a file pasted into the session,
+  whose old version goes to the Trash. Agents learn both from one line the box adds to their
+  system prompt (Claude) or developer instructions (Codex, after those of its `config.toml`).
 - While the link is down, Ctrl+C detaches; the session keeps running.
 - A session ends when its agent exits. If the box loses it instead, say the shpool daemon stops,
   the wrapper reconnects and resumes the same agent session; an agent that takes over 10 seconds
@@ -164,8 +175,14 @@ and only the `remote-agents` install refreshes saved logins.
 ## Security model
 
 The box account is trusted with the laptop: anyone who can act as the box user can read and set
-the laptop clipboard, open http(s) URLs in the laptop browser and send cmux status events while the
-link is up. Use a box account nobody else uses.
+the laptop clipboard, open http(s) URLs in the laptop browser, send cmux status events and write the
+files below while the link is up. Use a box account nobody else uses.
+
+Files: the box writes on the laptop only a file pasted into the session asking, its
+`name (box).ext` beside it, and new files inside `~/Downloads`, with symlinks and `..` resolved on
+the laptop. The laptop records each paste itself, so the box cannot add files to that list. A file
+replaced goes to the Trash; the laptop fetches the content over an ssh of its own
+(`remote-agents-box send-file`), up to 100 MB.
 
 URLs: link-local and multicast hosts are refused after resolving the host; LAN and tailnet
 addresses open. The browser resolves again, so DNS rebinding remains possible.

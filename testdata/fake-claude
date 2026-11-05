@@ -73,6 +73,9 @@ while true; do
     exitin) (sleep "$arg1"; kill -USR1 $$) & trap 'resume_hint; exit '"$arg2" USR1 ;;
     hook) hook "$arg1" "${arg2:-$arg1}"; echo "hook exit=$?" ;;
     paste) xclip -selection clipboard -t TARGETS -o; echo "targets exit=$?" ;;
+    # edit <file> <content> saves a file as an agent would, through a rename.
+    edit) printf '%s' "$arg2" > "$arg1.tmp" && mv "$arg1.tmp" "$arg1"; echo "edit exit=$?" ;;
+    save) laptop-save "$arg1" ${arg2:+"$arg2"}; echo "save exit=$?" ;;
     prompt) activity UserPromptSubmit; echo "activity exit=$?" ;;
     stop) activity Stop ',"background_tasks":[],"session_crons":[]'; echo "activity exit=$?" ;;
     # Like Claude's, the command does not end the script, so bash cannot exec it in place of the shell.

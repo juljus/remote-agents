@@ -53,6 +53,7 @@ var (
 	laptopHome string
 	daemonPid  int
 	openedLog  string
+	revealLog  string
 )
 
 func TestMain(m *testing.M) {
@@ -100,7 +101,8 @@ func setup(m *testing.M) (int, error) {
 	configPath = filepath.Join(work, "config.toml")
 	daemonLog = filepath.Join(work, "daemon.log")
 	openedLog = filepath.Join(work, "opened.log")
-	for _, d := range []string{binDir, sshDir, laptopHome} {
+	revealLog = filepath.Join(work, "revealed.log")
+	for _, d := range []string{binDir, sshDir, laptopHome, filepath.Join(laptopHome, "Downloads")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return 0, err
 		}
@@ -178,6 +180,7 @@ workdir = "%s/%s/work"
 
 [link]
 opener = %q
+revealer = ["/bin/sh", "-c", "echo \"$0\" >> %s"]
 
 [cmux]
 wrapper = %q
@@ -199,7 +202,7 @@ kind = "claude"
 [agents.isolatedclaude]
 command = "%s/%s/claude-isolated"
 kind = "claude"
-`, host, boxInstall, boxHome, boxTestDir, fakeBrowser, fakeWrapper, boxHome, boxTestDir, boxHome, boxTestDir, boxHome, boxTestDir)
+`, host, boxInstall, boxHome, boxTestDir, fakeBrowser, revealLog, fakeWrapper, boxHome, boxTestDir, boxHome, boxTestDir, boxHome, boxTestDir)
 	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
 		return 0, err
 	}
@@ -1182,11 +1185,15 @@ func TestPastedLaptopPathsReachTheSessionAsTheBoxShouldSeeThem(t *testing.T) {
 	mark := len(tm.text())
 	// /tmp is on the laptop and the box both.
 	tm.send("\x1b[200~" + strings.ReplaceAll(notes, " ", `\ `) + " /tmp " + folder + "\x1b[201~\r")
+	// The session gets a copy of its own, under the file's name.
+	got := tm.expectAfter(mark, `got: (\S+)\\ (notes\.csv) /tmp `+regexp.QuoteMeta(folder), 15*time.Second)
+	boxCopy := got[1] + " " + got[2]
+	if dir := filepath.Dir(filepath.Dir(boxCopy)); filepath.Dir(dir) != box.SessionPastesDir() || !strings.HasPrefix(filepath.Base(dir), "fakeclaude-") || filepath.Base(boxCopy) != "report notes.csv" {
+		t.Fatalf("pasted as %s", boxCopy)
+	}
+	tm.expectAfter(mark, "not uploaded: folder is a directory", 5*time.Second)
 	digest := sha256.Sum256(content)
 	sum := hex.EncodeToString(digest[:])
-	boxCopy := fmt.Sprintf("%s/.local/state/%s/pasted/%s/report notes.csv", boxHome, boxInstall, sum)
-	tm.expectAfter(mark, "got: "+regexp.QuoteMeta(strings.ReplaceAll(boxCopy, " ", `\ `)+" /tmp "+folder), 15*time.Second)
-	tm.expectAfter(mark, "not uploaded: folder is a directory", 5*time.Second)
 	out, err := onBox(fmt.Sprintf("sha256sum '%s'", boxCopy))
 	if err != nil || !strings.HasPrefix(out, sum+" ") {
 		t.Fatalf("the upload is not on the box: %v %s", err, out)
@@ -1196,6 +1203,93 @@ func TestPastedLaptopPathsReachTheSessionAsTheBoxShouldSeeThem(t *testing.T) {
 		t.Fatalf("exit %d; output:\n%s", code, tm.text())
 	}
 }
+
+// An agent's save of a pasted laptop file goes back over that file, the old
+// version to the Trash. Once the laptop's copy changed since, a save goes
+// beside it instead, with a notice. laptop-save puts a box file in
+// ~/Downloads.
+func TestAgentSavesReachTheLaptop(t *testing.T) {
+	t.Cleanup(func() { emptyTrashed(t) })
+	docs := filepath.Join(laptopHome, "docs")
+	if err := os.MkdirAll(docs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notes := filepath.Join(docs, "notes.txt")
+	if err := os.WriteFile(notes, []byte("laptop-v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tm := start(t, "rfakeclaude")
+	tm.drawnAfter(0)
+	mark := len(tm.text())
+	tm.send("\x1b[200~" + notes + "\x1b[201~\r")
+	boxCopy := tm.expectAfter(mark, `got: (\S+/session-pastes/\S+/notes\.txt)`, 15*time.Second)[1]
+
+	tm.send("edit " + boxCopy + " agent-v2\r")
+	waitContent(t, notes, "agent-v2", 10*time.Second)
+
+	if err := os.WriteFile(notes, []byte("edited-on-the-laptop"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mark = len(tm.text())
+	tm.send("edit " + boxCopy + " agent-v3\r")
+	waitContent(t, filepath.Join(docs, "notes (box).txt"), "agent-v3", 10*time.Second)
+	tm.expectAfter(mark, regexp.QuoteMeta("[remote-agents] notes.txt changed on the laptop"), 10*time.Second)
+	if data, err := os.ReadFile(notes); err != nil || string(data) != "edited-on-the-laptop" {
+		t.Fatalf("the laptop's edit became %q, %v", data, err)
+	}
+
+	mark = len(tm.text())
+	tm.send("save " + boxCopy + "\r")
+	saved := tm.expectAfter(mark, `saved to (\S+) on the laptop`, 15*time.Second)[1]
+	if filepath.Base(filepath.Dir(saved)) != "Downloads" || filepath.Base(saved) != "notes.txt" {
+		t.Fatalf("saved to %s", saved)
+	}
+	waitContent(t, saved, "agent-v3", time.Second)
+	waitContent(t, revealLog, saved+"\n", 5*time.Second)
+	mark = len(tm.text())
+	tm.send("save " + boxCopy + " /etc/notes.txt\r")
+	tm.expectAfter(mark, `neither in ~/Downloads nor a file pasted into this session`, 15*time.Second)
+	tm.expectAfter(mark, `save exit=1`, 5*time.Second)
+
+	tm.send("exit 0\r")
+	if code := tm.wait(15 * time.Second); code != 0 {
+		t.Fatalf("exit %d; output:\n%s", code, tm.text())
+	}
+}
+
+// waitContent waits for path to hold content.
+func waitContent(t *testing.T, path, content string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil && string(data) == content {
+			return
+		}
+		if time.Now().After(deadline) {
+			log, _ := os.ReadFile(daemonLog)
+			t.Fatalf("%s holds %q, %v; want %q; daemon log:\n%s", path, data, err, content, log)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// emptyTrashed removes from the Trash what the daemon moved there from the tests' laptop home.
+func emptyTrashed(t *testing.T) {
+	data, err := os.ReadFile(daemonLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range trashedLine.FindAllStringSubmatch(string(data), -1) {
+		if strings.Contains(m[1], filepath.Base(filepath.Dir(laptopHome))) {
+			if err := os.Remove(m[2]); err != nil && !os.IsNotExist(err) {
+				t.Error(err)
+			}
+		}
+	}
+}
+
+var trashedLine = regexp.MustCompile(`moved (.+) to the Trash as (.+)\n`)
 
 // Laptops built before paste-files keep uploading pasted images with paste-store.
 func TestTheBoxStillStoresImagesForOlderLaptops(t *testing.T) {
