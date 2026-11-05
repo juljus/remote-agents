@@ -244,37 +244,41 @@ func TestARequestThatNeverGotItsTurnFailsWithoutRefusing(t *testing.T) {
 	}
 }
 
-// A box that asks again right after the user said no gets no prompt for that
-// session and path for DeclineCoolDown: one touch must not end a string of them.
-func TestADeclinedPathIsNotAskedAboutAgainForAWhile(t *testing.T) {
-	a := &answers{next: []error{fmt.Errorf("Canceled by user.: %w", ErrDeclined)}}
+// Once the user says no, no prompt shows for DeclineCoolDown, whatever its
+// session or path: the box picks both, and one touch must not end a string
+// of fresh prompts. What is approved already needs no prompt and goes on.
+func TestADeclinePausesEveryPromptForAWhile(t *testing.T) {
+	a := &answers{}
 	g := NewGate(a, time.Minute)
 	now := time.Now()
 	g.now = func() time.Time { return now }
+	kept := grant{session: otherSession, use: writeBackUse, path: "/u/.zshrc", terms: "hidden"}
+	if err := g.ask(context.Background(), kept, "kept"); err != nil {
+		t.Fatal(err)
+	}
+	a.next = []error{fmt.Errorf("Canceled by user.: %w", ErrDeclined)}
 	x := grant{session: session, use: saveUse, path: "/u/x"}
 	if err := g.ask(context.Background(), x, "x"); !errors.Is(err, ErrRefused) {
 		t.Fatalf("declined: %v", err)
 	}
-	// The cool-down holds for the path whatever the terms or the use.
-	for _, again := range []grant{x, {session: session, use: saveUse, path: "/u/x", terms: "existing=true; "}, {session: session, use: writeBackUse, path: "/u/x"}} {
+	now = now.Add(DeclineCoolDown - 30*time.Second)
+	for _, again := range []grant{x, {session: session, use: saveUse, path: "/u/x (1)"}, {session: otherSession, use: writeBackUse, path: "/u/y"}} {
 		err := g.ask(context.Background(), again, "again")
-		if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "declined") {
-			t.Fatalf("asked again right after a decline: %v", err)
+		if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "paused for 30s more") {
+			t.Fatalf("%+v asked during the pause: %v", again, err)
 		}
 	}
-	if got := a.asked(); len(got) != 1 {
-		t.Fatalf("asked %q, want only the declined prompt", got)
+	if err := g.ask(context.Background(), kept, "kept"); err != nil {
+		t.Fatalf("an approved write stopped during the pause: %v", err)
 	}
-	for _, other := range []grant{{session: session, use: saveUse, path: "/u/y"}, {session: otherSession, use: saveUse, path: "/u/x"}} {
-		if err := g.ask(context.Background(), other, "other"); err != nil {
-			t.Fatalf("%+v: %v", other, err)
-		}
+	if got := a.asked(); len(got) != 2 {
+		t.Fatalf("asked %q, want only the two before the pause", got)
 	}
-	now = now.Add(DeclineCoolDown)
+	now = now.Add(30 * time.Second)
 	if err := g.ask(context.Background(), x, "later"); err != nil {
-		t.Fatalf("after the cool-down: %v", err)
+		t.Fatalf("after the pause: %v", err)
 	}
-	if got := a.asked(); len(got) != 4 || got[3] != "later" {
+	if got := a.asked(); len(got) != 3 || got[2] != "later" {
 		t.Fatalf("asked %q", got)
 	}
 }
@@ -302,7 +306,8 @@ func TestOnlyADeclineStartsTheCoolDown(t *testing.T) {
 	}
 }
 
-// Requests queued behind the prompt the user declined are refused unasked.
+// Requests queued behind the prompt the user declined are refused unasked,
+// another path's too.
 func TestRequestsQueuedBehindADeclineAreRefused(t *testing.T) {
 	h := held{prompts: make(chan prompt)}
 	g := NewGate(h, time.Minute)
@@ -311,7 +316,9 @@ func TestRequestsQueuedBehindADeclineAreRefused(t *testing.T) {
 	go func() { first <- g.ask(context.Background(), x, "x") }()
 	p := <-h.prompts
 	second := make(chan error, 1)
-	go func() { second <- g.ask(context.Background(), x, "x again") }()
+	go func() {
+		second <- g.ask(context.Background(), grant{session: otherSession, use: saveUse, path: "/u/y"}, "y")
+	}()
 	for g.waitingNow() < 2 {
 		time.Sleep(time.Millisecond)
 	}
@@ -319,7 +326,7 @@ func TestRequestsQueuedBehindADeclineAreRefused(t *testing.T) {
 	<-first
 	select {
 	case err := <-second:
-		if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "declined") {
+		if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "paused") {
 			t.Fatalf("queued request: %v", err)
 		}
 	case p := <-h.prompts:

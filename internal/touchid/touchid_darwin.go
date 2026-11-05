@@ -75,7 +75,9 @@ type Error struct {
 // Cancelled reports whether the user cancelled the sheet, saying no.
 func (e Error) Cancelled() bool { return e.Code == C.LAErrorUserCancel }
 
-func (e Error) Error() string { return fmt.Sprintf("%s (LocalAuthentication error %d)", e.Text, e.Code) }
+func (e Error) Error() string {
+	return fmt.Sprintf("%s (LocalAuthentication error %d)", e.Text, e.Code)
+}
 
 // Ask shows the system's authentication sheet, which says the process "is
 // trying to" reason, and returns nil once the user authenticated. ctx ending
