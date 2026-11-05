@@ -100,6 +100,10 @@ func (l Layout) Attachment(session string) string {
 func (l Layout) PastedDir() string  { return l.state("pasted") }
 func (l Layout) PastedLock() string { return l.state("pasted.lock") }
 
+// SessionPastesDir holds each session's own copies of the laptop files
+// pasted into it, which go back to the laptop when the agent changes them.
+func (l Layout) SessionPastesDir() string { return l.state("session-pastes") }
+
 // The reaper's files: hook reports and the launcher's status per shpool
 // session, records of reaped agent sessions, its log and its config.
 func (l Layout) ActivityDir() string { return l.state("activity") }

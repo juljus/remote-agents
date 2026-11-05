@@ -77,7 +77,7 @@ func runShim(name string, layout boxlayout.Layout, stdio box.IO) int {
 // runCommand returns the process exit code; launch passes the agent's code through.
 func runCommand(layout boxlayout.Layout, stdio box.IO, args []string) (int, error) {
 	if len(args) == 0 {
-		return 1, errors.New("usage: remote-agents-box attach|launch|exec <spec> | ls | link-hold | activity | listening <port> | paste-files | paste-store | account")
+		return 1, errors.New("usage: remote-agents-box attach|launch|exec <spec> | ls | link-hold | activity | listening <port> | paste-files [<session>] | paste-store | send-file | account")
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
@@ -125,10 +125,18 @@ func runCommand(layout boxlayout.Layout, stdio box.IO, args []string) (int, erro
 		}
 		return 0, box.Forget(layout, rest[0], shell, forgetTimeout)
 	case "paste-files":
-		if len(rest) != 0 {
-			return 1, errors.New("usage: remote-agents-box paste-files")
+		switch len(rest) {
+		case 0:
+			return 0, box.PasteFiles(layout, os.Stdin, os.Stdout, time.Now())
+		case 1:
+			return 0, box.PasteFilesInto(layout, rest[0], os.Stdin, os.Stdout, time.Now())
 		}
-		return 0, box.PasteFiles(layout, os.Stdin, os.Stdout, time.Now())
+		return 1, errors.New("usage: remote-agents-box paste-files [<session>]")
+	case "send-file":
+		if len(rest) != 0 {
+			return 1, errors.New("usage: remote-agents-box send-file")
+		}
+		return 0, box.SendFile(os.Stdin, os.Stdout)
 	case "paste-store":
 		if len(rest) != 0 {
 			return 1, errors.New("usage: remote-agents-box paste-store")

@@ -15,6 +15,7 @@ import (
 
 	"remote-agents/internal/boxlayout"
 	"remote-agents/internal/pastefile"
+	"remote-agents/internal/spec"
 )
 
 // pastedTTL is how long a pasted file stays after its last paste.
@@ -29,6 +30,34 @@ const pastedTTL = 7 * 24 * time.Hour
 // removes a file another store just kept; receiving the laptop's upload does
 // not, so a stalled upload holds up no other.
 func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) error {
+	return pasteFiles(l, r, w, now, func(name string) (string, error) { return name, checkFileName(name) }, nil)
+}
+
+// PasteFilesInto is PasteFiles for a laptop that names the session pasted
+// into and each file by its laptop path. The session gets a copy of each file
+// of its own, the path written back: an agent's edit there changes no other
+// session's paste, and goes back to the laptop file.
+func PasteFilesInto(l boxlayout.Layout, session string, r io.Reader, w io.Writer, now time.Time) error {
+	if err := spec.ValidSessionName(session); err != nil {
+		return err
+	}
+	name := func(origin string) (string, error) {
+		if !filepath.IsAbs(origin) || filepath.Clean(origin) != origin {
+			return "", fmt.Errorf("pasted file %q is not an absolute, clean laptop path", origin)
+		}
+		return filepath.Base(origin), checkFileName(filepath.Base(origin))
+	}
+	keep := func(origin, stored, sum string) (string, error) {
+		return keepSessionCopy(l, session, origin, stored, sum)
+	}
+	return pasteFiles(l, r, w, now, name, keep)
+}
+
+// pasteFiles runs a paste-files exchange. name gives the stored name of a
+// file from its name frame; keep, when set, makes the path written for each
+// file from its frame, its stored path and its content hash, holding the
+// pasted lock.
+func pasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time, name func(string) (string, error), keep func(frame, stored, sum string) (string, error)) error {
 	if err := createPastedDir(l); err != nil {
 		return err
 	}
@@ -48,14 +77,23 @@ func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) err
 	}
 	var stored []string
 	for {
-		name, err := frames.Next()
+		frame, err := frames.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return err
 		}
-		path, err := receivePasted(l, frames, string(name), w, now)
+		fileName, err := name(string(frame))
+		if err != nil {
+			return err
+		}
+		path, err := receivePasted(l, frames, fileName, w, now, func(stored, sum string) (string, error) {
+			if keep == nil {
+				return stored, nil
+			}
+			return keep(string(frame), stored, sum)
+		})
 		if err != nil {
 			return err
 		}
@@ -67,6 +105,13 @@ func PasteFiles(l boxlayout.Layout, r io.Reader, w io.Writer, now time.Time) err
 		}
 	}
 	return prunePasted(l, now)
+}
+
+func checkFileName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, '/') {
+		return fmt.Errorf("pasted file name %q is not one file name", name)
+	}
+	return nil
 }
 
 // onTheBox reports whether path names anything on the box, as the agent would find it.
@@ -85,11 +130,8 @@ func onTheBox(path string) (bool, error) {
 }
 
 // receivePasted streams the next file of frames into the pasted dir, reporting
-// progress to w, and keeps it as name.
-func receivePasted(l boxlayout.Layout, frames *pastefile.Reader, name string, w io.Writer, now time.Time) (string, error) {
-	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, '/') {
-		return "", fmt.Errorf("pasted file name %q is not one file name", name)
-	}
+// progress to w, keeps it as name and gives the path keep makes of it.
+func receivePasted(l boxlayout.Layout, frames *pastefile.Reader, name string, w io.Writer, now time.Time, keep func(stored, sum string) (string, error)) (string, error) {
 	tmp, err := os.CreateTemp(l.PastedDir(), ".paste-*")
 	if err != nil {
 		return "", fmt.Errorf("creating pasted file: %w", err)
@@ -101,9 +143,14 @@ func receivePasted(l boxlayout.Layout, frames *pastefile.Reader, name string, w 
 	if err := tmp.Close(); err != nil {
 		return "", errors.Join(fmt.Errorf("writing pasted file: %w", err), os.Remove(tmp.Name()))
 	}
+	hash := hex.EncodeToString(sum.Sum(nil))
 	var path string
-	if err := withFlock(l.PastedLock(), func() (err error) {
-		path, err = keepPasted(l.PastedDir(), tmp.Name(), hex.EncodeToString(sum.Sum(nil)), name, now)
+	if err := withFlock(l.PastedLock(), func() error {
+		stored, err := keepPasted(l.PastedDir(), tmp.Name(), hash, name, now)
+		if err != nil {
+			return err
+		}
+		path, err = keep(stored, hash)
 		return err
 	}); err != nil {
 		return "", errors.Join(err, removeIfThere(tmp.Name()))
@@ -153,9 +200,12 @@ func removeIfThere(path string) error {
 	return nil
 }
 
-// prunePasted removes the pastes made more than pastedTTL ago, in either layout.
+// prunePasted removes the pastes made more than pastedTTL ago, in either
+// layout, and the sessions' copies untouched as long whose content the laptop has.
 func prunePasted(l boxlayout.Layout, now time.Time) error {
-	return withFlock(l.PastedLock(), func() error { return pruneOlderThan(l.PastedDir(), pastedTTL, now, os.RemoveAll) })
+	return withFlock(l.PastedLock(), func() error {
+		return errors.Join(pruneOlderThan(l.PastedDir(), pastedTTL, now, os.RemoveAll), pruneSessionCopies(l, now))
+	})
 }
 
 // createPastedDir creates the pasted dir unless it is there.
