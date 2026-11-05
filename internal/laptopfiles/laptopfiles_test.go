@@ -576,3 +576,26 @@ func TestAWriteBackIntoAMissingDirFailsWithoutRefusing(t *testing.T) {
 		t.Fatalf("err = %v, want a failure that is no refusal", err)
 	}
 }
+
+// A box that puts ~/.zshrc on the clipboard for the user to paste must not
+// get to write it: nothing hidden is written back or saved over.
+func TestNothingHiddenIsWrittenBack(t *testing.T) {
+	f := newFixture(t)
+	hiddenDir := filepath.Join(f.home, ".config", "app")
+	if err := os.MkdirAll(hiddenDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, origin := range []string{filepath.Join(f.home, ".zshrc"), filepath.Join(hiddenDir, "config.toml")} {
+		f.pasted(t, origin, "laptop")
+		if _, err := f.files.WriteBack(session, origin, content("agent")); !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "hidden") {
+			t.Fatalf("write-back of %s: %v", origin, err)
+		}
+		if _, err := f.files.Save(session, "x", origin, content("agent")); !errors.Is(err, ErrRefused) {
+			t.Fatalf("save over %s: %v", origin, err)
+		}
+		if read(t, origin) != "laptop" {
+			t.Fatalf("%s changed", origin)
+		}
+	}
+	onlyFiles(t, f.home, ".config", ".zshrc", "Downloads", "docs")
+}

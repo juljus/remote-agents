@@ -3,7 +3,8 @@
 // file pasted into a session is written back over its laptop origin, or
 // beside it as "name (box).ext" when the laptop's copy changed since; other
 // files the box saves land in ~/Downloads, or over a file pasted into the
-// session. A file replaced goes to the Trash.
+// session. Nothing hidden is written: a dotfile is code. A file replaced goes
+// to the Trash.
 package laptopfiles
 
 import (
@@ -113,6 +114,9 @@ func (f Files) pastedEntry(session, origin string) (entry, error) {
 	if !ok {
 		return entry{}, fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
 	}
+	if hidden(origin) {
+		return entry{}, fmt.Errorf("%w: %s is hidden, and nothing hidden is written from the box; the box keeps its version", ErrRefused, origin)
+	}
 	dir := filepath.Dir(origin)
 	// A dir that cannot be resolved now, such as one on a volume not mounted, may be back later.
 	resolved, err := filepath.EvalSymlinks(dir)
@@ -123,6 +127,18 @@ func (f Files) pastedEntry(session, origin string) (entry, error) {
 		return entry{}, fmt.Errorf("%w: %s now leads to %s", ErrRefused, dir, resolved)
 	}
 	return e, nil
+}
+
+// hidden reports whether a component of path starts with a dot, as dotfiles
+// and the dirs of shell and tool configs do: the box can put such a path on
+// the clipboard for the user to paste, and writing it could run code.
+func hidden(path string) bool {
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		if strings.HasPrefix(part, ".") {
+			return true
+		}
+	}
+	return false
 }
 
 // regularSum hashes path, giving "" when it is gone or not a regular file,

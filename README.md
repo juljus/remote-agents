@@ -89,7 +89,8 @@ Logs: `~/Library/Logs/remote-agents/link.log` (daemon), `sessions.log` (hook rel
   within about a second, and the laptop file's previous version goes to the Trash. If the laptop
   file changed since the paste (or since the last write-back), it stays as it is: the agent's
   version goes beside it as `name (box).ext`, with a notice on the bottom row. Paste the file
-  again to write back over it once more. Copies changed while the link is down go when it is
+  again to write back over it once more. Hidden files (`.zshrc`, anything under a dot dir) are
+  never written back. Copies changed while the link is down go when it is
   back. A copy goes 7 days after its last paste or change, once the laptop has it.
 - `laptop-save <file> [<laptop path>]` on the box saves a file to the laptop: into `~/Downloads`
   under its name, or a free `name (1).ext`, and shows it in Finder (`[link] revealer`). A laptop
@@ -182,9 +183,9 @@ Files: the box writes on the laptop only the files pasted into a session in the 
 their `name (box).ext` beside them, and new files inside `~/Downloads`, with symlinks and `..`
 resolved on the laptop. The wrapper records each paste itself, so only a paste adds a file to that
 list; but every box session runs as the same user, so any of them can write any session's pasted
-files. Pasting a path the box can put on the laptop clipboard counts too: a pasted `~/.zshrc` the box
-lacks becomes writable from the box, as text the box put on the clipboard runs when pasted into a
-laptop shell. A file replaced goes to the Trash; the laptop fetches the content over an ssh of its
+files. Pasting a path the box put on the laptop clipboard counts too, so nothing hidden (a path with
+a component starting with `.`, such as `~/.zshrc` or `~/.config/...`) is ever written: the
+write-back is refused with a notice, and the box keeps the agent's version. A file replaced goes to the Trash; the laptop fetches the content over an ssh of its
 own (`remote-agents-box send-file`), up to 100 MB. A refused write is not retried until the copy
 changes again.
 
