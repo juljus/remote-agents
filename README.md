@@ -30,8 +30,8 @@ You need:
   (`loginctl enable-linger <user>`), with the folder your sessions should work in. For `rcodex`,
   Codex on the box's `/usr/local/bin`.
 
-[box/bootstrap](box/bootstrap/README.md) sets up such a box on a Hetzner dedicated server, reachable
-only over Tailscale.
+[box/bootstrap](box/bootstrap/README.md) sets up such a box on a Hetzner dedicated server, with SSH
+reachable only over Tailscale.
 
 Clone this repo on the Mac and run these from its root.
 
