@@ -9,11 +9,21 @@ import (
 )
 
 // Approver asks the user at the laptop whether the box may do what reason
-// says, a phrase that follows "remote-agents is trying to"; nil means yes.
-// It gives up when ctx ends.
+// says, a phrase that follows "remote-agents is trying to"; nil means yes,
+// and an error wrapping ErrDeclined that the user said no. It gives up when
+// ctx ends.
 type Approver interface {
 	Approve(ctx context.Context, reason string) error
 }
+
+// ErrDeclined marks an Approver's answer as the user's no, rather than a
+// prompt that could not be shown.
+var ErrDeclined = errors.New("declined")
+
+// DeclineCoolDown is how long a session's path, once the user declined it,
+// is refused unasked: a box asking again at once must not get a string of
+// prompts that one touch ends.
+const DeclineCoolDown = 5 * time.Minute
 
 // ApproverFunc is a function that approves.
 type ApproverFunc func(ctx context.Context, reason string) error
@@ -55,12 +65,17 @@ type Gate struct {
 	mu      sync.Mutex
 	granted map[grant]bool
 	waiting int
+	// declined is when the user last declined each session's path.
+	declined map[declinedPath]time.Time
+	now      func() time.Time
 }
+
+type declinedPath struct{ session, path string }
 
 // NewGate asks approver, giving each prompt timeout for the user's answer
 // and each request as long to wait its turn.
 func NewGate(approver Approver, timeout time.Duration) *Gate {
-	return &Gate{approver: approver, timeout: timeout, turn: make(chan struct{}, 1), granted: map[grant]bool{}}
+	return &Gate{approver: approver, timeout: timeout, turn: make(chan struct{}, 1), granted: map[grant]bool{}, declined: map[declinedPath]time.Time{}, now: time.Now}
 }
 
 func (g *Gate) approved(gr grant) bool {
@@ -77,6 +92,10 @@ func (g *Gate) ask(ctx context.Context, gr grant, reason string) error {
 	if g.granted[gr] {
 		g.mu.Unlock()
 		return nil
+	}
+	if err := g.coolingDown(gr); err != nil {
+		g.mu.Unlock()
+		return err
 	}
 	if g.waiting == maxWaiting {
 		g.mu.Unlock()
@@ -99,9 +118,12 @@ func (g *Gate) ask(ctx context.Context, gr grant, reason string) error {
 		return fmt.Errorf("another prompt held the screen for %s; asking about %s later", g.timeout, gr.path)
 	}
 	defer func() { <-g.turn }()
-	// The prompt before this one may have granted it.
-	if g.approved(gr) {
-		return nil
+	// The prompt before this one may have granted it, or the user declined it.
+	g.mu.Lock()
+	granted, cooling := g.granted[gr], g.coolingDown(gr)
+	g.mu.Unlock()
+	if granted || cooling != nil {
+		return cooling
 	}
 	promptCtx, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
@@ -116,6 +138,24 @@ func (g *Gate) ask(ctx context.Context, gr grant, reason string) error {
 		return ctx.Err()
 	case errors.Is(promptCtx.Err(), context.DeadlineExceeded):
 		return fmt.Errorf("%w: nobody approved %s within %s; the box keeps its version", ErrRefused, gr.path, g.timeout)
+	case errors.Is(err, ErrDeclined):
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.declined[declinedPath{gr.session, gr.path}] = g.now()
 	}
 	return fmt.Errorf("%w: %s not approved: %v; the box keeps its version", ErrRefused, gr.path, err)
+}
+
+// coolingDown refuses gr while the user's decline of its session and path is
+// recent. The caller holds g.mu.
+func (g *Gate) coolingDown(gr grant) error {
+	at, ok := g.declined[declinedPath{gr.session, gr.path}]
+	if !ok {
+		return nil
+	}
+	if left := DeclineCoolDown - g.now().Sub(at); left > 0 {
+		return fmt.Errorf("%w: you declined %s for this session %s ago; the box keeps its version, and may offer it again in %s", ErrRefused, gr.path, g.now().Sub(at).Round(time.Second), left.Round(time.Second))
+	}
+	delete(g.declined, declinedPath{gr.session, gr.path})
+	return nil
 }

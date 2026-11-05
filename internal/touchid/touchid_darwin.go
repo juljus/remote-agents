@@ -72,6 +72,9 @@ type Error struct {
 	Text string
 }
 
+// Cancelled reports whether the user cancelled the sheet, saying no.
+func (e Error) Cancelled() bool { return e.Code == C.LAErrorUserCancel }
+
 func (e Error) Error() string { return fmt.Sprintf("%s (LocalAuthentication error %d)", e.Text, e.Code) }
 
 // Ask shows the system's authentication sheet, which says the process "is

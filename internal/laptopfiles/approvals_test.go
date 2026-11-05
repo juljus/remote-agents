@@ -243,3 +243,86 @@ func TestARequestThatNeverGotItsTurnFailsWithoutRefusing(t *testing.T) {
 		t.Fatalf("shown %q while another prompt was up", <-shown)
 	}
 }
+
+// A box that asks again right after the user said no gets no prompt for that
+// session and path for DeclineCoolDown: one touch must not end a string of them.
+func TestADeclinedPathIsNotAskedAboutAgainForAWhile(t *testing.T) {
+	a := &answers{next: []error{fmt.Errorf("Canceled by user.: %w", ErrDeclined)}}
+	g := NewGate(a, time.Minute)
+	now := time.Now()
+	g.now = func() time.Time { return now }
+	x := grant{session: session, use: saveUse, path: "/u/x"}
+	if err := g.ask(context.Background(), x, "x"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("declined: %v", err)
+	}
+	// The cool-down holds for the path whatever the terms or the use.
+	for _, again := range []grant{x, {session: session, use: saveUse, path: "/u/x", terms: "existing=true; "}, {session: session, use: writeBackUse, path: "/u/x"}} {
+		err := g.ask(context.Background(), again, "again")
+		if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "declined") {
+			t.Fatalf("asked again right after a decline: %v", err)
+		}
+	}
+	if got := a.asked(); len(got) != 1 {
+		t.Fatalf("asked %q, want only the declined prompt", got)
+	}
+	for _, other := range []grant{{session: session, use: saveUse, path: "/u/y"}, {session: otherSession, use: saveUse, path: "/u/x"}} {
+		if err := g.ask(context.Background(), other, "other"); err != nil {
+			t.Fatalf("%+v: %v", other, err)
+		}
+	}
+	now = now.Add(DeclineCoolDown)
+	if err := g.ask(context.Background(), x, "later"); err != nil {
+		t.Fatalf("after the cool-down: %v", err)
+	}
+	if got := a.asked(); len(got) != 4 || got[3] != "later" {
+		t.Fatalf("asked %q", got)
+	}
+}
+
+// Only the user saying no starts a cool-down: a prompt nobody answered, or
+// one that could not be shown, asks again at once.
+func TestOnlyADeclineStartsTheCoolDown(t *testing.T) {
+	h := held{prompts: make(chan prompt, 1)}
+	g := NewGate(h, 20*time.Millisecond)
+	x := grant{session: session, use: saveUse, path: "/u/x"}
+	if err := g.ask(context.Background(), x, "x"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("unanswered: %v", err)
+	}
+	<-h.prompts
+	a := &answers{next: []error{errors.New("No identities are enrolled.")}}
+	g.approver = a
+	if err := g.ask(context.Background(), x, "x"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("failed: %v", err)
+	}
+	if err := g.ask(context.Background(), x, "x"); err != nil {
+		t.Fatalf("asked after a failure: %v", err)
+	}
+	if got := a.asked(); len(got) != 2 {
+		t.Fatalf("asked %q, want twice", got)
+	}
+}
+
+// Requests queued behind the prompt the user declined are refused unasked.
+func TestRequestsQueuedBehindADeclineAreRefused(t *testing.T) {
+	h := held{prompts: make(chan prompt)}
+	g := NewGate(h, time.Minute)
+	x := grant{session: session, use: saveUse, path: "/u/x"}
+	first := make(chan error, 1)
+	go func() { first <- g.ask(context.Background(), x, "x") }()
+	p := <-h.prompts
+	second := make(chan error, 1)
+	go func() { second <- g.ask(context.Background(), x, "x again") }()
+	for g.waitingNow() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	p.answer <- fmt.Errorf("Canceled by user.: %w", ErrDeclined)
+	<-first
+	select {
+	case err := <-second:
+		if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "declined") {
+			t.Fatalf("queued request: %v", err)
+		}
+	case p := <-h.prompts:
+		t.Fatalf("shown %q right after a decline", p.reason)
+	}
+}
