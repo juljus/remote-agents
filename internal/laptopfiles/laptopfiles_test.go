@@ -778,8 +778,8 @@ func TestEverySaveAsksOncePerDestinationAndSession(t *testing.T) {
 		"create " + strconv.Quote(filepath.Join(downloads, "x.txt")) + " with a file from box session " + session,
 		"create " + strconv.Quote(filepath.Join(downloads, "x (1).txt")) + " with a file from box session " + session,
 		"create " + strconv.Quote(dest) + " with a file from box session " + session,
-		"replace " + strconv.Quote(dest) + " with a file from box session " + session + " (the old version goes to the Trash)",
-		"replace " + strconv.Quote(dest) + " with a file from box session " + otherSession + " (the old version goes to the Trash)",
+		"replace " + strconv.Quote(dest) + " with a file from box session " + session + " (the old version goes to the Trash, now and on its later saves here)",
+		"replace " + strconv.Quote(dest) + " with a file from box session " + otherSession + " (the old version goes to the Trash, now and on its later saves here)",
 	}
 	if got := f.approver.asked(); !slices.Equal(got, want) {
 		t.Fatalf("asked\n%q\nwant\n%q", got, want)

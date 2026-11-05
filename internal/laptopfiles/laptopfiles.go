@@ -266,7 +266,7 @@ func saveReason(session string, p place, existing bool) string {
 	notes := slices.Clone(p.risks)
 	if existing {
 		action = "replace"
-		notes = append(notes, "the old version goes to the Trash")
+		notes = append(notes, "the old version goes to the Trash, now and on its later saves here")
 	}
 	text := fmt.Sprintf("%s %s with a file from %s", action, strconv.Quote(p.path), from)
 	if len(notes) > 0 {

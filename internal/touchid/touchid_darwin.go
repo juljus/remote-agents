@@ -32,7 +32,7 @@ static bool evaluate(void *c, const char *reason, long *code, char **err) {
 		NSError *e = nil;
 		if (![context canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&e]) {
 			*code = e.code;
-			*err = strdup(e.localizedDescription.UTF8String);
+			*err = strdup(e == nil ? "LocalAuthentication cannot ask, and gave no reason" : e.localizedDescription.UTF8String);
 			return false;
 		}
 		dispatch_semaphore_t done = dispatch_semaphore_create(0);
