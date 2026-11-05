@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 
 	"remote-agents/internal/linkproto"
+	"remote-agents/internal/pastefile"
 )
 
 // Laptop is what the shims need from the laptop link.
@@ -19,6 +22,8 @@ type Laptop interface {
 	ClipboardRead(ctx context.Context, mime string) ([]byte, error)
 	ClipboardWrite(ctx context.Context, mime string, data []byte) error
 	Hook(ctx context.Context, req linkproto.HookRequest) (linkproto.HookResult, error)
+	WriteBack(ctx context.Context, req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error)
+	LaptopSave(ctx context.Context, req linkproto.LaptopSaveRequest) (string, error)
 }
 
 type IO struct {
@@ -35,7 +40,7 @@ const (
 	mimePNG  = "image/png"
 )
 
-var ShimNames = []string{"xclip", "wl-paste", "xdg-open", "cmux"}
+var ShimNames = []string{"xclip", "wl-paste", "xdg-open", "cmux", "laptop-save"}
 
 // RunShim runs the shim called name and returns its exit code.
 func RunShim(ctx context.Context, name string, args []string, stdio IO, laptop Laptop, getenv func(string) string) int {
@@ -49,6 +54,8 @@ func RunShim(ctx context.Context, name string, args []string, stdio IO, laptop L
 		err = xdgOpen(ctx, args, laptop)
 	case "cmux":
 		return cmuxHook(ctx, args, stdio, laptop, getenv(SessionEnvVar))
+	case "laptop-save":
+		err = laptopSave(ctx, args, stdio, laptop, getenv(SessionEnvVar))
 	default:
 		err = fmt.Errorf("unknown shim %q", name)
 	}
@@ -218,4 +225,49 @@ func cmuxHook(ctx context.Context, args []string, stdio IO, laptop Laptop, sessi
 		return 1
 	}
 	return res.ExitCode
+}
+
+const laptopSaveUsage = "usage: laptop-save <file> [<laptop path>]"
+
+const laptopSaveHelp = laptopSaveUsage + `
+Saves a box file on the laptop: in ~/Downloads, revealed in Finder, unless a
+laptop path says where. That may be in ~/Downloads (relative paths are, and a
+dir there takes the file under its name) or a file pasted into this session.
+A file there already keeps its name: the save takes a free one, except over a
+pasted file, whose old version goes to the Trash.`
+
+// laptopSave asks the laptop to fetch a box file; it never sends the content
+// over the link itself.
+func laptopSave(ctx context.Context, args []string, stdio IO, laptop Laptop, session string) error {
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		_, err := fmt.Fprintln(stdio.Stdout, laptopSaveHelp)
+		return err
+	}
+	if len(args) < 1 || len(args) > 2 {
+		return errors.New(laptopSaveUsage)
+	}
+	path, err := filepath.Abs(args[0])
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	switch {
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", args[0])
+	case info.Size() > pastefile.MaxSize:
+		return fmt.Errorf("%s is over %d MB", args[0], pastefile.MaxSize>>20)
+	}
+	req := linkproto.LaptopSaveRequest{Session: session, BoxPath: path}
+	if len(args) == 2 {
+		req.Dest = args[1]
+	}
+	saved, err := laptop.LaptopSave(ctx, req)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop\n", saved)
+	return err
 }

@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,6 +19,9 @@ type fakeLaptop struct {
 	opened    []string
 	written   map[string][]byte
 	hook      func(linkproto.HookRequest) (linkproto.HookResult, error)
+	writeBack func(linkproto.WriteBackRequest) (linkproto.WriteBackResult, error)
+	saves     []linkproto.LaptopSaveRequest
+	saveErr   error
 	down      bool
 }
 
@@ -71,6 +77,24 @@ func (f *fakeLaptop) Hook(_ context.Context, req linkproto.HookRequest) (linkpro
 		return linkproto.HookResult{}, err
 	}
 	return f.hook(req)
+}
+
+func (f *fakeLaptop) WriteBack(_ context.Context, req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
+	if err := f.err(); err != nil {
+		return linkproto.WriteBackResult{}, err
+	}
+	return f.writeBack(req)
+}
+
+func (f *fakeLaptop) LaptopSave(_ context.Context, req linkproto.LaptopSaveRequest) (string, error) {
+	if err := f.err(); err != nil {
+		return "", err
+	}
+	if f.saveErr != nil {
+		return "", f.saveErr
+	}
+	f.saves = append(f.saves, req)
+	return "/Users/me/Downloads/" + filepath.Base(req.BoxPath), nil
 }
 
 type run struct {
@@ -225,5 +249,65 @@ func TestCmuxHookNeedsSession(t *testing.T) {
 	r := runShim(t, "cmux", []string{"hooks", "claude", "stop"}, "{}", &fakeLaptop{}, nil)
 	if r.code == 0 {
 		t.Fatal("expected failure without REMOTE_AGENTS_SESSION")
+	}
+}
+
+func TestLaptopSaveAsksTheLaptopToFetchTheFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.pdf")
+	if err := os.WriteFile(path, []byte("%PDF"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	l := &fakeLaptop{}
+	env := map[string]string{SessionEnvVar: pasteSession}
+	r := runShim(t, "laptop-save", []string{"report.pdf"}, "", l, env)
+	if r.code != 0 || r.stdout != "saved to /Users/me/Downloads/report.pdf on the laptop\n" {
+		t.Fatalf("laptop-save = %+v", r)
+	}
+	r = runShim(t, "laptop-save", []string{path, "~/Downloads/x.pdf"}, "", l, nil)
+	if r.code != 0 {
+		t.Fatalf("laptop-save to a path = %+v", r)
+	}
+	want := []linkproto.LaptopSaveRequest{
+		{Session: pasteSession, BoxPath: path},
+		{BoxPath: path, Dest: "~/Downloads/x.pdf"},
+	}
+	if !slices.Equal(l.saves, want) {
+		t.Fatalf("saves %+v, want %+v", l.saves, want)
+	}
+}
+
+func TestLaptopSaveRefusesWhatCannotGo(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(100<<20 + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	for _, args := range [][]string{{}, {"a", "b", "c"}, {dir}, {big}, {filepath.Join(dir, "missing")}} {
+		l := &fakeLaptop{}
+		if r := runShim(t, "laptop-save", args, "", l, nil); r.code == 0 || r.stderr == "" || len(l.saves) != 0 {
+			t.Errorf("laptop-save %q = %+v, saves %v", args, r, l.saves)
+		}
+	}
+	l := &fakeLaptop{saveErr: errors.New("laptop: refused: /etc/x is neither in ~/Downloads nor a file pasted into this session")}
+	file := filepath.Join(dir, "x")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := runShim(t, "laptop-save", []string{file, "/etc/x"}, "", l, nil); r.code == 0 || !strings.Contains(r.stderr, "refused") {
+		t.Fatalf("refused save = %+v", r)
+	}
+}
+
+func TestLaptopSaveHelpSaysWhatItDoes(t *testing.T) {
+	r := runShim(t, "laptop-save", []string{"--help"}, "", &fakeLaptop{}, nil)
+	if r.code != 0 || !strings.Contains(r.stdout, "~/Downloads") {
+		t.Fatalf("--help = %+v", r)
 	}
 }

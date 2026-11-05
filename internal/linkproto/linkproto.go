@@ -59,6 +59,37 @@ type HookResult struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+// WriteBackRequest asks the laptop to take the box's copy, at BoxPath, of the
+// file pasted into Session from the laptop's Origin.
+type WriteBackRequest struct {
+	Session string `json:"session"`
+	Origin  string `json:"origin"`
+	BoxPath string `json:"box_path"`
+}
+
+// WriteBackResult says where the laptop put the content it fetched and what
+// it holds: Outcome is written (over the origin), unchanged (the origin held
+// it already) or conflict (beside the origin, which changed on the laptop).
+type WriteBackResult struct {
+	Outcome string `json:"outcome"`
+	Path    string `json:"path"`
+	SHA256  string `json:"sha256"`
+}
+
+// LaptopSaveRequest asks the laptop to save the box file at BoxPath to Dest,
+// a path on the laptop or empty for ~/Downloads.
+type LaptopSaveRequest struct {
+	Session string `json:"session,omitempty"`
+	BoxPath string `json:"box_path"`
+	Dest    string `json:"dest,omitempty"`
+}
+
+// NoticeRequest asks the wrapper showing Session to show Text on its bottom row.
+type NoticeRequest struct {
+	Session string `json:"session"`
+	Text    string `json:"text"`
+}
+
 // Request holds exactly one operation.
 type Request struct {
 	OpenURL          *OpenURLRequest        `json:"open_url,omitempty"`
@@ -66,11 +97,14 @@ type Request struct {
 	ClipboardRead    *ClipboardReadRequest  `json:"clipboard_read,omitempty"`
 	ClipboardWrite   *ClipboardWriteRequest `json:"clipboard_write,omitempty"`
 	Hook             *HookRequest           `json:"hook,omitempty"`
+	WriteBack        *WriteBackRequest      `json:"write_back,omitempty"`
+	LaptopSave       *LaptopSaveRequest     `json:"laptop_save,omitempty"`
+	Notice           *NoticeRequest         `json:"notice,omitempty"`
 }
 
 func (r Request) Validate() error {
 	n := 0
-	for _, set := range []bool{r.OpenURL != nil, r.ClipboardTargets != nil, r.ClipboardRead != nil, r.ClipboardWrite != nil, r.Hook != nil} {
+	for _, set := range []bool{r.OpenURL != nil, r.ClipboardTargets != nil, r.ClipboardRead != nil, r.ClipboardWrite != nil, r.Hook != nil, r.WriteBack != nil, r.LaptopSave != nil, r.Notice != nil} {
 		if set {
 			n++
 		}
@@ -90,11 +124,14 @@ const (
 )
 
 type Response struct {
-	Error     string      `json:"error,omitempty"`
-	ErrorCode errorCode   `json:"error_code,omitempty"`
-	Targets   []string    `json:"targets,omitempty"`
-	Data      []byte      `json:"data,omitempty"`
-	Hook      *HookResult `json:"hook,omitempty"`
+	Error     string           `json:"error,omitempty"`
+	ErrorCode errorCode        `json:"error_code,omitempty"`
+	Targets   []string         `json:"targets,omitempty"`
+	Data      []byte           `json:"data,omitempty"`
+	Hook      *HookResult      `json:"hook,omitempty"`
+	WriteBack *WriteBackResult `json:"write_back,omitempty"`
+	// Path is where a laptop save went.
+	Path string `json:"path,omitempty"`
 }
 
 // Err is the failure the response carries, mapped back to the sentinel errors.
@@ -116,6 +153,8 @@ type Handler interface {
 	ClipboardRead(ctx context.Context, mime string) ([]byte, error)
 	ClipboardWrite(ctx context.Context, mime string, data []byte) error
 	Hook(ctx context.Context, req HookRequest) (HookResult, error)
+	WriteBack(ctx context.Context, req WriteBackRequest) (WriteBackResult, error)
+	LaptopSave(ctx context.Context, req LaptopSaveRequest) (string, error)
 }
 
 func dispatch(ctx context.Context, h Handler, req Request) Response {
@@ -134,6 +173,14 @@ func dispatch(ctx context.Context, h Handler, req Request) Response {
 		var res HookResult
 		res, err = h.Hook(ctx, *req.Hook)
 		resp.Hook = &res
+	case req.WriteBack != nil:
+		var res WriteBackResult
+		res, err = h.WriteBack(ctx, *req.WriteBack)
+		resp.WriteBack = &res
+	case req.LaptopSave != nil:
+		resp.Path, err = h.LaptopSave(ctx, *req.LaptopSave)
+	case req.Notice != nil:
+		err = errors.New("notices are for session wrappers, not the link daemon")
 	}
 	if err != nil {
 		code := codeFailed
@@ -208,4 +255,26 @@ func (c Client) Hook(ctx context.Context, req HookRequest) (HookResult, error) {
 		return HookResult{}, errors.New("laptop: hook response without result")
 	}
 	return *resp.Hook, nil
+}
+
+func (c Client) WriteBack(ctx context.Context, req WriteBackRequest) (WriteBackResult, error) {
+	resp, err := c.call(ctx, Request{WriteBack: &req})
+	if err != nil {
+		return WriteBackResult{}, err
+	}
+	if resp.WriteBack == nil {
+		return WriteBackResult{}, errors.New("laptop: write-back response without result")
+	}
+	return *resp.WriteBack, nil
+}
+
+func (c Client) LaptopSave(ctx context.Context, req LaptopSaveRequest) (string, error) {
+	resp, err := c.call(ctx, Request{LaptopSave: &req})
+	if err != nil {
+		return "", err
+	}
+	if resp.Path == "" {
+		return "", errors.New("laptop: save response without a path")
+	}
+	return resp.Path, nil
 }

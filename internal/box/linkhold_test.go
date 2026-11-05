@@ -36,6 +36,12 @@ func (openRecorder) ClipboardWrite(context.Context, string, []byte) error { retu
 func (openRecorder) Hook(context.Context, linkproto.HookRequest) (linkproto.HookResult, error) {
 	return linkproto.HookResult{}, nil
 }
+func (openRecorder) WriteBack(context.Context, linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
+	return linkproto.WriteBackResult{}, errors.New("no write-backs here")
+}
+func (openRecorder) LaptopSave(context.Context, linkproto.LaptopSaveRequest) (string, error) {
+	return "", errors.New("no saves here")
+}
 
 type hold struct {
 	toBox  *io.PipeWriter

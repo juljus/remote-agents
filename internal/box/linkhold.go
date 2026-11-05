@@ -16,8 +16,10 @@ import (
 )
 
 // LinkHold serves the box-wide laptop socket for as long as this link
-// connection lives, relaying shim requests over stdin/stdout. A newer link
-// takes the socket over; an older one never removes a newer one's socket.
+// connection lives, relaying shim requests over stdin/stdout, and meanwhile
+// sends the sessions' changed copies of pasted files back to the laptop. A
+// newer link takes the socket over; an older one never removes a newer one's
+// socket.
 func LinkHold(ctx context.Context, l boxlayout.Layout, stdin io.Reader, stdout io.Writer, heartbeatTimeout time.Duration, logf func(error)) (err error) {
 	path := l.LaptopSocket()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -28,6 +30,17 @@ func LinkHold(ctx context.Context, l boxlayout.Layout, stdin io.Reader, stdout i
 		return err
 	}
 	defer func() { err = errors.Join(err, release(path, owned)) }()
+	watchCtx, stopWatching := context.WithCancel(ctx)
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		laptop := linkproto.Client{Socket: path, DialTimeout: 3 * time.Second}
+		watchSessionCopies(watchCtx, l, laptop, WriteBackPoll, WriteBackRetry, func(format string, args ...any) { logf(fmt.Errorf(format, args...)) })
+	}()
+	defer func() {
+		stopWatching()
+		<-watched
+	}()
 	return linkproto.Relay(ctx, ln, stdin, stdout, heartbeatTimeout, logf)
 }
 

@@ -80,7 +80,7 @@ fi
 
 changed="$(install_file "$STAGE/remote-agents-box" "$SHARE/bin/remote-agents-box" 0755)"
 [[ -z "$changed" ]] || echo "installed remote-agents-box"
-for shim in xclip wl-paste xdg-open; do
+for shim in xclip wl-paste xdg-open laptop-save; do
   ln -sfn ../bin/remote-agents-box "$SHARE/shims/$shim"
 done
 ln -sfn ../bin/remote-agents-box "$SHARE/hookbin/cmux"

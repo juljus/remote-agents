@@ -55,6 +55,14 @@ func (f *fakeHandler) Hook(ctx context.Context, req HookRequest) (HookResult, er
 	return HookResult{Stdout: append([]byte("out:"), req.Stdin...), Stderr: []byte("err"), ExitCode: 2}, nil
 }
 
+func (f *fakeHandler) WriteBack(context.Context, WriteBackRequest) (WriteBackResult, error) {
+	return WriteBackResult{}, errors.New("no write-backs here")
+}
+
+func (f *fakeHandler) LaptopSave(context.Context, LaptopSaveRequest) (string, error) {
+	return "", errors.New("no saves here")
+}
+
 func TestDialFailureIsLinkDown(t *testing.T) {
 	c := Client{Socket: "/nonexistent/remote-agents.sock", DialTimeout: time.Second}
 	err := c.OpenURL(context.Background(), "https://example.com")
