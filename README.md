@@ -7,8 +7,9 @@ session. Your local `claude` and `codex` are not changed.
 
 ## What it does
 
-- Sessions run on the box in [shpool](https://github.com/shell-pool/shpool). When the laptop sleeps, changes network or loses the
-  connection, the agent keeps running, and `rclaude` reconnects to it when the link is back.
+- Sessions run on the box in [shpool](https://github.com/shell-pool/shpool). When the laptop
+  sleeps, changes network or loses the connection, the agent keeps running, and `rclaude`
+  reconnects to it when the link is back.
 - Box sessions use the Mac's clipboard (text and images) and open links in the Mac's browser.
   Logins that call back to `localhost`, such as Claude's `/login` or `rcodex login`, complete
   through the link.
@@ -68,7 +69,9 @@ the `args` lines to get the prompts back.
 
 - When the agent exits, `rclaude` prints the command that resumes the session, once it knows the
   session's id: after `--resume`, or inside cmux.
-- A detached session that has been idle for 5 minutes is ended; it resumes when you reconnect.
+- A detached session that has been idle for 5 minutes is ended. A still-running `rclaude`
+  resumes it when it reconnects; after closing that terminal, use `rclaude --resume <id>` or
+  `remote-agents attach <session>`.
 - While the connection is down, Ctrl+C detaches; the session keeps running on the box.
 - On the box, `laptop-save <file>` puts a file in your Mac's `~/Downloads`.
 

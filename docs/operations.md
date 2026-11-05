@@ -11,11 +11,11 @@ the [README](../README.md) leaves out. [Accounts](accounts.md) and the
   `com.remote-agents.link`, runs `remote-agents link`: the link daemon that holds the SSH link
   and serves the box's clipboard, browser, login, file and cmux requests.
 - **Box:** `remote-agents-box`, the session launcher and the busybox-style shims (`xclip`,
-  `wl-paste`, `xdg-open`, `laptop-save`, and `cmux` for hooks), plus shpool. Sessions live in [shpool](https://github.com/shell-pool/shpool)
-  on the box, so a closed lid, a network change or a dropped SSH link does not stop them: the
-  laptop reconnects on its own. While the link is up, the link daemon gives box sessions the
-  laptop's clipboard and browser, carries OAuth logins started on the box back to it, and
-  forwards status events to cmux if you use it.
+  `wl-paste`, `xdg-open`, `laptop-save`, and `cmux` for hooks), plus shpool. Sessions live in
+  [shpool](https://github.com/shell-pool/shpool) on the box, so a closed lid, a network change or
+  a dropped SSH link does not stop them: the laptop reconnects on its own. While the link is up,
+  the link daemon gives box sessions the laptop's clipboard and browser, carries OAuth logins
+  started on the box back to it, and forwards status events to cmux if you use it.
 
 ## Requirements
 
@@ -166,7 +166,8 @@ themselves. When its wrapper reconnects, or on `rclaude --resume <id>` or
 command that resumes each. A session whose agent session id is not known yet is never reaped.
 
 Override the policy in `~/.config/<name>/reaper.toml` with Go durations: `idle_after`,
-`working_cap`, `poll` (default 15s, at most `idle_after`). Each reap is logged to `~/.local/state/<name>/reaper.log`.
+`working_cap`, `poll` (default 15s, at most `idle_after`). Each reap is logged to
+`~/.local/state/<name>/reaper.log`.
 
 ### Lost sessions
 
@@ -201,9 +202,10 @@ before its first turn has no session yet and starts again.
 ### Clipboard and browser
 
 Inside a session, `xclip -selection clipboard` reads (`-o`) and sets the laptop clipboard, and
-`wl-paste` reads it, images included (by MIME type, `-t`); other X selections are refused. And `xdg-open <url>` opens the URL in the laptop browser
-through the configured opener. A login whose URL calls back to `localhost` gets its callback
-forwarded to the box; the [security model](security.md#logins) has the rules.
+`wl-paste` reads it, images included (by MIME type, `-t`); other X selections are refused.
+`xdg-open <url>` opens the URL in the laptop browser through the configured opener. A login whose
+URL calls back to `localhost` gets its callback forwarded to the box; the [security
+model](security.md#logins) has the rules.
 
 ### Pasted files and write-back
 
