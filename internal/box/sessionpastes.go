@@ -70,6 +70,9 @@ func originKey(origin string) string {
 // reached the laptop, where the conflict rule keeps both. The caller holds
 // the pasted lock.
 func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (string, error) {
+	if err := checkSaveSent(l, session, origin); err != nil {
+		return "", err
+	}
 	dir := filepath.Join(l.SessionPastesDir(), session, originKey(origin))
 	path := filepath.Join(dir, filepath.Base(origin))
 	var rec copyRecord
@@ -113,6 +116,27 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 		return "", err
 	}
 	return path, nil
+}
+
+// checkSaveSent fails while the box file session saved to origin holds a
+// change the laptop lacks yet, which a paste of origin would cut off. A
+// version the laptop refused will not go, so it holds up no paste.
+func checkSaveSent(l boxlayout.Layout, session, origin string) error {
+	var rec copyRecord
+	found, err := jsonfile.Read(filepath.Join(l.SessionSavesDir(), session, originKey(origin)+".json"), &rec)
+	if err != nil || !found {
+		return err
+	}
+	current, err := fileSum(rec.Path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	case current != rec.Synced && current != rec.Refused:
+		return fmt.Errorf("the agent's change to %s, saved to %s, has not reached the laptop yet; paste it again once it has", rec.Path, filepath.Base(origin))
+	}
+	return nil
 }
 
 // linkSaved records that the laptop file origin follows the box file path

@@ -282,3 +282,29 @@ func TestPrunePastedLeavesTheBoxFileOfAnOldSave(t *testing.T) {
 		t.Fatalf("the box file holds %q, %v", data, err)
 	}
 }
+
+// A paste of a laptop file waits while its saved box file holds a change the
+// laptop lacks yet, which the paste would cut off; one the laptop refused
+// will not go, so it holds up no paste.
+func TestAPasteWaitsForTheSavedBoxFilesUnsentChange(t *testing.T) {
+	l := testLayout(t)
+	path := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(path, []byte("v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkSaved(l, pasteSession, "/l/report.md", path, sha("v1")); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := PasteFilesInto(l, pasteSession, exchange(t, []string{"/l/report.md"}, [2]string{"/l/report.md", "v1"}), &out, time.Now()); err == nil || !strings.Contains(err.Error(), "has not reached the laptop yet") {
+		t.Fatalf("paste over an unsent change: %v", err)
+	}
+	copies, err := sessionCopies(l)
+	if err != nil || len(copies) != 1 {
+		t.Fatalf("copies %+v, %v", copies, err)
+	}
+	if err := markRefused(l, copies[0], sha("v2")); err != nil {
+		t.Fatal(err)
+	}
+	pasteInto(t, l, pasteSession, [2]string{"/l/report.md", "v1"})
+}
