@@ -9,6 +9,11 @@ The box account is trusted with the laptop: anyone who can act as the box user c
 the laptop clipboard, open http(s) URLs in the laptop browser, send cmux status events and write the
 files below while the link is up. Use a box account nobody else uses.
 
+remote-agents does not isolate the box on the network. A box on your own tailnet identity can
+reach the laptop's open ports and send it Taildrop files, past the Touch ID gate. Tagging the box
+(such as `tag:agents`) with a policy that allows only laptop → box closes that; remote-agents
+never needs a connection from the box to the laptop.
+
 ## Files
 
 ### What the box writes on its own
