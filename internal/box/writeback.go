@@ -28,6 +28,11 @@ const maxRetryDoublings = 5
 // on the laptop, which a risky place needs, then a fetch of up to 100 MB.
 const writeBackTimeout = linkproto.MaxApprovalWait + 10*time.Minute
 
+// unlinkPolls is how many polls in a row a box file a saved laptop file
+// follows must be missing, about 30 s, before the laptop file stops following
+// it; one deleted and built again by then is the same file.
+const unlinkPolls = 75
+
 // maxWriteBacks bounds the write-backs in flight at once. One may wait for
 // the user to approve it, which the others need not wait for.
 const maxWriteBacks = 4
@@ -158,13 +163,15 @@ func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, 
 				w.failed(c.Path, err, retry, logf)
 				continue
 			}
-			// A box file gone for a whole poll, not just replaced, is gone for good.
-			if c.Linked && w.absent > 1 {
-				if err := unlink(l, c); err != nil {
+			if c.Linked && w.absent >= unlinkPolls {
+				removed, err := unlink(l, c)
+				if err != nil {
 					w.failed(c.Path, err, retry, logf)
 					continue
 				}
-				logf("write-back: %s is gone, so %s no longer follows it", c.Path, c.Origin)
+				if removed {
+					logf("write-back: %s is gone, so %s no longer follows it", c.Path, c.Origin)
+				}
 				continue
 			}
 			if !due {

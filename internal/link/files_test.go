@@ -47,6 +47,8 @@ type filesFixture struct {
 	revealed *recordRevealer
 	// declined, when set, is the user's answer to every prompt; else they approve.
 	declined error
+	// asked counts the prompts.
+	asked int
 }
 
 func newFilesFixture(t *testing.T, box fakeFetcher) *filesFixture {
@@ -66,7 +68,7 @@ func newFilesFixture(t *testing.T, box fakeFetcher) *filesFixture {
 		Records: laptopfiles.Records{Dir: filepath.Join(root, "pasted")},
 		Home:    f.home,
 		Trash:   func(p string) error { return os.Rename(p, filepath.Join(root, "trash", filepath.Base(p))) },
-		Gate:    laptopfiles.NewGate(laptopfiles.ApproverFunc(func(context.Context, string) error { return f.declined }), time.Minute),
+		Gate:    laptopfiles.NewGate(laptopfiles.ApproverFunc(func(context.Context, string) error { f.asked++; return f.declined }), time.Minute),
 	}
 	h.Fetcher = box
 	h.Revealer = f.revealed
@@ -162,7 +164,7 @@ func TestLaptopSaveSavesIntoDownloadsAndRevealsIt(t *testing.T) {
 	f := newFilesFixture(t, fakeFetcher{"/box/out/report.pdf": "%PDF"})
 	saved, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{Session: filesSession, BoxPath: "/box/out/report.pdf"})
 	want := filepath.Join(f.home, "Downloads", "report.pdf")
-	if err != nil || saved != (linkproto.LaptopSaveResult{Path: want, SHA256: sha("%PDF"), Linked: true}) {
+	if err != nil || saved != (linkproto.LaptopSaveResult{Path: want, SHA256: sha("%PDF"), Following: want}) {
 		t.Fatalf("saved %+v, %v", saved, err)
 	}
 	if !slices.Equal(f.revealed.paths, []string{want}) {
@@ -192,8 +194,19 @@ func TestASavedFileTakesItsBoxFilesChanges(t *testing.T) {
 	}
 	box["/box/out/report.md"] = "v2"
 	res, err := f.h.WriteBack(context.Background(), linkproto.WriteBackRequest{Session: filesSession, Origin: saved.Path, BoxPath: "/box/out/report.md"})
-	if err != nil || res != (linkproto.WriteBackResult{Outcome: "written", Path: saved.Path, SHA256: sha("v2")}) {
-		t.Fatalf("write-back %+v, %v", res, err)
+	if err != nil || res != (linkproto.WriteBackResult{Outcome: "written", Path: saved.Path, SHA256: sha("v2")}) || f.asked != 1 {
+		t.Fatalf("write-back %+v, %v; asked %d", res, err, f.asked)
+	}
+	notices := f.wrapper(t)
+	if err := os.WriteFile(saved.Path, []byte("the user's"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	box["/box/out/report.md"] = "v3"
+	if _, err := f.h.WriteBack(context.Background(), linkproto.WriteBackRequest{Session: filesSession, Origin: saved.Path, BoxPath: "/box/out/report.md"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := <-notices; n != "report.md changed on the laptop since the save; the box's version is in report (box).md" {
+		t.Fatalf("notice %q", n)
 	}
 }
 

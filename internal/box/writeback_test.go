@@ -385,15 +385,16 @@ func TestAListingThatFailsMeanwhileSendsNoCopyTwice(t *testing.T) {
 }
 
 // A laptop file a save made follows its box file, wherever that is: each
-// change goes, through a rename too, until the box file is gone.
+// change goes, through a rename or a rebuild too, until the box file is gone
+// for unlinkPolls.
 func TestALaptopSavedFileFollowsItsBoxFileUntilItIsGone(t *testing.T) {
 	l := testLayout(t)
 	path := filepath.Join(t.TempDir(), "report.md")
 	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := linkSaved(l, pasteSession, "/l/Downloads/report.md", path, sha("v1")); err != nil {
-		t.Fatal(err)
+	if linked, err := linkSaved(l, pasteSession, "/l/Downloads/report.md", path, sha("v1")); err != nil || !linked {
+		t.Fatalf("linked %v, %v", linked, err)
 	}
 	seen := make(chan linkproto.WriteBackRequest, 10)
 	watchLayout(t, l, laptopTaking(seen))
@@ -408,6 +409,16 @@ func TestALaptopSavedFileFollowsItsBoxFileUntilItIsGone(t *testing.T) {
 		}
 		expectWriteBack(t, seen, want)
 	}
+
+	// Deleted and built again within the grace, it is the same file.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("rebuilt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectWriteBack(t, seen, want)
 
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)

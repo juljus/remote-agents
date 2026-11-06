@@ -23,9 +23,10 @@ type fakeLaptop struct {
 	writeBack func(linkproto.WriteBackRequest) (linkproto.WriteBackResult, error)
 	saves     []linkproto.LaptopSaveRequest
 	saveErr   error
-	// pasted makes every save one over a file pasted into the session.
-	pasted bool
-	down   bool
+	// pasted makes every save one over a file pasted into the session, and
+	// conflict one beside a file the user changed since the last save.
+	pasted, conflict bool
+	down             bool
 }
 
 func (f *fakeLaptop) err() error {
@@ -103,7 +104,14 @@ func (f *fakeLaptop) LaptopSave(_ context.Context, req linkproto.LaptopSaveReque
 	if err != nil {
 		return linkproto.LaptopSaveResult{}, err
 	}
-	return linkproto.LaptopSaveResult{Path: "/Users/me/Downloads/" + filepath.Base(req.BoxPath), SHA256: sum, Linked: req.Session != "" && !f.pasted}, nil
+	res := linkproto.LaptopSaveResult{Path: "/Users/me/Downloads/" + filepath.Base(req.BoxPath), SHA256: sum}
+	if req.Session != "" && !f.pasted {
+		res.Following = res.Path
+	}
+	if f.conflict {
+		res.Path = strings.TrimSuffix(res.Path, filepath.Ext(res.Path)) + " (box)" + filepath.Ext(res.Path)
+	}
+	return res, nil
 }
 
 type run struct {
@@ -314,6 +322,23 @@ func TestLaptopSaveLeavesTheLaptopFileFollowingTheBoxFile(t *testing.T) {
 	}
 }
 
+// A save beside a laptop file the user changed since says so, and follows the file.
+func TestLaptopSaveBesideAChangedFileSaysSo(t *testing.T) {
+	l := testLayout(t)
+	path := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(path, []byte("v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := runShimIn(t, l, "laptop-save", []string{path}, "", &fakeLaptop{conflict: true}, map[string]string{SessionEnvVar: pasteSession})
+	want := "the user changed /Users/me/Downloads/report.md on the laptop since the last save, so this one went beside it to /Users/me/Downloads/report (box).md; later changes to " + path + " follow on their own\n"
+	if r.code != 0 || r.stdout != want {
+		t.Fatalf("laptop-save = %+v", r)
+	}
+	if copies, err := sessionCopies(l); err != nil || len(copies) != 1 || copies[0].Origin != "/Users/me/Downloads/report.md" {
+		t.Fatalf("copies %+v, %v", copies, err)
+	}
+}
+
 // A save over a file pasted into the session leaves its pasted copy the one
 // that goes back, and the agent hears so.
 func TestLaptopSaveOverAPastedFileSaysWhichCopyGoesBack(t *testing.T) {
@@ -323,7 +348,7 @@ func TestLaptopSaveOverAPastedFileSaysWhichCopyGoesBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := runShimIn(t, l, "laptop-save", []string{path}, "", &fakeLaptop{pasted: true}, map[string]string{SessionEnvVar: pasteSession})
-	if r.code != 0 || !strings.Contains(r.stdout, "it was pasted into this session") {
+	if r.code != 0 || !strings.Contains(r.stdout, "it is pasted into this session") {
 		t.Fatalf("laptop-save = %+v", r)
 	}
 	if copies, err := sessionCopies(l); err != nil || len(copies) != 0 {

@@ -20,8 +20,9 @@ import (
 // session-pastes/<session>/<key>/<name>, its record beside its dir as
 // <key>.json; key comes from the laptop path, so pasting a file again into
 // the session replaces its copy. A laptop file a laptop-save of the session
-// made has a record there too, of the box file it follows, wherever that is;
-// a paste and a save of one laptop file take each other's place.
+// made has a record there too, of the box file it follows, wherever that is.
+// A paste of it takes the place of that record, but a save over a pasted
+// file leaves it pasted.
 
 // copyRecord is what the box keeps about a session's copy: its laptop path,
 // the hash of the content the laptop last pasted or took, and that of a
@@ -119,18 +120,28 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 	return path, nil
 }
 
-// linkSaved records that the laptop file origin, holding content of hash sum,
-// follows the box file path since session saved it there, for the link
-// holder to send it path's later changes. It takes the place of a paste of
-// origin into session.
-func linkSaved(l boxlayout.Layout, session, origin, path, sum string) error {
+// linkSaved records that the laptop file origin follows the box file path
+// since session saved it there, the laptop then holding content of hash sum,
+// for the link holder to send it path's later changes. It reports false when
+// origin is pasted into session, as a paste since the save made it: its copy
+// is what goes back.
+func linkSaved(l boxlayout.Layout, session, origin, path, sum string) (bool, error) {
 	dir := filepath.Join(l.SessionPastesDir(), session)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating the session's paste dir: %w", err)
+		return false, fmt.Errorf("creating the session's paste dir: %w", err)
 	}
-	return withFlock(l.PastedLock(), func() error {
-		return jsonfile.Write(filepath.Join(dir, originKey(origin)+".json"), copyRecord{Origin: origin, Synced: sum, Path: path})
+	record := filepath.Join(dir, originKey(origin)+".json")
+	linked := false
+	err := withFlock(l.PastedLock(), func() error {
+		var rec copyRecord
+		found, err := jsonfile.Read(record, &rec)
+		if err != nil || found && rec.Path == "" {
+			return err
+		}
+		linked = true
+		return jsonfile.Write(record, copyRecord{Origin: origin, Synced: sum, Path: path})
 	})
+	return linked, err
 }
 
 // changedSince reports whether path holds content other than of hash synced;
@@ -230,9 +241,15 @@ func markRefused(l boxlayout.Layout, c pastedCopy, sum string) error {
 }
 
 // unlink drops the record of c, a box file that is gone, so that the laptop
-// file following it no longer does.
-func unlink(l boxlayout.Layout, c pastedCopy) error {
-	return whileUnchanged(l, c, func(copyRecord) error { return removeIfThere(c.record) })
+// file following it no longer does. It reports false when the record changed
+// since c was read, and stays.
+func unlink(l boxlayout.Layout, c pastedCopy) (bool, error) {
+	removed := false
+	err := whileUnchanged(l, c, func(copyRecord) error {
+		removed = true
+		return removeIfThere(c.record)
+	})
+	return removed, err
 }
 
 // updateCopy changes c's record with fn.
@@ -308,7 +325,7 @@ func staleCopy(c pastedCopy, now time.Time) (bool, error) {
 	if now.Sub(record.ModTime()) <= pastedTTL {
 		return false, nil
 	}
-	file, err := os.Lstat(c.Path)
+	file, err := os.Stat(c.Path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return true, nil
 	}

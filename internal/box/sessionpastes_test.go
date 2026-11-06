@@ -233,8 +233,8 @@ func TestAPasteOfASavedFileTakesThePlaceOfItsBoxFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("v2"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := linkSaved(l, pasteSession, "/l/report.md", path, sha("v1")); err != nil {
-		t.Fatal(err)
+	if linked, err := linkSaved(l, pasteSession, "/l/report.md", path, sha("v1")); err != nil || !linked {
+		t.Fatalf("linked %v, %v", linked, err)
 	}
 	var out bytes.Buffer
 	if err := PasteFilesInto(l, pasteSession, exchange(t, []string{"/l/report.md"}, [2]string{"/l/report.md", "v1"}), &out, time.Now()); err == nil || !strings.Contains(err.Error(), "has not reached the laptop yet") {
@@ -265,8 +265,8 @@ func TestPrunePastedLeavesTheBoxFileOfAnOldSave(t *testing.T) {
 	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := linkSaved(l, pasteSession, "/l/report.md", path, sha("v1")); err != nil {
-		t.Fatal(err)
+	if linked, err := linkSaved(l, pasteSession, "/l/report.md", path, sha("v1")); err != nil || !linked {
+		t.Fatalf("linked %v, %v", linked, err)
 	}
 	weekAgo := time.Now().Add(-8 * 24 * time.Hour)
 	record := filepath.Join(l.SessionPastesDir(), pasteSession, originKey("/l/report.md")+".json")
@@ -283,5 +283,19 @@ func TestPrunePastedLeavesTheBoxFileOfAnOldSave(t *testing.T) {
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "v1" {
 		t.Fatalf("the box file holds %q, %v", data, err)
+	}
+}
+
+// A save over a file pasted into the session, as one pasted since the save,
+// leaves its pasted copy the one that goes back.
+func TestASaveOverAPastedFileLeavesItsCopyGoingBack(t *testing.T) {
+	l := testLayout(t)
+	pasted := pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	if linked, err := linkSaved(l, pasteSession, "/l/notes.md", "/box/notes.md", sha("agent")); err != nil || linked {
+		t.Fatalf("linked %v, %v", linked, err)
+	}
+	copies, err := sessionCopies(l)
+	if err != nil || len(copies) != 1 || copies[0].Linked || copies[0].Path != pasted[0] || copies[0].Synced != sha("laptop") {
+		t.Fatalf("copies %+v, %v", copies, err)
 	}
 }

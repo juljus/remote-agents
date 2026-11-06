@@ -38,18 +38,28 @@ func (h *Handler) fetch(ctx context.Context, boxPath string) laptopfiles.Fetch {
 // it, onto the laptop as laptopfiles decides; the session's screen hears of
 // a conflict or a failure.
 func (h *Handler) WriteBack(ctx context.Context, req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
-	name := filepath.Base(req.Origin)
 	res, err := h.Files.WriteBack(ctx, req.Session, req.Origin, req.BoxPath, h.fetch(ctx, req.BoxPath))
 	if err != nil {
-		h.notify(ctx, req.Session, fmt.Sprintf("%s not written back: %v", name, err))
+		h.notify(ctx, req.Session, fmt.Sprintf("%s not written back: %v", filepath.Base(req.Origin), err))
 		return linkproto.WriteBackResult{}, refusal(err)
 	}
 	h.Logf("%s: write-back of %s: %s, %s", req.Session, req.BoxPath, res.Outcome, res.Path)
-	if res.Outcome == laptopfiles.Conflict {
-		h.notify(ctx, req.Session, fmt.Sprintf("%s changed on the laptop since the paste; the box's version is in %s", name, filepath.Base(res.Path)))
-	}
+	h.reportConflict(ctx, req.Session, req.Origin, res)
 	h.reportLeftover(ctx, req.Session, res)
 	return linkproto.WriteBackResult{Outcome: string(res.Outcome), Path: res.Path, SHA256: res.Sum}, nil
+}
+
+// reportConflict tells the session when the write of the laptop file at
+// origin went beside it, as the user changed it since the box last wrote it.
+func (h *Handler) reportConflict(ctx context.Context, session, origin string, res laptopfiles.Result) {
+	if res.Outcome != laptopfiles.Conflict {
+		return
+	}
+	since := "the paste"
+	if res.Following != "" {
+		since = "the save"
+	}
+	h.notify(ctx, session, fmt.Sprintf("%s changed on the laptop since %s; the box's version is in %s", filepath.Base(origin), since, filepath.Base(res.Path)))
 }
 
 // reportLeftover tells the session what a write left behind on the laptop, if anything.
@@ -72,12 +82,13 @@ func (h *Handler) LaptopSave(ctx context.Context, req linkproto.LaptopSaveReques
 		return linkproto.LaptopSaveResult{}, refusal(err)
 	}
 	h.Logf("saved %s from the box to %s", req.BoxPath, res.Path)
+	h.reportConflict(ctx, req.Session, res.Following, res)
 	h.reportLeftover(ctx, req.Session, res)
 	// The file is saved; showing it is a courtesy whose failure the box need not hear of.
 	if err := h.Revealer.Reveal(ctx, res.Path); err != nil {
 		h.Logf("showing %s in Finder: %v", res.Path, err)
 	}
-	return linkproto.LaptopSaveResult{Path: res.Path, SHA256: res.Sum, Linked: res.Linked}, nil
+	return linkproto.LaptopSaveResult{Path: res.Path, SHA256: res.Sum, Following: res.Following}, nil
 }
 
 // refusal marks a laptopfiles refusal as one for the box, which then stops asking.

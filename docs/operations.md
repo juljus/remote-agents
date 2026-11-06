@@ -236,11 +236,12 @@ so, its old version going to the Trash.
 After a save from a session, the laptop file follows the box file for as long as a pasted copy
 would: each later change goes over it within about a second, without asking again, under the
 same conflict rule as a write-back (`name (box).ext` beside a file you changed since). Saving the
-same box file again goes to the same laptop file, in a dir too, without asking. Another box file
-saved to that laptop file asks as any save does, and takes its place. Once the box file is gone
-for a poll, the laptop file stops following it and stays as it is. A file pasted into the
-session stays pasted when saved over: its pasted copy is what goes back. After the link daemon
-restarts, the next change asks once more.
+same box file again is one more such change, to the same laptop file, in a dir too. Another box
+file saved to that laptop file is a save of its own, which asks unless that place's save was
+approved already, and takes its place. Once the box file has been gone for about 30 seconds, the
+laptop file stops following it and stays as it is. A file pasted into the session stays pasted
+when saved over: its pasted copy is what goes back. After the link daemon restarts, the next
+change asks once more, naming the box file.
 
 Agents learn all this from a note the box adds to their system prompt (Claude) or developer
 instructions (Codex, after those of its `config.toml`). It says first that they run on the box,

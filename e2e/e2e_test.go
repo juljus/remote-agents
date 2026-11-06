@@ -1290,7 +1290,7 @@ func TestAgentSavesReachTheLaptop(t *testing.T) {
 	}
 	waitContent(t, saved, "agent-v3", time.Second)
 	waitContent(t, revealLog, saved+"\n", 5*time.Second)
-	want = append(want, "create "+strconv.Quote(saved)+" with a file from box session "+session+" (later changes to the box file follow)")
+	want = append(want, "create "+strconv.Quote(saved)+" with a file from box session "+session+" (later changes to "+strconv.Quote(boxCopy)+" on the box follow)")
 	if got := approvals(t)[len(prompts):]; !slices.Equal(got, want) {
 		t.Fatalf("asked %q, want %q", got, want)
 	}
@@ -1306,7 +1306,7 @@ func TestAgentSavesReachTheLaptop(t *testing.T) {
 	mark = len(tm.text())
 	tm.send("save " + report + "\r")
 	tm.expectAfter(mark, regexp.QuoteMeta("saved to "+savedReport+" on the laptop"), 15*time.Second)
-	want = append(want, "create "+strconv.Quote(savedReport)+" with a file from box session "+session+" (later changes to the box file follow)")
+	want = append(want, "create "+strconv.Quote(savedReport)+" with a file from box session "+session+" (later changes to "+strconv.Quote(report)+" on the box follow)")
 	if got := approvals(t)[len(prompts):]; !slices.Equal(got, want) {
 		t.Fatalf("asked %q, want %q", got, want)
 	}

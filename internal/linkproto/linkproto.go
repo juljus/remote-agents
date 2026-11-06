@@ -94,13 +94,15 @@ type LaptopSaveRequest struct {
 	Dest    string `json:"dest,omitempty"`
 }
 
-// LaptopSaveResult says where a laptop save went and what it holds. Linked
-// says the laptop file follows the box file from then on, as a save from a
-// session makes it, but for a file pasted into it, which follows its copy.
+// LaptopSaveResult says where a laptop save went and what it holds: beside
+// the file it was saved to before, when the user changed that since.
+// Following is the laptop file that follows the box file from then on, as a
+// save from a session makes it, but for a file pasted into it, which follows
+// its copy.
 type LaptopSaveResult struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-	Linked bool   `json:"linked,omitempty"`
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256"`
+	Following string `json:"following,omitempty"`
 }
 
 // NoticeRequest asks the wrapper showing Session to show Text on its bottom row.

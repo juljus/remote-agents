@@ -779,11 +779,11 @@ func TestEverySaveAsksOncePerDestinationAndSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"create " + strconv.Quote(filepath.Join(downloads, "x.txt")) + " with a file from box session " + session + " (later changes to the box file follow)",
-		"create " + strconv.Quote(filepath.Join(downloads, "x (1).txt")) + " with a file from box session " + session + " (later changes to the box file follow)",
-		"create " + strconv.Quote(dest) + " with a file from box session " + session + " (later changes to the box file follow)",
-		"replace " + strconv.Quote(dest) + " with a file from box session " + session + " (later changes to the box file follow, the old version goes to the Trash, now and on its later saves here)",
-		"replace " + strconv.Quote(dest) + " with a file from box session " + otherSession + " (later changes to the box file follow, the old version goes to the Trash, now and on its later saves here)",
+		"create " + strconv.Quote(filepath.Join(downloads, "x.txt")) + " with a file from box session " + session + ` (later changes to "/box/a/x.txt" on the box follow)`,
+		"create " + strconv.Quote(filepath.Join(downloads, "x (1).txt")) + " with a file from box session " + session + ` (later changes to "/box/b/x.txt" on the box follow)`,
+		"create " + strconv.Quote(dest) + " with a file from box session " + session + ` (later changes to "/box/one/x.txt" on the box follow)`,
+		"replace " + strconv.Quote(dest) + " with a file from box session " + session + ` (later changes to "/box/two/x.txt" on the box follow, the old version goes to the Trash, now and on its later saves here)`,
+		"replace " + strconv.Quote(dest) + " with a file from box session " + otherSession + ` (later changes to "/box/x.txt" on the box follow, the old version goes to the Trash, now and on its later saves here)`,
 	}
 	if got := f.approver.asked(); !slices.Equal(got, want) {
 		t.Fatalf("asked\n%q\nwant\n%q", got, want)
@@ -829,7 +829,7 @@ func TestASaveGoesWhereverTheUserApproves(t *testing.T) {
 			t.Fatalf("Save to %q: %+v, %v; want %s", tc.dest, saved, err, tc.want)
 		}
 		asked := f.approver.asked()
-		if want := "create " + strconv.Quote(tc.want) + " with a file from box session " + session + " (" + tc.risk + "later changes to the box file follow)"; asked[len(asked)-1] != want {
+		if want := "create " + strconv.Quote(tc.want) + " with a file from box session " + session + " (" + tc.risk + `later changes to "/box/x.txt" on the box follow)`; asked[len(asked)-1] != want {
 			t.Fatalf("Save to %q asked %q, want %q", tc.dest, asked[len(asked)-1], want)
 		}
 	}
@@ -910,7 +910,7 @@ func TestAPromptQuotesWhatTheBoxNamed(t *testing.T) {
 		t.Fatal(err)
 	}
 	asked := f.approver.asked()
-	if want := "create " + strconv.Quote(dest) + " with a file from box session " + session + " (later changes to the box file follow)"; len(asked) != 1 || asked[0] != want {
+	if want := "create " + strconv.Quote(dest) + " with a file from box session " + session + ` (later changes to "/box/x" on the box follow)`; len(asked) != 1 || asked[0] != want {
 		t.Fatalf("asked %q, want %q", asked, want)
 	}
 	if _, err := f.files.Save(t.Context(), "claude-x (approved)", "/box/x", "", content("c")); !errors.Is(err, ErrRefused) {
@@ -967,12 +967,12 @@ const boxReport = "/box/work/report.md"
 func TestASavedFileTakesItsBoxFilesLaterChangesUnasked(t *testing.T) {
 	f := newFixture(t)
 	saved, err := f.files.Save(t.Context(), session, boxReport, "", content("v1"))
-	if err != nil || !saved.Linked {
+	if err != nil || saved.Following != saved.Path {
 		t.Fatalf("save %+v, %v", saved, err)
 	}
 	for _, c := range []string{"v2", "v3"} {
 		res, err := f.files.WriteBack(t.Context(), session, saved.Path, boxReport, content(c))
-		if err != nil || res.Outcome != Written || res.Path != saved.Path || read(t, saved.Path) != c {
+		if err != nil || res.Outcome != Written || res.Path != saved.Path || res.Following != saved.Path || read(t, saved.Path) != c {
 			t.Fatalf("write-back %+v, %v", res, err)
 		}
 	}
@@ -1043,7 +1043,7 @@ func TestSavingAFileAgainGoesOverItsLastSaveUnasked(t *testing.T) {
 		{dest, dest},
 	} {
 		saved, err := f.files.Save(t.Context(), session, boxReport, tc.dest, content("c"))
-		if err != nil || saved.Path != tc.want || !saved.Linked {
+		if err != nil || saved.Path != tc.want || saved.Following != tc.want {
 			t.Fatalf("Save to %q: %+v, %v; want %s", tc.dest, saved, err, tc.want)
 		}
 	}
@@ -1078,15 +1078,15 @@ func TestAPasteAndASaveOfOneFileLeaveItPasted(t *testing.T) {
 	origin := filepath.Join(f.home, "docs", "notes.md")
 	f.pasted(t, origin, "laptop")
 	saved, err := f.files.Save(t.Context(), session, boxReport, origin, content("agent"))
-	if err != nil || saved.Linked {
+	if err != nil || saved.Following != "" {
 		t.Fatalf("save %+v, %v", saved, err)
 	}
-	if _, err := f.files.WriteBack(t.Context(), session, origin, boxReport, content("x")); err != nil {
+	if _, err := f.files.WriteBack(t.Context(), session, origin, boxCopy, content("x")); err != nil {
 		t.Fatal(err)
 	}
 
 	other, err := f.files.Save(t.Context(), session, "/box/work/other.md", "", content("v1"))
-	if err != nil || !other.Linked {
+	if err != nil || other.Following != other.Path {
 		t.Fatalf("save %+v, %v", other, err)
 	}
 	f.pasted(t, other.Path, "v1")
@@ -1098,10 +1098,47 @@ func TestAPasteAndASaveOfOneFileLeaveItPasted(t *testing.T) {
 func TestASaveWithoutASessionFollowsNothing(t *testing.T) {
 	f := newFixture(t)
 	saved, err := f.files.Save(t.Context(), "", boxReport, "", content("v1"))
-	if err != nil || saved.Linked {
+	if err != nil || saved.Following != "" {
 		t.Fatalf("save %+v, %v", saved, err)
 	}
 	if asked := f.approver.asked(); len(asked) != 1 || strings.Contains(asked[0], "follow") {
 		t.Fatalf("asked %q", asked)
+	}
+}
+
+// Saving a box file again over a laptop file the user changed since keeps
+// their change, as a write-back would: the save goes beside it, unasked.
+func TestSavingAFileAgainKeepsTheUsersChange(t *testing.T) {
+	f := newFixture(t)
+	saved, err := f.files.Save(t.Context(), session, boxReport, "", content("v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, saved.Path, "the user's")
+	again, err := f.files.Save(t.Context(), session, boxReport, "", content("v2"))
+	if err != nil || again.Outcome != Conflict || again.Following != saved.Path || read(t, again.Path) != "v2" {
+		t.Fatalf("save again %+v, %v", again, err)
+	}
+	if read(t, saved.Path) != "the user's" || len(f.approver.asked()) != 1 {
+		t.Fatalf("%s holds %q, asked %q", saved.Path, read(t, saved.Path), f.approver.asked())
+	}
+}
+
+// A save into a dir goes where the box file went before, though the name
+// it skipped then is free now.
+func TestSavingAFileAgainIntoADirFindsItsNumberedName(t *testing.T) {
+	f := newFixture(t)
+	taken := filepath.Join(f.home, "Downloads", "report.md")
+	write(t, taken, "older")
+	saved, err := f.files.Save(t.Context(), session, boxReport, "", content("v1"))
+	if err != nil || filepath.Base(saved.Path) != "report (1).md" {
+		t.Fatalf("save %+v, %v", saved, err)
+	}
+	if err := os.Remove(taken); err != nil {
+		t.Fatal(err)
+	}
+	again, err := f.files.Save(t.Context(), session, boxReport, "", content("v2"))
+	if err != nil || again.Path != saved.Path || len(f.approver.asked()) != 1 {
+		t.Fatalf("save again %+v, %v; asked %q", again, err, f.approver.asked())
 	}
 }

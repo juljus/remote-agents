@@ -274,16 +274,23 @@ func laptopSave(ctx context.Context, l boxlayout.Layout, args []string, stdio IO
 	if err != nil {
 		return err
 	}
-	switch {
-	case saved.Linked:
-		if err := linkSaved(l, session, saved.Path, path, saved.SHA256); err != nil {
+	if session == "" {
+		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop\n", saved.Path)
+		return err
+	}
+	linked := false
+	if saved.Following != "" {
+		if linked, err = linkSaved(l, session, saved.Following, path, saved.SHA256); err != nil {
 			return fmt.Errorf("saved to %s on the laptop, but later changes to %s will not follow: %w", saved.Path, path, err)
 		}
-		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop; later changes to %s go there on their own\n", saved.Path, path)
-	case session != "":
-		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop; it was pasted into this session, so changes to its pasted copy go back to it, not those to %s\n", saved.Path, path)
+	}
+	switch {
+	case !linked:
+		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop; it is pasted into this session, so changes to its pasted copy go back to it, not those to %s\n", saved.Path, path)
+	case saved.Path != saved.Following:
+		_, err = fmt.Fprintf(stdio.Stdout, "the user changed %s on the laptop since the last save, so this one went beside it to %s; later changes to %s follow on their own\n", saved.Following, saved.Path, path)
 	default:
-		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop\n", saved.Path)
+		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop; later changes to %s go there on their own\n", saved.Path, path)
 	}
 	return err
 }
