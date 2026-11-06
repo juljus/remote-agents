@@ -1221,7 +1221,8 @@ func TestPastedLaptopPathsReachTheSessionAsTheBoxShouldSeeThem(t *testing.T) {
 // version to the Trash, without asking. Once the laptop's copy changed since,
 // a save goes beside it instead, with a notice. A hidden file is written back
 // once the user approves, then without asking. laptop-save asks for each new
-// place, ~/Downloads included, and a declined one fails.
+// place, ~/Downloads included, and a declined one fails; a saved file takes
+// its box file's later edits without asking.
 func TestAgentSavesReachTheLaptop(t *testing.T) {
 	t.Cleanup(func() { emptyTrashed(t) })
 	docs := filepath.Join(laptopHome, "docs")
@@ -1289,7 +1290,23 @@ func TestAgentSavesReachTheLaptop(t *testing.T) {
 	}
 	waitContent(t, saved, "agent-v3", time.Second)
 	waitContent(t, revealLog, saved+"\n", 5*time.Second)
-	want = append(want, "create "+strconv.Quote(saved)+" with a file from box session "+session)
+	want = append(want, "create "+strconv.Quote(saved)+" with a file from box session "+session+" (later changes to the box file follow)")
+	if got := approvals(t)[len(prompts):]; !slices.Equal(got, want) {
+		t.Fatalf("asked %q, want %q", got, want)
+	}
+
+	report := filepath.Join(filepath.Dir(boxCopy), "report.txt")
+	tm.send("edit " + report + " report-v1\r")
+	mark = len(tm.text())
+	tm.send("save " + report + "\r")
+	savedReport := tm.expectAfter(mark, `saved to (\S+) on the laptop; later changes to \S+ go there on their own`, 15*time.Second)[1]
+	waitContent(t, savedReport, "report-v1", time.Second)
+	tm.send("edit " + report + " report-v2\r")
+	waitContent(t, savedReport, "report-v2", 10*time.Second)
+	mark = len(tm.text())
+	tm.send("save " + report + "\r")
+	tm.expectAfter(mark, regexp.QuoteMeta("saved to "+savedReport+" on the laptop"), 15*time.Second)
+	want = append(want, "create "+strconv.Quote(savedReport)+" with a file from box session "+session+" (later changes to the box file follow)")
 	if got := approvals(t)[len(prompts):]; !slices.Equal(got, want) {
 		t.Fatalf("asked %q, want %q", got, want)
 	}
