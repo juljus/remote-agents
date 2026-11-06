@@ -20,9 +20,10 @@ import (
 // session-pastes/<session>/<key>/<name>, its record beside its dir as
 // <key>.json; key comes from the laptop path, so pasting a file again into
 // the session replaces its copy. A laptop file a laptop-save of the session
-// made has a record there too, of the box file it follows, wherever that is.
-// A paste of it takes the place of that record, but a save over a pasted
-// file leaves it pasted.
+// made has a record at session-saves/<session>/<key>.json, of the box file it
+// follows, wherever that is. A laptop file may have both: which one it
+// follows is the laptop's to say, and a write-back of the other is refused
+// as superseded.
 
 // copyRecord is what the box keeps about a session's copy: its laptop path,
 // the hash of the content the laptop last pasted or took, and that of a
@@ -66,9 +67,7 @@ func originKey(origin string) string {
 // over session's copy of it. A copy holding a change the laptop lacks yet
 // stays: when the laptop's file is as it was, the change is the newer one and
 // still goes back; when both changed, the paste fails until the change has
-// reached the laptop, where the conflict rule keeps both. A box file the
-// laptop file follows since a save is no copy to keep: the paste fails until
-// its change has reached the laptop, then takes its place. The caller holds
+// reached the laptop, where the conflict rule keeps both. The caller holds
 // the pasted lock.
 func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (string, error) {
 	dir := filepath.Join(l.SessionPastesDir(), session, originKey(origin))
@@ -79,16 +78,12 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 		return "", err
 	}
 	if found {
-		held := path
-		if rec.Path != "" {
-			held = rec.Path
-		}
-		pending, err := changedSince(held, rec.Synced)
+		pending, err := changedSince(path, rec.Synced)
 		if err != nil {
 			return "", err
 		}
 		switch {
-		case pending && sum == rec.Synced && rec.Path == "":
+		case pending && sum == rec.Synced:
 			// Pasting again asks the laptop afresh about a version it refused.
 			if rec.Refused != "" {
 				rec.Refused = ""
@@ -98,12 +93,12 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 			}
 			return path, nil
 		case pending:
-			copySum, err := fileSum(held)
+			copySum, err := fileSum(path)
 			if err != nil {
 				return "", err
 			}
 			if copySum == rec.Refused {
-				return "", fmt.Errorf("the laptop refused the agent's version of %s, which stays at %s on the box; have the agent laptop-save it, or remove it to paste the file again", filepath.Base(origin), held)
+				return "", fmt.Errorf("the laptop refused the agent's version of %s, which stays at %s on the box; have the agent laptop-save it, or remove it to paste the file again", filepath.Base(origin), path)
 			}
 			return "", fmt.Errorf("the agent's change to %s has not reached the laptop yet; paste it again once it has", filepath.Base(origin))
 		}
@@ -122,26 +117,15 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 
 // linkSaved records that the laptop file origin follows the box file path
 // since session saved it there, the laptop then holding content of hash sum,
-// for the link holder to send it path's later changes. It reports false when
-// origin is pasted into session, as a paste since the save made it: its copy
-// is what goes back.
-func linkSaved(l boxlayout.Layout, session, origin, path, sum string) (bool, error) {
-	dir := filepath.Join(l.SessionPastesDir(), session)
+// for the link holder to send it path's later changes.
+func linkSaved(l boxlayout.Layout, session, origin, path, sum string) error {
+	dir := filepath.Join(l.SessionSavesDir(), session)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return false, fmt.Errorf("creating the session's paste dir: %w", err)
+		return fmt.Errorf("creating the session's saves dir: %w", err)
 	}
-	record := filepath.Join(dir, originKey(origin)+".json")
-	linked := false
-	err := withFlock(l.PastedLock(), func() error {
-		var rec copyRecord
-		found, err := jsonfile.Read(record, &rec)
-		if err != nil || found && rec.Path == "" {
-			return err
-		}
-		linked = true
-		return jsonfile.Write(record, copyRecord{Origin: origin, Synced: sum, Path: path})
+	return withFlock(l.PastedLock(), func() error {
+		return jsonfile.Write(filepath.Join(dir, originKey(origin)+".json"), copyRecord{Origin: origin, Synced: sum, Path: path})
 	})
-	return linked, err
 }
 
 // changedSince reports whether path holds content other than of hash synced;
@@ -180,15 +164,24 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// sessionCopies lists every session's copies of pasted files. A record it
-// cannot read is in the error, and the others are listed all the same.
+// sessionCopies lists every session's copies of pasted files, then the box
+// files its saved laptop files follow. A record it cannot read is in the
+// error, and the others are listed all the same.
 func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
-	sessions, err := os.ReadDir(l.SessionPastesDir())
+	pastes, pastesErr := listRecords(l.SessionPastesDir(), false)
+	saves, savesErr := listRecords(l.SessionSavesDir(), true)
+	return append(pastes, saves...), errors.Join(pastesErr, savesErr)
+}
+
+// listRecords lists the records in each session's dir in root, of saved
+// laptop files when saved.
+func listRecords(root string, saved bool) ([]pastedCopy, error) {
+	sessions, err := os.ReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("listing session pastes: %w", err)
+		return nil, fmt.Errorf("listing %s: %w", filepath.Base(root), err)
 	}
 	var out []pastedCopy
 	var errs []error
@@ -196,7 +189,7 @@ func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 		if !s.IsDir() {
 			continue
 		}
-		dir := filepath.Join(l.SessionPastesDir(), s.Name())
+		dir := filepath.Join(root, s.Name())
 		records, err := filepath.Glob(filepath.Join(dir, "*.json"))
 		if err != nil {
 			return nil, err
@@ -212,7 +205,7 @@ func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 				continue
 			}
 			path := rec.Path
-			if path == "" {
+			if !saved {
 				key := filepath.Base(record[:len(record)-len(".json")])
 				path = filepath.Join(dir, key, filepath.Base(rec.Origin))
 			}
@@ -220,7 +213,7 @@ func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 				Session: s.Name(),
 				Origin:  rec.Origin,
 				Path:    path,
-				Linked:  rec.Path != "",
+				Linked:  saved,
 				Synced:  rec.Synced,
 				Refused: rec.Refused,
 				record:  record,
@@ -295,26 +288,31 @@ func pruneSessionCopies(l boxlayout.Layout, now time.Time) error {
 			return fmt.Errorf("pruning a session's paste: %w", err)
 		}
 	}
-	sessions, err := os.ReadDir(l.SessionPastesDir())
+	return errors.Join(listErr, removeEmptyDirs(l.SessionPastesDir()), removeEmptyDirs(l.SessionSavesDir()))
+}
+
+// removeEmptyDirs removes the sessions' dirs in root left empty.
+func removeEmptyDirs(root string) error {
+	sessions, err := os.ReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("listing session pastes: %w", err)
+		return fmt.Errorf("listing %s: %w", filepath.Base(root), err)
 	}
 	for _, s := range sessions {
-		dir := filepath.Join(l.SessionPastesDir(), s.Name())
+		dir := filepath.Join(root, s.Name())
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			return fmt.Errorf("listing session pastes: %w", err)
+			return fmt.Errorf("listing %s: %w", filepath.Base(root), err)
 		}
 		if len(entries) == 0 {
 			if err := removeIfThere(dir); err != nil {
-				return fmt.Errorf("pruning a session's paste dir: %w", err)
+				return fmt.Errorf("pruning a session's dir: %w", err)
 			}
 		}
 	}
-	return listErr
+	return nil
 }
 
 func staleCopy(c pastedCopy, now time.Time) (bool, error) {

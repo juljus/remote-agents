@@ -54,7 +54,7 @@ sessions:
 | What | Where on the box |
 | --- | --- |
 | Binaries: `bin/remote-agents-box`, `bin/shpool`, `shims/`, `hookbin/` | `~/.local/share/<name>/` |
-| shpool socket, run records, activity, pasted copies (`session-pastes/`), `reaper.log` | `~/.local/state/<name>/` (mode 0700) |
+| shpool socket, run records, activity, pasted copies (`session-pastes/`), saved files' records (`session-saves/`), `reaper.log` | `~/.local/state/<name>/` (mode 0700) |
 | `shpool.toml`, `session.toml`, `reaper.toml`, `accounts.toml`, the `accounts/` vault | `~/.config/<name>/` |
 | `<name>-shpool.socket`, `<name>-shpool.service` | `~/.config/systemd/user/` |
 | Stage dir during a deploy | `~/.cache/<name>-stage` |
@@ -239,9 +239,11 @@ same conflict rule as a write-back (`name (box).ext` beside a file you changed s
 same box file again is one more such change, to the same laptop file, in a dir too. Another box
 file saved to that laptop file is a save of its own, which asks unless that place's save was
 approved already, and takes its place. Once the box file has been gone for about 30 seconds, the
-laptop file stops following it and stays as it is. A file pasted into the session stays pasted
-when saved over: its pasted copy is what goes back. After the link daemon restarts, the next
-change asks once more, naming the box file.
+laptop file stops following it and stays as it is. Each laptop file follows one box file per
+session, which the laptop records: its pasted copy, or the box file saved to it, whichever of
+the paste and the save came last; a file pasted into the session stays pasted when saved over.
+The box keeps a record of each, and drops a saved one once the laptop refuses it as superseded.
+After the link daemon restarts, the next change asks once more, naming the box file.
 
 Agents learn all this from a note the box adds to their system prompt (Claude) or developer
 instructions (Codex, after those of its `config.toml`). It says first that they run on the box,

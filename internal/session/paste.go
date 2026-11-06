@@ -74,7 +74,7 @@ func pasteRewriter(ctx context.Context, opts Options, out *screenOut) func([]byt
 			out.notify("not uploaded: " + strings.ReplaceAll(reasons.Error(), "\n", "; "))
 		}
 		for i, origin := range up.origins {
-			if err := opts.Pasted.Pasted(opts.Spec.Session, origin, up.sums[i]); err != nil {
+			if err := opts.Pasted.Pasted(opts.Spec.Session, origin, up.sums[i], up.boxPaths[i]); err != nil {
 				opts.Logf("%s: %s pasted, but not recorded for write-back: %v", opts.Spec.Session, origin, err)
 				out.notify(filepath.Base(origin) + " will not be written back: " + err.Error())
 			}

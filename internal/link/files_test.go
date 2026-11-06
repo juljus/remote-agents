@@ -84,7 +84,7 @@ func (f *filesFixture) paste(t *testing.T, name, content string) string {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.h.Files.Records.Pasted(filesSession, path, sha(content)); err != nil {
+	if err := f.h.Files.Records.Pasted(filesSession, path, sha(content), "/box/"+name); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -154,7 +154,7 @@ func TestARefusedWriteBackFailsAndSaysWhy(t *testing.T) {
 func TestAFailedFetchIsNoRefusal(t *testing.T) {
 	f := newFilesFixture(t, fakeFetcher{})
 	origin := f.paste(t, "notes.md", "laptop")
-	_, err := f.h.WriteBack(context.Background(), linkproto.WriteBackRequest{Session: filesSession, Origin: origin, BoxPath: "/box/gone"})
+	_, err := f.h.WriteBack(context.Background(), linkproto.WriteBackRequest{Session: filesSession, Origin: origin, BoxPath: "/box/notes.md"})
 	if err == nil || errors.Is(err, linkproto.ErrRefused) {
 		t.Fatalf("err = %v, want a failure the box tries again", err)
 	}

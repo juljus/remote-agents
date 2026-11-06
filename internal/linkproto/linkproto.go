@@ -42,6 +42,9 @@ var (
 	ErrNoTerminal = errors.New("no laptop terminal registered for this session")
 	// ErrRefused means the laptop will not do what was asked, however often it is asked.
 	ErrRefused = errors.New("refused")
+	// ErrSuperseded is a refusal of a write-back from a box file the laptop
+	// file no longer follows, if it ever did: the box's record of it is stale.
+	ErrSuperseded = errors.New("superseded")
 )
 
 type OpenURLRequest struct {
@@ -143,6 +146,7 @@ const (
 	codeNoTerminal errorCode = "no_terminal"
 	codeLinkDown   errorCode = "link_down"
 	codeRefused    errorCode = "refused"
+	codeSuperseded errorCode = "superseded"
 )
 
 type Response struct {
@@ -166,6 +170,8 @@ func (r Response) Err() error {
 		return fmt.Errorf("%w: %s", ErrLinkDown, r.Error)
 	case codeRefused:
 		return refusal{"laptop: " + r.Error}
+	case codeSuperseded:
+		return superseded{"laptop: " + r.Error}
 	}
 	return fmt.Errorf("laptop: %s", r.Error)
 }
@@ -222,12 +228,24 @@ func (r refusal) Unwrap() error { return ErrRefused }
 // Refusal makes err, which says why, a refusal the box sees as one.
 func Refusal(err error) error { return refusal{err.Error()} }
 
-// Failure is the response that carries err; ErrNoTerminal and ErrRefused keep their codes.
+// superseded is ErrSuperseded, a refusal, worded by whoever refused.
+type superseded struct{ text string }
+
+func (s superseded) Error() string   { return s.text }
+func (s superseded) Unwrap() []error { return []error{ErrSuperseded, ErrRefused} }
+
+// Superseded makes err, which says why, a superseded refusal the box sees as one.
+func Superseded(err error) error { return superseded{err.Error()} }
+
+// Failure is the response that carries err; ErrNoTerminal, ErrSuperseded
+// and ErrRefused keep their codes.
 func Failure(err error) Response {
 	code := codeFailed
 	switch {
 	case errors.Is(err, ErrNoTerminal):
 		code = codeNoTerminal
+	case errors.Is(err, ErrSuperseded):
+		code = codeSuperseded
 	case errors.Is(err, ErrRefused):
 		code = codeRefused
 	}

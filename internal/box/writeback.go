@@ -243,6 +243,13 @@ func sendCopy(ctx context.Context, l boxlayout.Layout, laptop Laptop, c pastedCo
 	rec := c.rec()
 	res, err := laptop.WriteBack(reqCtx, linkproto.WriteBackRequest{Session: c.Session, Origin: c.Origin, BoxPath: c.Path})
 	switch {
+	// A pasted copy superseded stays a refused one, as the agent may still be working on it.
+	case errors.Is(err, linkproto.ErrSuperseded) && c.Linked:
+		removed, unlinkErr := unlink(l, c)
+		if removed {
+			logf("write-back of %s: %v; %s no longer follows it", c.Path, err, c.Origin)
+		}
+		return rec, unlinkErr
 	case errors.Is(err, linkproto.ErrRefused):
 		// Asking again would be refused again; the next change asks anew.
 		logf("write-back of %s: %v; not asking again until it changes or is pasted again", c.Path, err)

@@ -340,7 +340,7 @@ func TestLaptopSaveBesideAChangedFileSaysSo(t *testing.T) {
 }
 
 // A save over a file pasted into the session leaves its pasted copy the one
-// that goes back, and the agent hears so.
+// that goes back, as the laptop says, and the agent hears so.
 func TestLaptopSaveOverAPastedFileSaysWhichCopyGoesBack(t *testing.T) {
 	l := testLayout(t)
 	path := filepath.Join(t.TempDir(), "notes.md")
@@ -352,6 +352,25 @@ func TestLaptopSaveOverAPastedFileSaysWhichCopyGoesBack(t *testing.T) {
 		t.Fatalf("laptop-save = %+v", r)
 	}
 	if copies, err := sessionCopies(l); err != nil || len(copies) != 0 {
+		t.Fatalf("copies %+v, %v", copies, err)
+	}
+}
+
+// A save the laptop follows is followed, though the box still has a paste of
+// the laptop file the laptop has forgotten.
+func TestLaptopSaveOverAForgottenPasteFollowsTheSave(t *testing.T) {
+	l := testLayout(t)
+	pasteInto(t, l, pasteSession, [2]string{"/Users/me/Downloads/notes.md", "old"})
+	path := filepath.Join(t.TempDir(), "notes.md")
+	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := runShimIn(t, l, "laptop-save", []string{path}, "", &fakeLaptop{}, map[string]string{SessionEnvVar: pasteSession})
+	if r.code != 0 || !strings.Contains(r.stdout, "later changes to "+path+" go there on their own") {
+		t.Fatalf("laptop-save = %+v", r)
+	}
+	copies, err := sessionCopies(l)
+	if err != nil || len(copies) != 2 {
 		t.Fatalf("copies %+v, %v", copies, err)
 	}
 }

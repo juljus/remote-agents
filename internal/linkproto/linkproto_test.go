@@ -92,3 +92,13 @@ func TestRefusalsKeepTheirCodeAcrossTheLink(t *testing.T) {
 		t.Fatalf("a failure read as a refusal: %v", err)
 	}
 }
+
+func TestSupersededRefusalsKeepTheirCodeAcrossTheLink(t *testing.T) {
+	err := Failure(Superseded(errors.New("refused: /l/x follows another box file"))).Err()
+	if !errors.Is(err, ErrSuperseded) || !errors.Is(err, ErrRefused) || err.Error() != "laptop: refused: /l/x follows another box file" {
+		t.Fatalf("err = %v", err)
+	}
+	if err := Failure(Refusal(errors.New("refused"))).Err(); errors.Is(err, ErrSuperseded) {
+		t.Fatalf("a refusal read as superseded: %v", err)
+	}
+}

@@ -104,6 +104,10 @@ func (l Layout) PastedLock() string { return l.state("pasted.lock") }
 // pasted into it, which go back to the laptop when the agent changes them.
 func (l Layout) SessionPastesDir() string { return l.state("session-pastes") }
 
+// SessionSavesDir holds a record per laptop file each session saved a box
+// file to, whose later changes go to it.
+func (l Layout) SessionSavesDir() string { return l.state("session-saves") }
+
 // WriteBackLock is held by the one link holder that sends the copies back.
 func (l Layout) WriteBackLock() string { return l.state("write-back.lock") }
 

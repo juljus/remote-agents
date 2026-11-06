@@ -89,7 +89,7 @@ func read(t *testing.T, path string) string {
 func (f *fixture) pasted(t *testing.T, path, c string) {
 	t.Helper()
 	write(t, path, c)
-	if err := f.files.Records.Pasted(session, path, sum(c)); err != nil {
+	if err := f.files.Records.Pasted(session, path, sum(c), boxCopy); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -370,7 +370,7 @@ func TestRecordsKeepEachSessionsPastes(t *testing.T) {
 			t.Fatalf("%s: %+v, %v; want the base to be %q", path, res, err, c)
 		}
 	}
-	if err := f.files.Records.Pasted(session, "docs/a.md", sum("a")); err == nil || !strings.Contains(err.Error(), "absolute") {
+	if err := f.files.Records.Pasted(session, "docs/a.md", sum("a"), boxCopy); err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("recorded a relative origin: %v", err)
 	}
 }
@@ -451,7 +451,7 @@ func TestRecordsOfSessionsUntouchedForTwoWeeksGo(t *testing.T) {
 	}
 	other := filepath.Join(f.home, "docs", "other.md")
 	write(t, other, "o")
-	if err := f.files.Records.Pasted("codex-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", other, sum("o")); err != nil {
+	if err := f.files.Records.Pasted("codex-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", other, sum("o"), boxCopy); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.files.WriteBack(t.Context(), session, origin, boxCopy, content("agent")); !errors.Is(err, ErrRefused) {
@@ -523,7 +523,7 @@ func TestAPathTypedInAnotherCaseIsRecordedAsTheDiskSpellsIt(t *testing.T) {
 	if origin != plist {
 		t.Fatalf("Origin(%s) = %s, want %s", typed, origin, plist)
 	}
-	if err := f.files.Records.Pasted(session, origin, sum("laptop")); err != nil {
+	if err := f.files.Records.Pasted(session, origin, sum("laptop"), boxCopy); err != nil {
 		t.Fatal(err)
 	}
 	declined := errors.New("Canceled by user.")
@@ -532,7 +532,7 @@ func TestAPathTypedInAnotherCaseIsRecordedAsTheDiskSpellsIt(t *testing.T) {
 		t.Fatalf("write-back under ~/Library: %v", err)
 	}
 	// Recorded as typed, as an older wrapper would, the check still holds.
-	if err := f.files.Records.Pasted(session, filepath.Join(f.home, "library", "LaunchAgents", "com.x.plist"), sum("laptop")); err != nil {
+	if err := f.files.Records.Pasted(session, filepath.Join(f.home, "library", "LaunchAgents", "com.x.plist"), sum("laptop"), boxCopy); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.files.WriteBack(t.Context(), session, filepath.Join(f.home, "library", "LaunchAgents", "com.x.plist"), boxCopy, content("agent")); !errors.Is(err, ErrRefused) {
@@ -651,7 +651,7 @@ func TestAnApprovedWriteBackHoldsForThatSessionOnly(t *testing.T) {
 	f := newFixture(t)
 	origin := filepath.Join(f.home, ".zshrc")
 	f.pasted(t, origin, "laptop")
-	if err := f.files.Records.Pasted(otherSession, origin, sum("laptop")); err != nil {
+	if err := f.files.Records.Pasted(otherSession, origin, sum("laptop"), boxCopy); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.files.WriteBack(t.Context(), session, origin, boxCopy, content("agent")); err != nil {
@@ -1081,6 +1081,9 @@ func TestAPasteAndASaveOfOneFileLeaveItPasted(t *testing.T) {
 	if err != nil || saved.Following != "" {
 		t.Fatalf("save %+v, %v", saved, err)
 	}
+	if _, err := f.files.WriteBack(t.Context(), session, origin, boxReport, content("x")); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("the saved box file wrote the pasted file: %v", err)
+	}
 	if _, err := f.files.WriteBack(t.Context(), session, origin, boxCopy, content("x")); err != nil {
 		t.Fatal(err)
 	}
@@ -1090,8 +1093,72 @@ func TestAPasteAndASaveOfOneFileLeaveItPasted(t *testing.T) {
 		t.Fatalf("save %+v, %v", other, err)
 	}
 	f.pasted(t, other.Path, "v1")
+	if _, err := f.files.WriteBack(t.Context(), session, other.Path, "/box/work/other.md", content("v2")); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("the saved box file wrote the file pasted since: %v", err)
+	}
 	if _, err := f.files.WriteBack(t.Context(), session, other.Path, boxCopy, content("v2")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Each laptop file takes the changes of one box file of the session: its
+// pasted copy, or the box file saved to it. Any other's are superseded, and
+// so are those of a box file for a laptop file the session has no record of.
+func TestOnlyTheBoxFileALaptopFileFollowsWritesIt(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, "docs", "notes.md")
+	f.pasted(t, origin, "laptop")
+	for name, tc := range map[string]struct{ origin, boxPath string }{
+		"another box file":      {origin, "/box/session-pastes/elsewhere"},
+		"a file with no record": {filepath.Join(f.home, "docs", "never.md"), boxCopy},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := f.files.WriteBack(t.Context(), session, tc.origin, tc.boxPath, content("x")); !errors.Is(err, ErrSuperseded) || !errors.Is(err, ErrRefused) {
+				t.Fatalf("err = %v, want ErrSuperseded", err)
+			}
+		})
+	}
+	if read(t, origin) != "laptop" {
+		t.Fatal("a superseded write-back landed")
+	}
+}
+
+// Once the laptop forgot a paste, as two weeks without a write make it, a
+// save over the file makes it follow the saved box file, not the old copy.
+func TestASaveOverAFileWhosePasteWasForgottenFollowsTheSave(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, "docs", "notes.md")
+	f.pasted(t, origin, "laptop")
+	if err := os.Remove(f.files.Records.path(session)); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := f.files.Save(t.Context(), session, boxReport, origin, content("v1"))
+	if err != nil || saved.Following != origin {
+		t.Fatalf("save %+v, %v", saved, err)
+	}
+	if _, err := f.files.WriteBack(t.Context(), session, origin, boxCopy, content("old copy")); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("the forgotten copy wrote the file: %v", err)
+	}
+	if res, err := f.files.WriteBack(t.Context(), session, origin, boxReport, content("v2")); err != nil || read(t, origin) != "v2" {
+		t.Fatalf("write-back %+v, %v", res, err)
+	}
+}
+
+// A paste the laptop recorded before pastes named their box copy takes the
+// changes of any box file of the session, until it is pasted again.
+func TestAPasteRecordedWithoutItsBoxCopyTakesAnyBoxFile(t *testing.T) {
+	f := newFixture(t)
+	origin := filepath.Join(f.home, "docs", "notes.md")
+	write(t, origin, "laptop")
+	record := fmt.Sprintf(`{"files":{%q:{"base":%q}}}`, origin, sum("laptop"))
+	if err := os.MkdirAll(f.files.Records.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.files.Records.path(session), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.files.WriteBack(t.Context(), session, origin, "/box/anything", content("agent")); err != nil || read(t, origin) != "agent" {
+		t.Fatalf("write-back: %v", err)
 	}
 }
 

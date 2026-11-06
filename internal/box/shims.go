@@ -279,14 +279,13 @@ func laptopSave(ctx context.Context, l boxlayout.Layout, args []string, stdio IO
 		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop\n", saved.Path)
 		return err
 	}
-	linked := false
 	if saved.Following != "" {
-		if linked, err = linkSaved(l, session, saved.Following, path, saved.SHA256); err != nil {
+		if err := linkSaved(l, session, saved.Following, path, saved.SHA256); err != nil {
 			return fmt.Errorf("saved to %s on the laptop, but later changes to %s will not follow: %w", saved.Path, path, err)
 		}
 	}
 	switch {
-	case !linked:
+	case saved.Following == "":
 		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop; it is pasted into this session, so changes to its pasted copy go back to it, not those to %s\n", saved.Path, path)
 	case saved.Path != saved.Following:
 		_, err = fmt.Fprintf(stdio.Stdout, "the user changed %s on the laptop since the last save, so this one went beside it to %s; later changes to %s follow on their own\n", saved.Following, saved.Path, path)

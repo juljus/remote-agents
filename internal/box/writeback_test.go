@@ -393,8 +393,8 @@ func TestALaptopSavedFileFollowsItsBoxFileUntilItIsGone(t *testing.T) {
 	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if linked, err := linkSaved(l, pasteSession, "/l/Downloads/report.md", path, sha("v1")); err != nil || !linked {
-		t.Fatalf("linked %v, %v", linked, err)
+	if err := linkSaved(l, pasteSession, "/l/Downloads/report.md", path, sha("v1")); err != nil {
+		t.Fatal(err)
 	}
 	seen := make(chan linkproto.WriteBackRequest, 10)
 	watchLayout(t, l, laptopTaking(seen))
@@ -441,4 +441,64 @@ func TestALaptopSavedFileFollowsItsBoxFileUntilItIsGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectNone(t, seen)
+}
+
+// The laptop says which box file a laptop file follows: one superseded, as
+// a paste or another save since makes it, is no longer followed, and stays.
+func TestASupersededSaveIsNoLongerFollowed(t *testing.T) {
+	l := testLayout(t)
+	path := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkSaved(l, pasteSession, "/l/report.md", path, sha("v1")); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(chan linkproto.WriteBackRequest, 10)
+	watchLayout(t, l, &fakeLaptop{writeBack: func(req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
+		seen <- req
+		return linkproto.WriteBackResult{}, linkproto.Superseded(errors.New("/l/report.md follows another box file"))
+	}})
+	if err := os.WriteFile(path, []byte("v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectWriteBack(t, seen, linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/report.md", BoxPath: path})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		copies, err := sessionCopies(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(copies) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a superseded save is still followed: %+v", copies)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "v2" {
+		t.Fatalf("the box file holds %q, %v", data, err)
+	}
+}
+
+// A pasted copy superseded stays, refused as before: the agent may still be
+// working on it, and a new paste offers it again.
+func TestASupersededPasteIsRefused(t *testing.T) {
+	l := testLayout(t)
+	paths := pasteInto(t, l, pasteSession, [2]string{"/l/notes.md", "laptop"})
+	seen := make(chan linkproto.WriteBackRequest, 10)
+	watchLayout(t, l, &fakeLaptop{writeBack: func(req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
+		seen <- req
+		return linkproto.WriteBackResult{}, linkproto.Superseded(errors.New("/l/notes.md follows another box file"))
+	}})
+	if err := os.WriteFile(paths[0], []byte("agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectWriteBack(t, seen, linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/notes.md", BoxPath: paths[0]})
+	expectNone(t, seen)
+	copies, err := sessionCopies(l)
+	if err != nil || len(copies) != 1 || copies[0].Refused != sha("agent") {
+		t.Fatalf("copies %+v, %v", copies, err)
+	}
 }

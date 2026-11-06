@@ -91,9 +91,13 @@ func (h *Handler) LaptopSave(ctx context.Context, req linkproto.LaptopSaveReques
 	return linkproto.LaptopSaveResult{Path: res.Path, SHA256: res.Sum, Following: res.Following}, nil
 }
 
-// refusal marks a laptopfiles refusal as one for the box, which then stops asking.
+// refusal marks a laptopfiles refusal as one for the box, which then stops
+// asking, or drops its stale record when superseded.
 func refusal(err error) error {
-	if errors.Is(err, laptopfiles.ErrRefused) {
+	switch {
+	case errors.Is(err, laptopfiles.ErrSuperseded):
+		return linkproto.Superseded(err)
+	case errors.Is(err, laptopfiles.ErrRefused):
 		return linkproto.Refusal(err)
 	}
 	return err

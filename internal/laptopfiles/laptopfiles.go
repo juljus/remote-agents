@@ -30,6 +30,11 @@ import (
 // ErrRefused means the box asked to write where it may not.
 var ErrRefused = errors.New("refused")
 
+// ErrSuperseded is a refusal of a write-back from a box file the laptop
+// file does not follow: each follows one box file of a session, its pasted
+// copy or the box file last saved to it, which paste or save came last.
+var ErrSuperseded = fmt.Errorf("%w, superseded", ErrRefused)
+
 // Fetch writes the content the box sends to w.
 type Fetch func(w io.Writer) error
 
@@ -175,7 +180,7 @@ func (f Files) WriteBack(ctx context.Context, session, origin, boxPath string, f
 }
 
 func notPasted(origin string) error {
-	return fmt.Errorf("%w: %s was neither pasted into this session nor saved from it", ErrRefused, origin)
+	return fmt.Errorf("%w: %s was neither pasted into this session nor saved from it", ErrSuperseded, origin)
 }
 
 // writeBackPlace is where a write-back of origin lands: origin, with its dir
@@ -500,7 +505,7 @@ func (f Files) Save(ctx context.Context, session, boxPath, dest string, fetch Fe
 		e, known := rec.Files[p.path]
 		e.Base = sum
 		if !known || e.Linked != "" {
-			e.Linked, res.Following = boxPath, p.path
+			e.Linked, e.BoxCopy, res.Following = boxPath, "", p.path
 		}
 		rec.Files[p.path] = e
 		return nil

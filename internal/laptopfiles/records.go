@@ -20,20 +20,28 @@ const recordTTL = 14 * 24 * time.Hour
 // Records keeps, per session, the laptop files pasted into it or saved from
 // it: the content the laptop had at the paste, save or last write-back (the
 // base), that of the last copy written beside the file when the laptop's had
-// changed, and for a saved file the box file it follows.
+// changed, and the one box file it follows: the session's copy of a pasted
+// file, or the box file saved to it. Whichever came last of a paste and a
+// save decides, and the box hears which when it offers the other.
 type Records struct{ Dir string }
 
 type entry struct {
-	Base   string `json:"base"`
-	Copy   string `json:"copy,omitempty"`
-	Linked string `json:"linked,omitempty"`
+	Base    string `json:"base"`
+	Copy    string `json:"copy,omitempty"`
+	BoxCopy string `json:"box_copy,omitempty"`
+	Linked  string `json:"linked,omitempty"`
 }
 
-// from refuses a write-back of boxPath to origin, whose entry is e, when
-// origin follows another box file. A pasted file's copy is the box's to place.
+// from refuses, as superseded, a write-back of boxPath to origin, whose
+// entry is e, when origin follows another box file. A paste recorded before
+// pastes named their box copy names none, and takes any until pasted again.
 func (e entry) from(origin, boxPath string) error {
-	if e.Linked != "" && e.Linked != boxPath {
-		return fmt.Errorf("%w: %s follows %s on the box, not %s", ErrRefused, origin, e.Linked, boxPath)
+	follows := e.Linked
+	if follows == "" {
+		follows = e.BoxCopy
+	}
+	if follows != "" && follows != boxPath {
+		return fmt.Errorf("%w: %s follows %s on the box, not %s", ErrSuperseded, origin, follows, boxPath)
 	}
 	return nil
 }
@@ -54,14 +62,17 @@ func (rec sessionRecord) linkedFrom(boxPath string) map[string]bool {
 }
 
 // Pasted records that origin, holding content of hash sum, was pasted into
-// session; a write-back replaces it while it still holds that content.
-// origin must be absolute with its symlinks resolved, as Origin makes it.
-func (r Records) Pasted(session, origin, sum string) error {
-	if err := checkPath(origin); err != nil {
-		return err
+// session, the box keeping its copy at boxCopy; a write-back of that copy
+// replaces it while it still holds that content. origin must be absolute
+// with its symlinks resolved, as Origin makes it.
+func (r Records) Pasted(session, origin, sum, boxCopy string) error {
+	for _, path := range []string{origin, boxCopy} {
+		if err := checkPath(path); err != nil {
+			return err
+		}
 	}
 	return r.update(session, func(rec *sessionRecord) error {
-		rec.Files[origin] = entry{Base: sum}
+		rec.Files[origin] = entry{Base: sum, BoxCopy: boxCopy}
 		return nil
 	})
 }
