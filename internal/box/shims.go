@@ -237,9 +237,10 @@ to ~/Downloads, revealed in Finder, unless a laptop path says where: anywhere
 on the laptop (~/ or absolute; a relative path is in ~/Downloads), and a dir
 takes the file under its name. A file the path names is replaced, its old
 version to the Trash; in a dir, the save takes a free name, or the one it
-took before. From then on, the box file's changes reach the laptop file on
-their own, without asking; one the user changed on the laptop since stays,
-the box's version going beside it as "name (box).ext".`
+took before. Saved from a session, the laptop file then takes the box file's
+later changes on their own, asking again only after the laptop's link daemon
+restarts; one the user changed on the laptop since stays, the box's version
+going beside it as "name (box).ext".`
 
 // laptopSave asks the laptop to fetch a box file; it never sends the content
 // over the link itself. A save from a session leaves the laptop file
