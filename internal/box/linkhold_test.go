@@ -39,8 +39,8 @@ func (openRecorder) Hook(context.Context, linkproto.HookRequest) (linkproto.Hook
 func (openRecorder) WriteBack(context.Context, linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
 	return linkproto.WriteBackResult{}, errors.New("no write-backs here")
 }
-func (openRecorder) LaptopSave(context.Context, linkproto.LaptopSaveRequest) (string, error) {
-	return "", errors.New("no saves here")
+func (openRecorder) LaptopSave(context.Context, linkproto.LaptopSaveRequest) (linkproto.LaptopSaveResult, error) {
+	return linkproto.LaptopSaveResult{}, errors.New("no saves here")
 }
 
 type hold struct {

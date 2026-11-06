@@ -2,10 +2,12 @@
 // agents run without permission prompts, so the box gets no other way in: a
 // file pasted into a session is written back over its laptop origin, or
 // beside it as "name (box).ext" when the laptop's copy changed since, and a
-// file the box saves goes where the user approves. A write-back lands on its
-// own only on a plain file of the user's: one outside home, under ~/Library,
-// hidden, executable or reached through a symlink waits for the user's
-// approval, as every save does. A file replaced goes to the Trash.
+// file the box saves goes where the user approves, then takes the later
+// changes of its box file the same way. A write-back lands on its own only on
+// a plain file pasted by the user: one outside home, under ~/Library, hidden,
+// executable or reached through a symlink waits for the user's approval, as
+// every save does and a saved file's changes do once the approval of its save
+// is gone. A file replaced goes to the Trash.
 package laptopfiles
 
 import (
@@ -44,13 +46,15 @@ const (
 
 // Result is where a write-back's content went, and its hash. Leftover, when
 // set, is what the write-back left behind once the content was in place, such
-// as an old version the Trash refused, and LeftoverErr says why.
+// as an old version the Trash refused, and LeftoverErr says why. Linked says
+// a saved file now follows its box file.
 type Result struct {
 	Outcome     Outcome
 	Path        string
 	Sum         string
 	Leftover    string
 	LeftoverErr error
+	Linked      bool
 }
 
 // Files writes what the box sends, within the bounds of the package doc.
@@ -69,16 +73,22 @@ type place struct {
 	risks []string
 }
 
-// writeBackGrant is what lets session write back to p: its write-backs of
-// the file, on the risks the prompt named.
-func (p place) writeBackGrant(session string) grant {
-	return grant{session: session, use: writeBackUse, path: p.path, terms: strings.Join(p.risks, ", ")}
+// writeBackGrant is what lets session write e back to p, on the risks the
+// prompt named, and whether it takes the user's approval: a saved file's
+// changes always do, which its save gave; a pasted file's only where p is risky.
+func (p place) writeBackGrant(session string, e entry) (grant, bool) {
+	risks := strings.Join(p.risks, ", ")
+	if e.Linked != "" {
+		return grant{session: session, use: linkUse, path: p.path, terms: strconv.Quote(e.Linked) + "; " + risks}, true
+	}
+	return grant{session: session, use: writeBackUse, path: p.path, terms: risks}, len(p.risks) > 0
 }
 
-// WriteBack writes the content fetch gives for a file pasted into session
-// from origin: over origin while it holds its base, else beside it. A risky
-// place waits for the user's approval, once per session.
-func (f Files) WriteBack(ctx context.Context, session, origin string, fetch Fetch) (Result, error) {
+// WriteBack writes the content fetch gives of boxPath, for a file pasted into
+// session from origin or saved from it to origin: over origin while it holds
+// its base, else beside it. A saved file takes only the box file it was saved
+// from. A risky place waits for the user's approval, once per session.
+func (f Files) WriteBack(ctx context.Context, session, origin, boxPath string, fetch Fetch) (Result, error) {
 	if err := checkPath(origin); err != nil {
 		return Result{}, err
 	}
@@ -89,16 +99,19 @@ func (f Files) WriteBack(ctx context.Context, session, origin string, fetch Fetc
 	if !ok {
 		return Result{}, notPasted(origin)
 	}
+	if err := e.from(origin, boxPath); err != nil {
+		return Result{}, err
+	}
 	asked, err := f.writeBackPlace(origin)
 	if err != nil {
 		return Result{}, err
 	}
-	if len(asked.risks) > 0 {
-		reason, err := writeBackReason(session, asked, e.Base)
+	if gr, needed := asked.writeBackGrant(session, e); needed {
+		reason, err := writeBackReason(session, asked, e)
 		if err != nil {
 			return Result{}, err
 		}
-		if err := f.Gate.ask(ctx, asked.writeBackGrant(session), reason); err != nil {
+		if err := f.Gate.ask(ctx, gr, reason); err != nil {
 			return Result{}, err
 		}
 	}
@@ -113,12 +126,15 @@ func (f Files) WriteBack(ctx context.Context, session, origin string, fetch Fetc
 		if !ok {
 			return notPasted(origin)
 		}
+		if err := e.from(origin, boxPath); err != nil {
+			return err
+		}
 		// What the user approved, or saw no need to, must be where the write lands.
 		now, err := f.writeBackPlace(origin)
 		if err != nil {
 			return err
 		}
-		if now.path != asked.path || len(now.risks) > 0 && !f.Gate.approved(now.writeBackGrant(session)) {
+		if gr, needed := now.writeBackGrant(session, e); now.path != asked.path || needed && !f.Gate.approved(gr) {
 			return fmt.Errorf("%w: %s changed while the box wrote it back; paste it again to offer the box's version anew", ErrRefused, origin)
 		}
 		target := now.path
@@ -156,7 +172,7 @@ func (f Files) WriteBack(ctx context.Context, session, origin string, fetch Fetc
 }
 
 func notPasted(origin string) error {
-	return fmt.Errorf("%w: %s was not pasted into this session", ErrRefused, origin)
+	return fmt.Errorf("%w: %s was neither pasted into this session nor saved from it", ErrRefused, origin)
 }
 
 // writeBackPlace is where a write-back of origin lands: origin, with its dir
@@ -233,16 +249,22 @@ func modeFor(path string) (fs.FileMode, error) {
 }
 
 // writeBackReason is the prompt for the write-backs of session to p, whose
-// content at the paste had hash base, and says what the first does. The box
-// picks the paths, so they are quoted: a name holding a newline or a bracket
-// cannot pass for more of the text.
-func writeBackReason(session string, p place, base string) (string, error) {
+// entry is e, and says what the first does. The box picks the paths, so they
+// are quoted: a name holding a newline or a bracket cannot pass for more of
+// the text.
+func writeBackReason(session string, p place, e entry) (string, error) {
 	current, err := regularSum(p.path)
 	if err != nil {
 		return "", err
 	}
-	head := fmt.Sprintf("write back the edits of box session %s to %s (%s)", session, strconv.Quote(p.path), strings.Join(p.risks, ", "))
-	if current == base {
+	head := fmt.Sprintf("write back the edits of box session %s to %s", session, strconv.Quote(p.path))
+	if e.Linked != "" {
+		head = fmt.Sprintf("save the changes box session %s made to %s to %s", session, strconv.Quote(e.Linked), strconv.Quote(p.path))
+	}
+	if len(p.risks) > 0 {
+		head += " (" + strings.Join(p.risks, ", ") + ")"
+	}
+	if current == e.Base {
 		return head + ": replace it now, the old version to the Trash", nil
 	}
 	copyPath := conflictPath(p.path)
@@ -256,14 +278,17 @@ func writeBackReason(session string, p place, base string) (string, error) {
 }
 
 // saveReason is the prompt for a save of session to p, which replaces a file
-// there when existing.
-func saveReason(session string, p place, existing bool) string {
+// there when existing, and leaves p following its box file when linked.
+func saveReason(session string, p place, existing, linked bool) string {
 	from := "the box"
 	if session != "" {
 		from = "box session " + session
 	}
 	action := "create"
 	notes := slices.Clone(p.risks)
+	if linked {
+		notes = append(notes, "later changes to the box file follow")
+	}
 	if existing {
 		action = "replace"
 		notes = append(notes, "the old version goes to the Trash, now and on its later saves here")
@@ -411,64 +436,81 @@ func removeIfThere(path string) {
 	_ = os.Remove(path)
 }
 
-// Save writes the content fetch gives to dest once the user approves, at
-// most once per destination and session. dest names the file, or a dir that
-// takes it under name, or a free "name (n).ext" when a file there has name.
-// dest may start with ~/ or be absolute; relative, it is in ~/Downloads,
-// which it is when empty. A file dest names is replaced, its old version to
-// the Trash; one pasted into session takes the content saved as its base.
-func (f Files) Save(ctx context.Context, session, name, dest string, fetch Fetch) (Result, error) {
-	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, '/') {
-		return Result{}, fmt.Errorf("%w: %q is not one file name", ErrRefused, name)
+// Save writes the content fetch gives of boxPath to dest once the user
+// approves, at most once per destination and session. dest names the file, or
+// a dir that takes it under the box file's name, or a free "name (n).ext" when
+// a file there has name, unless the box file was saved there before. dest may
+// start with ~/ or be absolute; relative, it is in ~/Downloads, which it is
+// when empty. A file dest names is replaced, its old version to the Trash.
+// The file then follows boxPath, for WriteBack to take its later changes, and
+// saving boxPath there again asks nobody; one pasted into session stays
+// pasted, taking the content saved as its base.
+func (f Files) Save(ctx context.Context, session, boxPath, dest string, fetch Fetch) (Result, error) {
+	if err := checkPath(boxPath); err != nil {
+		return Result{}, err
 	}
+	name := filepath.Base(boxPath)
+	if name == "/" {
+		return Result{}, fmt.Errorf("%w: %q is not a file", ErrRefused, boxPath)
+	}
+	var rec sessionRecord
 	if session != "" {
-		if err := checkSession(session); err != nil {
+		var err error
+		if rec, err = f.Records.read(session); err != nil {
 			return Result{}, err
 		}
 	}
-	p, existing, err := f.savePlace(name, dest)
+	p, existing, err := f.savePlace(name, dest, rec.linkedFrom(boxPath))
 	if err != nil {
 		return Result{}, err
 	}
+	e, known := rec.Files[p.path]
 	gr := saveGrant(session, p, existing)
-	if err := f.Gate.ask(ctx, gr, saveReason(session, p, existing)); err != nil {
-		return Result{}, err
+	link, _ := p.writeBackGrant(session, entry{Linked: boxPath})
+	if !known || e.Linked != boxPath || !f.Gate.approved(link) {
+		if err := f.Gate.ask(ctx, gr, saveReason(session, p, existing, session != "" && (!known || e.Linked != ""))); err != nil {
+			return Result{}, err
+		}
 	}
 	tmp, sum, err := fetchInto(filepath.Dir(p.path), fetch)
 	if err != nil {
 		return Result{}, err
 	}
 	defer removeIfThere(tmp)
-	pasted := false
-	if session != "" {
-		if _, pasted, err = f.Records.lookup(session, p.path); err != nil {
+	if session == "" {
+		left, err := f.put(gr, tmp)
+		if err != nil {
 			return Result{}, err
 		}
+		return Result{Outcome: Written, Path: p.path, Sum: sum, Leftover: left.path, LeftoverErr: left.err}, nil
 	}
-	var left leftover
-	if !pasted {
-		left, err = f.put(gr, tmp)
-	} else {
-		err = f.Records.update(session, func(rec *sessionRecord) error {
-			var err error
-			if left, err = f.put(gr, tmp); err != nil {
-				return err
-			}
-			if e, ok := rec.Files[p.path]; ok {
-				e.Base = sum
-				rec.Files[p.path] = e
-			}
-			return nil
-		})
-	}
+	var res Result
+	err = f.Records.update(session, func(rec *sessionRecord) error {
+		left, err := f.put(gr, tmp)
+		if err != nil {
+			return err
+		}
+		res = Result{Outcome: Written, Path: p.path, Sum: sum, Leftover: left.path, LeftoverErr: left.err}
+		e, known := rec.Files[p.path]
+		e.Base = sum
+		if !known || e.Linked != "" {
+			e.Linked, res.Linked = boxPath, true
+		}
+		rec.Files[p.path] = e
+		return nil
+	})
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Outcome: Written, Path: p.path, Sum: sum, Leftover: left.path, LeftoverErr: left.err}, nil
+	if res.Linked {
+		f.Gate.allow(link)
+	}
+	return res, nil
 }
 
-// savePlace is where a save of name to dest lands, and whether a file is there.
-func (f Files) savePlace(name, dest string) (place, bool, error) {
+// savePlace is where a save of name to dest lands, and whether a file is
+// there; a dir takes it as one of saved, the files a save of it went to.
+func (f Files) savePlace(name, dest string, saved map[string]bool) (place, bool, error) {
 	downloads, err := filepath.EvalSymlinks(filepath.Join(f.Home, "Downloads"))
 	if err != nil {
 		return place{}, false, fmt.Errorf("finding ~/Downloads: %w", err)
@@ -497,7 +539,7 @@ func (f Files) savePlace(name, dest string) (place, bool, error) {
 		return place{}, false, fmt.Errorf("%w: %v", ErrRefused, err)
 	}
 	if intoDir {
-		if file, err = freeName(dir, file); err != nil {
+		if file, err = freeName(dir, file, saved); err != nil {
 			return place{}, false, err
 		}
 	}
@@ -518,13 +560,17 @@ func (f Files) savePlace(name, dest string) (place, bool, error) {
 // maxNumbered bounds the "name (n).ext" a save tries before giving up.
 const maxNumbered = 1000
 
-// freeName is the first of name, "name (1).ext", ... that nothing in dir has.
-func freeName(dir, name string) (string, error) {
+// freeName is the first of name, "name (1).ext", ... that nothing in dir
+// has, or that is one of saved.
+func freeName(dir, name string, saved map[string]bool) (string, error) {
 	stem, ext := splitExt(name)
 	for n := range maxNumbered {
 		candidate := name
 		if n > 0 {
 			candidate = fmt.Sprintf("%s (%d)%s", stem, n, ext)
+		}
+		if saved[filepath.Join(dir, candidate)] {
+			return candidate, nil
 		}
 		_, err := os.Lstat(filepath.Join(dir, candidate))
 		if errors.Is(err, fs.ErrNotExist) {

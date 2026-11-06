@@ -59,8 +59,8 @@ func (f *fakeHandler) WriteBack(context.Context, WriteBackRequest) (WriteBackRes
 	return WriteBackResult{}, errors.New("no write-backs here")
 }
 
-func (f *fakeHandler) LaptopSave(context.Context, LaptopSaveRequest) (string, error) {
-	return "", errors.New("no saves here")
+func (f *fakeHandler) LaptopSave(context.Context, LaptopSaveRequest) (LaptopSaveResult, error) {
+	return LaptopSaveResult{}, errors.New("no saves here")
 }
 
 func TestDialFailureIsLinkDown(t *testing.T) {

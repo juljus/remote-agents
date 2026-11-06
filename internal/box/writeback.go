@@ -39,8 +39,9 @@ type fileSig struct {
 	inode uint64
 }
 
+// sigOf follows a symlink at path, as send-file does.
 func sigOf(path string) (fileSig, bool, error) {
-	info, err := os.Lstat(path)
+	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return fileSig{}, false, nil
 	}
@@ -68,6 +69,8 @@ type copyWatch struct {
 	failures   int
 	retryAt    time.Time
 	sending    bool
+	// absent counts the polls in a row that found no file.
+	absent int
 }
 
 // failed puts off the next try of a copy whose last one failed.
@@ -155,6 +158,15 @@ func watchSessionCopies(ctx context.Context, l boxlayout.Layout, laptop Laptop, 
 				w.failed(c.Path, err, retry, logf)
 				continue
 			}
+			// A box file gone for a whole poll, not just replaced, is gone for good.
+			if c.Linked && w.absent > 1 {
+				if err := unlink(l, c); err != nil {
+					w.failed(c.Path, err, retry, logf)
+					continue
+				}
+				logf("write-back: %s is gone, so %s no longer follows it", c.Path, c.Origin)
+				continue
+			}
 			if !due {
 				continue
 			}
@@ -189,14 +201,19 @@ func checkCopy(c pastedCopy, w *copyWatch) (string, bool, error) {
 		return "", false, nil
 	}
 	sig, ok, err := sigOf(c.Path)
-	if err != nil || !ok {
+	if err != nil {
 		return "", false, err
 	}
+	if !ok {
+		w.absent++
+		return "", false, nil
+	}
+	w.absent = 0
 	if sig != w.seen {
 		w.seen = sig
 		return "", false, nil
 	}
-	rec := copyRecord{Origin: c.Origin, Synced: c.Synced, Refused: c.Refused}
+	rec := c.rec()
 	if sig == w.handled && rec == w.handledRec || time.Now().Before(w.retryAt) {
 		return "", false, nil
 	}
@@ -216,7 +233,7 @@ func checkCopy(c pastedCopy, w *copyWatch) (string, bool, error) {
 func sendCopy(ctx context.Context, l boxlayout.Layout, laptop Laptop, c pastedCopy, sum string, logf func(string, ...any)) (copyRecord, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, writeBackTimeout)
 	defer cancel()
-	rec := copyRecord{Origin: c.Origin, Synced: c.Synced, Refused: c.Refused}
+	rec := c.rec()
 	res, err := laptop.WriteBack(reqCtx, linkproto.WriteBackRequest{Session: c.Session, Origin: c.Origin, BoxPath: c.Path})
 	switch {
 	case errors.Is(err, linkproto.ErrRefused):

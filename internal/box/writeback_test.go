@@ -383,3 +383,51 @@ func TestAListingThatFailsMeanwhileSendsNoCopyTwice(t *testing.T) {
 	once.Do(func() { close(release) })
 	expectNone(t, calls)
 }
+
+// A laptop file a save made follows its box file, wherever that is: each
+// change goes, through a rename too, until the box file is gone.
+func TestALaptopSavedFileFollowsItsBoxFileUntilItIsGone(t *testing.T) {
+	l := testLayout(t)
+	path := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkSaved(l, pasteSession, "/l/Downloads/report.md", path, sha("v1")); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(chan linkproto.WriteBackRequest, 10)
+	watchLayout(t, l, laptopTaking(seen))
+	expectNone(t, seen)
+	want := linkproto.WriteBackRequest{Session: pasteSession, Origin: "/l/Downloads/report.md", BoxPath: path}
+	for _, c := range []string{"v2", "v3"} {
+		if err := os.WriteFile(path+".tmp", []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(path+".tmp", path); err != nil {
+			t.Fatal(err)
+		}
+		expectWriteBack(t, seen, want)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		copies, err := sessionCopies(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(copies) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a gone box file is still followed: %+v", copies)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.WriteFile(path, []byte("v4"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectNone(t, seen)
+}

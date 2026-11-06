@@ -160,10 +160,10 @@ func TestAFailedFetchIsNoRefusal(t *testing.T) {
 
 func TestLaptopSaveSavesIntoDownloadsAndRevealsIt(t *testing.T) {
 	f := newFilesFixture(t, fakeFetcher{"/box/out/report.pdf": "%PDF"})
-	path, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{Session: filesSession, BoxPath: "/box/out/report.pdf"})
+	saved, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{Session: filesSession, BoxPath: "/box/out/report.pdf"})
 	want := filepath.Join(f.home, "Downloads", "report.pdf")
-	if err != nil || path != want {
-		t.Fatalf("saved to %s, %v", path, err)
+	if err != nil || saved != (linkproto.LaptopSaveResult{Path: want, SHA256: sha("%PDF"), Linked: true}) {
+		t.Fatalf("saved %+v, %v", saved, err)
 	}
 	if !slices.Equal(f.revealed.paths, []string{want}) {
 		t.Fatalf("revealed %q", f.revealed.paths)
@@ -179,6 +179,21 @@ func TestLaptopSaveSavesIntoDownloadsAndRevealsIt(t *testing.T) {
 	}
 	if _, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{BoxPath: "relative.pdf"}); err == nil {
 		t.Fatal("saved a relative box path")
+	}
+}
+
+// A saved file takes its box file's later changes as a write-back.
+func TestASavedFileTakesItsBoxFilesChanges(t *testing.T) {
+	box := fakeFetcher{"/box/out/report.md": "v1"}
+	f := newFilesFixture(t, box)
+	saved, err := f.h.LaptopSave(context.Background(), linkproto.LaptopSaveRequest{Session: filesSession, BoxPath: "/box/out/report.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	box["/box/out/report.md"] = "v2"
+	res, err := f.h.WriteBack(context.Background(), linkproto.WriteBackRequest{Session: filesSession, Origin: saved.Path, BoxPath: "/box/out/report.md"})
+	if err != nil || res != (linkproto.WriteBackResult{Outcome: "written", Path: saved.Path, SHA256: sha("v2")}) {
+		t.Fatalf("write-back %+v, %v", res, err)
 	}
 }
 

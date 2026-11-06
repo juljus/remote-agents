@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"remote-agents/internal/boxlayout"
 	"remote-agents/internal/linkproto"
 )
 
@@ -22,7 +23,9 @@ type fakeLaptop struct {
 	writeBack func(linkproto.WriteBackRequest) (linkproto.WriteBackResult, error)
 	saves     []linkproto.LaptopSaveRequest
 	saveErr   error
-	down      bool
+	// pasted makes every save one over a file pasted into the session.
+	pasted bool
+	down   bool
 }
 
 func (f *fakeLaptop) err() error {
@@ -86,15 +89,21 @@ func (f *fakeLaptop) WriteBack(_ context.Context, req linkproto.WriteBackRequest
 	return f.writeBack(req)
 }
 
-func (f *fakeLaptop) LaptopSave(_ context.Context, req linkproto.LaptopSaveRequest) (string, error) {
+// LaptopSave saves as a laptop where nothing was pasted: a save from a
+// session follows its box file.
+func (f *fakeLaptop) LaptopSave(_ context.Context, req linkproto.LaptopSaveRequest) (linkproto.LaptopSaveResult, error) {
 	if err := f.err(); err != nil {
-		return "", err
+		return linkproto.LaptopSaveResult{}, err
 	}
 	if f.saveErr != nil {
-		return "", f.saveErr
+		return linkproto.LaptopSaveResult{}, f.saveErr
 	}
 	f.saves = append(f.saves, req)
-	return "/Users/me/Downloads/" + filepath.Base(req.BoxPath), nil
+	sum, err := fileSum(req.BoxPath)
+	if err != nil {
+		return linkproto.LaptopSaveResult{}, err
+	}
+	return linkproto.LaptopSaveResult{Path: "/Users/me/Downloads/" + filepath.Base(req.BoxPath), SHA256: sum, Linked: req.Session != "" && !f.pasted}, nil
 }
 
 type run struct {
@@ -105,9 +114,14 @@ type run struct {
 
 func runShim(t *testing.T, name string, args []string, stdin string, laptop Laptop, env map[string]string) run {
 	t.Helper()
+	return runShimIn(t, testLayout(t), name, args, stdin, laptop, env)
+}
+
+func runShimIn(t *testing.T, l boxlayout.Layout, name string, args []string, stdin string, laptop Laptop, env map[string]string) run {
+	t.Helper()
 	var out, errOut bytes.Buffer
 	io := IO{Stdin: strings.NewReader(stdin), Stdout: &out, Stderr: &errOut}
-	code := RunShim(context.Background(), name, args, io, laptop, func(k string) string { return env[k] })
+	code := RunShim(context.Background(), l, name, args, io, laptop, func(k string) string { return env[k] })
 	return run{code, out.String(), errOut.String()}
 }
 
@@ -262,11 +276,11 @@ func TestLaptopSaveAsksTheLaptopToFetchTheFile(t *testing.T) {
 	l := &fakeLaptop{}
 	env := map[string]string{SessionEnvVar: pasteSession}
 	r := runShim(t, "laptop-save", []string{"report.pdf"}, "", l, env)
-	if r.code != 0 || r.stdout != "saved to /Users/me/Downloads/report.pdf on the laptop\n" {
+	if r.code != 0 || r.stdout != "saved to /Users/me/Downloads/report.pdf on the laptop; later changes to "+path+" go there on their own\n" {
 		t.Fatalf("laptop-save = %+v", r)
 	}
 	r = runShim(t, "laptop-save", []string{path, "~/Downloads/x.pdf"}, "", l, nil)
-	if r.code != 0 {
+	if r.code != 0 || r.stdout != "saved to /Users/me/Downloads/report.pdf on the laptop\n" {
 		t.Fatalf("laptop-save to a path = %+v", r)
 	}
 	want := []linkproto.LaptopSaveRequest{
@@ -275,6 +289,45 @@ func TestLaptopSaveAsksTheLaptopToFetchTheFile(t *testing.T) {
 	}
 	if !slices.Equal(l.saves, want) {
 		t.Fatalf("saves %+v, want %+v", l.saves, want)
+	}
+}
+
+// A laptop file a save from a session made follows the box file: the link
+// holder's watcher finds its record.
+func TestLaptopSaveLeavesTheLaptopFileFollowingTheBoxFile(t *testing.T) {
+	l := testLayout(t)
+	path := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := runShimIn(t, l, "laptop-save", []string{path}, "", &fakeLaptop{}, map[string]string{SessionEnvVar: pasteSession})
+	if r.code != 0 {
+		t.Fatalf("laptop-save = %+v", r)
+	}
+	copies, err := sessionCopies(l)
+	want := pastedCopy{Session: pasteSession, Origin: "/Users/me/Downloads/report.md", Path: path, Linked: true, Synced: sha("v1")}
+	if err != nil || len(copies) != 1 || copies[0].record == "" {
+		t.Fatalf("copies %+v, %v", copies, err)
+	}
+	if copies[0].record = ""; copies[0] != want {
+		t.Fatalf("copy %+v, want %+v", copies[0], want)
+	}
+}
+
+// A save over a file pasted into the session leaves its pasted copy the one
+// that goes back, and the agent hears so.
+func TestLaptopSaveOverAPastedFileSaysWhichCopyGoesBack(t *testing.T) {
+	l := testLayout(t)
+	path := filepath.Join(t.TempDir(), "notes.md")
+	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := runShimIn(t, l, "laptop-save", []string{path}, "", &fakeLaptop{pasted: true}, map[string]string{SessionEnvVar: pasteSession})
+	if r.code != 0 || !strings.Contains(r.stdout, "it was pasted into this session") {
+		t.Fatalf("laptop-save = %+v", r)
+	}
+	if copies, err := sessionCopies(l); err != nil || len(copies) != 0 {
+		t.Fatalf("copies %+v, %v", copies, err)
 	}
 }
 

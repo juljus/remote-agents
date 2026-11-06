@@ -231,8 +231,21 @@ with Touch ID (or your password), which it asks for each new place, `~/Downloads
 per session. It goes into `~/Downloads` under its name, or a free `name (1).ext`, and shows it
 in Finder (`[link] revealer`). A laptop path may name any place on the laptop (`~/` or
 absolute; a relative one is in `~/Downloads`); a file it names is replaced, and the prompt says
-so, its old version going to the Trash. Agents learn both from one line the box adds to their
-system prompt (Claude) or developer instructions (Codex, after those of its `config.toml`).
+so, its old version going to the Trash.
+
+After a save from a session, the laptop file follows the box file for as long as a pasted copy
+would: each later change goes over it within about a second, without asking again, under the
+same conflict rule as a write-back (`name (box).ext` beside a file you changed since). Saving the
+same box file again goes to the same laptop file, in a dir too, without asking. Another box file
+saved to that laptop file asks as any save does, and takes its place. Once the box file is gone
+for a poll, the laptop file stops following it and stays as it is. A file pasted into the
+session stays pasted when saved over: its pasted copy is what goes back. After the link daemon
+restarts, the next change asks once more.
+
+Agents learn all this from a note the box adds to their system prompt (Claude) or developer
+instructions (Codex, after those of its `config.toml`). It says first that they run on the box,
+whose paths mirror the laptop's on a separate disk, and that a file reaches the laptop only
+through a write-back or `laptop-save`.
 
 A declined prompt pauses every prompt for 2 minutes; see the [security model](security.md).
 

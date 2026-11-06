@@ -46,7 +46,9 @@ starts no pause.
 
 An approval holds for that file's write-backs (or that save destination) and session, on the
 terms its prompt named, until the link daemon restarts: what makes the place risky changing, or a
-save that would now replace the file it was approved to create, asks again. It lives only in the
+save that would now replace the file it was approved to create, asks again. A save's approval
+also covers the later changes of the box file it saved, to that laptop file and from that
+session only; another box file or destination asks as any save does. It lives only in the
 daemon's memory, as a grant kept in a file could be forged by a write to it. The place is checked
 again where the write lands; one that changed since the prompt is refused.
 

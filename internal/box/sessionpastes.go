@@ -19,26 +19,41 @@ import (
 // A session's copy of a pasted laptop file lives at
 // session-pastes/<session>/<key>/<name>, its record beside its dir as
 // <key>.json; key comes from the laptop path, so pasting a file again into
-// the session replaces its copy.
+// the session replaces its copy. A laptop file a laptop-save of the session
+// made has a record there too, of the box file it follows, wherever that is;
+// a paste and a save of one laptop file take each other's place.
 
 // copyRecord is what the box keeps about a session's copy: its laptop path,
 // the hash of the content the laptop last pasted or took, and that of a
 // version the laptop refused, which the box does not offer again. A refused
-// version reached no laptop, so it stays a change the laptop lacks.
+// version reached no laptop, so it stays a change the laptop lacks. Path is
+// the box file a saved laptop file follows, and empty for a paste.
 type copyRecord struct {
 	Origin  string `json:"origin"`
 	Synced  string `json:"synced"`
 	Refused string `json:"refused,omitempty"`
+	Path    string `json:"path,omitempty"`
 }
 
-// pastedCopy is one session's copy of a pasted laptop file.
+// pastedCopy is one session's copy of a pasted laptop file, or the box file
+// a saved one follows when Linked.
 type pastedCopy struct {
 	Session string
 	Origin  string
 	Path    string
+	Linked  bool
 	Synced  string
 	Refused string
 	record  string
+}
+
+// rec is the record c was read from.
+func (c pastedCopy) rec() copyRecord {
+	rec := copyRecord{Origin: c.Origin, Synced: c.Synced, Refused: c.Refused}
+	if c.Linked {
+		rec.Path = c.Path
+	}
+	return rec
 }
 
 func originKey(origin string) string {
@@ -50,7 +65,9 @@ func originKey(origin string) string {
 // over session's copy of it. A copy holding a change the laptop lacks yet
 // stays: when the laptop's file is as it was, the change is the newer one and
 // still goes back; when both changed, the paste fails until the change has
-// reached the laptop, where the conflict rule keeps both. The caller holds
+// reached the laptop, where the conflict rule keeps both. A box file the
+// laptop file follows since a save is no copy to keep: the paste fails until
+// its change has reached the laptop, then takes its place. The caller holds
 // the pasted lock.
 func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (string, error) {
 	dir := filepath.Join(l.SessionPastesDir(), session, originKey(origin))
@@ -61,12 +78,16 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 		return "", err
 	}
 	if found {
-		pending, err := changedSince(path, rec.Synced)
+		held := path
+		if rec.Path != "" {
+			held = rec.Path
+		}
+		pending, err := changedSince(held, rec.Synced)
 		if err != nil {
 			return "", err
 		}
 		switch {
-		case pending && sum == rec.Synced:
+		case pending && sum == rec.Synced && rec.Path == "":
 			// Pasting again asks the laptop afresh about a version it refused.
 			if rec.Refused != "" {
 				rec.Refused = ""
@@ -76,12 +97,12 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 			}
 			return path, nil
 		case pending:
-			copySum, err := fileSum(path)
+			copySum, err := fileSum(held)
 			if err != nil {
 				return "", err
 			}
 			if copySum == rec.Refused {
-				return "", fmt.Errorf("the laptop refused the agent's version of %s, which stays at %s on the box; have the agent laptop-save it, or remove it to paste the file again", filepath.Base(origin), path)
+				return "", fmt.Errorf("the laptop refused the agent's version of %s, which stays at %s on the box; have the agent laptop-save it, or remove it to paste the file again", filepath.Base(origin), held)
 			}
 			return "", fmt.Errorf("the agent's change to %s has not reached the laptop yet; paste it again once it has", filepath.Base(origin))
 		}
@@ -96,6 +117,20 @@ func keepSessionCopy(l boxlayout.Layout, session, origin, stored, sum string) (s
 		return "", err
 	}
 	return path, nil
+}
+
+// linkSaved records that the laptop file origin, holding content of hash sum,
+// follows the box file path since session saved it there, for the link
+// holder to send it path's later changes. It takes the place of a paste of
+// origin into session.
+func linkSaved(l boxlayout.Layout, session, origin, path, sum string) error {
+	dir := filepath.Join(l.SessionPastesDir(), session)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating the session's paste dir: %w", err)
+	}
+	return withFlock(l.PastedLock(), func() error {
+		return jsonfile.Write(filepath.Join(dir, originKey(origin)+".json"), copyRecord{Origin: origin, Synced: sum, Path: path})
+	})
 }
 
 // changedSince reports whether path holds content other than of hash synced;
@@ -165,11 +200,16 @@ func sessionCopies(l boxlayout.Layout) ([]pastedCopy, error) {
 			if !found {
 				continue
 			}
-			key := filepath.Base(record[:len(record)-len(".json")])
+			path := rec.Path
+			if path == "" {
+				key := filepath.Base(record[:len(record)-len(".json")])
+				path = filepath.Join(dir, key, filepath.Base(rec.Origin))
+			}
 			out = append(out, pastedCopy{
 				Session: s.Name(),
 				Origin:  rec.Origin,
-				Path:    filepath.Join(dir, key, filepath.Base(rec.Origin)),
+				Path:    path,
+				Linked:  rec.Path != "",
 				Synced:  rec.Synced,
 				Refused: rec.Refused,
 				record:  record,
@@ -189,23 +229,37 @@ func markRefused(l boxlayout.Layout, c pastedCopy, sum string) error {
 	return updateCopy(l, c, func(rec *copyRecord) { rec.Refused = sum })
 }
 
-// updateCopy changes c's record with fn, unless the record changed since c
-// was read, as a paste in between changes it.
+// unlink drops the record of c, a box file that is gone, so that the laptop
+// file following it no longer does.
+func unlink(l boxlayout.Layout, c pastedCopy) error {
+	return whileUnchanged(l, c, func(copyRecord) error { return removeIfThere(c.record) })
+}
+
+// updateCopy changes c's record with fn.
 func updateCopy(l boxlayout.Layout, c pastedCopy, fn func(*copyRecord)) error {
-	return withFlock(l.PastedLock(), func() error {
-		var rec copyRecord
-		found, err := jsonfile.Read(c.record, &rec)
-		if err != nil || !found || rec != (copyRecord{Origin: c.Origin, Synced: c.Synced, Refused: c.Refused}) {
-			return err
-		}
+	return whileUnchanged(l, c, func(rec copyRecord) error {
 		fn(&rec)
 		return jsonfile.Write(c.record, rec)
 	})
 }
 
+// whileUnchanged runs fn on c's record holding the pasted lock, unless the
+// record changed since c was read, as a paste or save in between changes it.
+func whileUnchanged(l boxlayout.Layout, c pastedCopy, fn func(copyRecord) error) error {
+	return withFlock(l.PastedLock(), func() error {
+		var rec copyRecord
+		found, err := jsonfile.Read(c.record, &rec)
+		if err != nil || !found || rec != c.rec() {
+			return err
+		}
+		return fn(rec)
+	})
+}
+
 // pruneSessionCopies removes the copies whose file and record are older than
 // pastedTTL and that hold what the laptop has, then the session dirs left
-// empty. The caller holds the pasted lock.
+// empty. A box file a saved laptop file follows stays; only its record goes.
+// The caller holds the pasted lock.
 func pruneSessionCopies(l boxlayout.Layout, now time.Time) error {
 	copies, listErr := sessionCopies(l)
 	for _, c := range copies {
@@ -216,7 +270,11 @@ func pruneSessionCopies(l boxlayout.Layout, now time.Time) error {
 		if !stale {
 			continue
 		}
-		if err := errors.Join(os.RemoveAll(filepath.Dir(c.Path)), removeIfThere(c.record)); err != nil {
+		var removeCopy error
+		if !c.Linked {
+			removeCopy = os.RemoveAll(filepath.Dir(c.Path))
+		}
+		if err := errors.Join(removeCopy, removeIfThere(c.record)); err != nil {
 			return fmt.Errorf("pruning a session's paste: %w", err)
 		}
 	}

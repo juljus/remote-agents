@@ -17,18 +17,40 @@ import (
 // write; the box drops its copies after a week without either.
 const recordTTL = 14 * 24 * time.Hour
 
-// Records keeps, per session, the laptop files pasted into it: the content
-// the laptop had at the paste or the last write-back (the base), and that of
-// the last copy written beside the file when the laptop's had changed.
+// Records keeps, per session, the laptop files pasted into it or saved from
+// it: the content the laptop had at the paste, save or last write-back (the
+// base), that of the last copy written beside the file when the laptop's had
+// changed, and for a saved file the box file it follows.
 type Records struct{ Dir string }
 
 type entry struct {
-	Base string `json:"base"`
-	Copy string `json:"copy,omitempty"`
+	Base   string `json:"base"`
+	Copy   string `json:"copy,omitempty"`
+	Linked string `json:"linked,omitempty"`
+}
+
+// from refuses a write-back of boxPath to origin, whose entry is e, when
+// origin follows another box file. A pasted file's copy is the box's to place.
+func (e entry) from(origin, boxPath string) error {
+	if e.Linked != "" && e.Linked != boxPath {
+		return fmt.Errorf("%w: %s follows %s on the box, not %s", ErrRefused, origin, e.Linked, boxPath)
+	}
+	return nil
 }
 
 type sessionRecord struct {
 	Files map[string]entry `json:"files"`
+}
+
+// linkedFrom is the set of laptop files that follow boxPath.
+func (rec sessionRecord) linkedFrom(boxPath string) map[string]bool {
+	out := map[string]bool{}
+	for origin, e := range rec.Files {
+		if e.Linked == boxPath {
+			out[origin] = true
+		}
+	}
+	return out
 }
 
 // Pasted records that origin, holding content of hash sum, was pasted into
@@ -74,13 +96,20 @@ func checkSession(session string) error {
 
 func (r Records) path(session string) string { return filepath.Join(r.Dir, session+".json") }
 
-// lookup returns what is recorded about origin in session.
-func (r Records) lookup(session, origin string) (entry, bool, error) {
+// read returns session's record.
+func (r Records) read(session string) (sessionRecord, error) {
 	if err := checkSession(session); err != nil {
-		return entry{}, false, err
+		return sessionRecord{}, err
 	}
 	var rec sessionRecord
-	if _, err := jsonfile.Read(r.path(session), &rec); err != nil {
+	_, err := jsonfile.Read(r.path(session), &rec)
+	return rec, err
+}
+
+// lookup returns what is recorded about origin in session.
+func (r Records) lookup(session, origin string) (entry, bool, error) {
+	rec, err := r.read(session)
+	if err != nil {
 		return entry{}, false, err
 	}
 	e, ok := rec.Files[origin]

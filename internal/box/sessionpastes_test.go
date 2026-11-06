@@ -224,3 +224,64 @@ func TestABrokenRecordHoldsUpNoOtherCopy(t *testing.T) {
 		t.Fatalf("copies %+v, %v", copies, err)
 	}
 }
+
+// A paste of a laptop file that follows a box file since a save takes its
+// place once the box file's change reached the laptop; the box file stays.
+func TestAPasteOfASavedFileTakesThePlaceOfItsBoxFile(t *testing.T) {
+	l := testLayout(t)
+	path := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(path, []byte("v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkSaved(l, pasteSession, "/l/report.md", path, sha("v1")); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := PasteFilesInto(l, pasteSession, exchange(t, []string{"/l/report.md"}, [2]string{"/l/report.md", "v1"}), &out, time.Now()); err == nil || !strings.Contains(err.Error(), "has not reached the laptop yet") {
+		t.Fatalf("paste over a pending change: %v", err)
+	}
+	copies, err := sessionCopies(l)
+	if err != nil || len(copies) != 1 {
+		t.Fatalf("copies %+v, %v", copies, err)
+	}
+	if err := markSynced(l, copies[0], sha("v2")); err != nil {
+		t.Fatal(err)
+	}
+	pasted := pasteInto(t, l, pasteSession, [2]string{"/l/report.md", "v2"})
+	copies, err = sessionCopies(l)
+	if err != nil || len(copies) != 1 || copies[0].Linked || copies[0].Path != pasted[0] {
+		t.Fatalf("copies %+v, %v; pasted %q", copies, err, pasted)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "v2" {
+		t.Fatalf("the box file holds %q, %v", data, err)
+	}
+}
+
+// Pruning drops an old record of a box file a laptop file follows, never the box file.
+func TestPrunePastedLeavesTheBoxFileOfAnOldSave(t *testing.T) {
+	l := testLayout(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.md")
+	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkSaved(l, pasteSession, "/l/report.md", path, sha("v1")); err != nil {
+		t.Fatal(err)
+	}
+	weekAgo := time.Now().Add(-8 * 24 * time.Hour)
+	record := filepath.Join(l.SessionPastesDir(), pasteSession, originKey("/l/report.md")+".json")
+	for _, p := range []string{path, record} {
+		if err := os.Chtimes(p, weekAgo, weekAgo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := prunePasted(l, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if copies, err := sessionCopies(l); err != nil || len(copies) != 0 {
+		t.Fatalf("copies %+v, %v", copies, err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "v1" {
+		t.Fatalf("the box file holds %q, %v", data, err)
+	}
+}

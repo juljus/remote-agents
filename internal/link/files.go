@@ -39,7 +39,7 @@ func (h *Handler) fetch(ctx context.Context, boxPath string) laptopfiles.Fetch {
 // a conflict or a failure.
 func (h *Handler) WriteBack(ctx context.Context, req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error) {
 	name := filepath.Base(req.Origin)
-	res, err := h.Files.WriteBack(ctx, req.Session, req.Origin, h.fetch(ctx, req.BoxPath))
+	res, err := h.Files.WriteBack(ctx, req.Session, req.Origin, req.BoxPath, h.fetch(ctx, req.BoxPath))
 	if err != nil {
 		h.notify(ctx, req.Session, fmt.Sprintf("%s not written back: %v", name, err))
 		return linkproto.WriteBackResult{}, refusal(err)
@@ -63,16 +63,13 @@ func (h *Handler) reportLeftover(ctx context.Context, session string, res laptop
 // LaptopSave fetches a box file to where the user lets it go, and shows it
 // in Finder. The session's screen hears of a refusal, which may come from
 // a prompt nobody answered.
-func (h *Handler) LaptopSave(ctx context.Context, req linkproto.LaptopSaveRequest) (string, error) {
-	if !filepath.IsAbs(req.BoxPath) {
-		return "", fmt.Errorf("box path %q is not absolute", req.BoxPath)
-	}
-	res, err := h.Files.Save(ctx, req.Session, filepath.Base(req.BoxPath), req.Dest, h.fetch(ctx, req.BoxPath))
+func (h *Handler) LaptopSave(ctx context.Context, req linkproto.LaptopSaveRequest) (linkproto.LaptopSaveResult, error) {
+	res, err := h.Files.Save(ctx, req.Session, req.BoxPath, req.Dest, h.fetch(ctx, req.BoxPath))
 	if errors.Is(err, laptopfiles.ErrRefused) && req.Session != "" {
 		h.notify(ctx, req.Session, fmt.Sprintf("%s not saved: %v", filepath.Base(req.BoxPath), err))
 	}
 	if err != nil {
-		return "", refusal(err)
+		return linkproto.LaptopSaveResult{}, refusal(err)
 	}
 	h.Logf("saved %s from the box to %s", req.BoxPath, res.Path)
 	h.reportLeftover(ctx, req.Session, res)
@@ -80,7 +77,7 @@ func (h *Handler) LaptopSave(ctx context.Context, req linkproto.LaptopSaveReques
 	if err := h.Revealer.Reveal(ctx, res.Path); err != nil {
 		h.Logf("showing %s in Finder: %v", res.Path, err)
 	}
-	return res.Path, nil
+	return linkproto.LaptopSaveResult{Path: res.Path, SHA256: res.Sum, Linked: res.Linked}, nil
 }
 
 // refusal marks a laptopfiles refusal as one for the box, which then stops asking.

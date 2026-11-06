@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 
+	"remote-agents/internal/boxlayout"
 	"remote-agents/internal/linkproto"
 	"remote-agents/internal/pastefile"
 )
@@ -23,7 +24,7 @@ type Laptop interface {
 	ClipboardWrite(ctx context.Context, mime string, data []byte) error
 	Hook(ctx context.Context, req linkproto.HookRequest) (linkproto.HookResult, error)
 	WriteBack(ctx context.Context, req linkproto.WriteBackRequest) (linkproto.WriteBackResult, error)
-	LaptopSave(ctx context.Context, req linkproto.LaptopSaveRequest) (string, error)
+	LaptopSave(ctx context.Context, req linkproto.LaptopSaveRequest) (linkproto.LaptopSaveResult, error)
 }
 
 type IO struct {
@@ -42,8 +43,8 @@ const (
 
 var ShimNames = []string{"xclip", "wl-paste", "xdg-open", "cmux", "laptop-save"}
 
-// RunShim runs the shim called name and returns its exit code.
-func RunShim(ctx context.Context, name string, args []string, stdio IO, laptop Laptop, getenv func(string) string) int {
+// RunShim runs the shim called name of the install l and returns its exit code.
+func RunShim(ctx context.Context, l boxlayout.Layout, name string, args []string, stdio IO, laptop Laptop, getenv func(string) string) int {
 	var err error
 	switch name {
 	case "xclip":
@@ -55,7 +56,7 @@ func RunShim(ctx context.Context, name string, args []string, stdio IO, laptop L
 	case "cmux":
 		return cmuxHook(ctx, args, stdio, laptop, getenv(SessionEnvVar))
 	case "laptop-save":
-		err = laptopSave(ctx, args, stdio, laptop, getenv(SessionEnvVar))
+		err = laptopSave(ctx, l, args, stdio, laptop, getenv(SessionEnvVar))
 	default:
 		err = fmt.Errorf("unknown shim %q", name)
 	}
@@ -235,11 +236,15 @@ they are asked for each new place and get up to 10 minutes to give. It goes
 to ~/Downloads, revealed in Finder, unless a laptop path says where: anywhere
 on the laptop (~/ or absolute; a relative path is in ~/Downloads), and a dir
 takes the file under its name. A file the path names is replaced, its old
-version to the Trash; in a dir, the save takes a free name.`
+version to the Trash; in a dir, the save takes a free name, or the one it
+took before. From then on, the box file's changes reach the laptop file on
+their own, without asking; one the user changed on the laptop since stays,
+the box's version going beside it as "name (box).ext".`
 
 // laptopSave asks the laptop to fetch a box file; it never sends the content
-// over the link itself.
-func laptopSave(ctx context.Context, args []string, stdio IO, laptop Laptop, session string) error {
+// over the link itself. A save from a session leaves the laptop file
+// following the box file, which the link holder then sends it the changes of.
+func laptopSave(ctx context.Context, l boxlayout.Layout, args []string, stdio IO, laptop Laptop, session string) error {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		_, err := fmt.Fprintln(stdio.Stdout, laptopSaveHelp)
 		return err
@@ -269,6 +274,16 @@ func laptopSave(ctx context.Context, args []string, stdio IO, laptop Laptop, ses
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop\n", saved)
+	switch {
+	case saved.Linked:
+		if err := linkSaved(l, session, saved.Path, path, saved.SHA256); err != nil {
+			return fmt.Errorf("saved to %s on the laptop, but later changes to %s will not follow: %w", saved.Path, path, err)
+		}
+		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop; later changes to %s go there on their own\n", saved.Path, path)
+	case session != "":
+		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop; it was pasted into this session, so changes to its pasted copy go back to it, not those to %s\n", saved.Path, path)
+	default:
+		_, err = fmt.Fprintf(stdio.Stdout, "saved to %s on the laptop\n", saved.Path)
+	}
 	return err
 }

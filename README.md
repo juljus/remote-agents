@@ -14,8 +14,9 @@ session. Your local `claude` and `codex` are not changed.
   Logins that call back to `localhost`, such as Claude's `/login` or `rcodex login`, complete
   through the link.
 - A Mac file pasted or dragged into a session is uploaded, and the agent works on its own copy.
-  Edits to that copy are written back to the Mac file. `laptop-save` on the box saves a new file
-  to the Mac. New or risky writes on the Mac ask for Touch ID first.
+  Edits to that copy are written back to the Mac file. `laptop-save` on the box saves a file to
+  the Mac, and the box file's later edits follow it there. New or risky writes on the Mac ask
+  for Touch ID first.
 - The box can hold several Claude and ChatGPT logins; `rclaude account` and `rcodex account`
   switch between them and show each one's remaining weekly usage.
 - Each session has its own memory limit, so the kernel kills only the process that exceeded it.

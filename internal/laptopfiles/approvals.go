@@ -37,6 +37,8 @@ type purpose int
 const (
 	writeBackUse purpose = iota
 	saveUse
+	// linkUse is a saved file's taking its box file's later changes.
+	linkUse
 )
 
 // grant is what a session gets approved: a use of a path, on the terms the
@@ -81,6 +83,13 @@ func (g *Gate) approved(gr grant) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.granted[gr]
+}
+
+// allow grants gr unasked, as part of a use the user just approved.
+func (g *Gate) allow(gr grant) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.granted[gr] = true
 }
 
 // ask makes sure gr is granted, asking the user with reason unless it is

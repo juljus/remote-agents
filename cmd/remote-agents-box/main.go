@@ -78,7 +78,7 @@ func runShim(name string, layout boxlayout.Layout, stdio box.IO) int {
 		defer cancel()
 	}
 	laptop := linkproto.Client{Socket: layout.LaptopSocket(), DialTimeout: 3 * time.Second}
-	return box.RunShim(ctx, name, os.Args[1:], stdio, laptop, os.Getenv)
+	return box.RunShim(ctx, layout, name, os.Args[1:], stdio, laptop, os.Getenv)
 }
 
 // runCommand returns the process exit code; launch passes the agent's code through.

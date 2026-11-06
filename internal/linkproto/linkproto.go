@@ -94,6 +94,15 @@ type LaptopSaveRequest struct {
 	Dest    string `json:"dest,omitempty"`
 }
 
+// LaptopSaveResult says where a laptop save went and what it holds. Linked
+// says the laptop file follows the box file from then on, as a save from a
+// session makes it, but for a file pasted into it, which follows its copy.
+type LaptopSaveResult struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Linked bool   `json:"linked,omitempty"`
+}
+
 // NoticeRequest asks the wrapper showing Session to show Text on its bottom row.
 type NoticeRequest struct {
 	Session string `json:"session"`
@@ -135,14 +144,13 @@ const (
 )
 
 type Response struct {
-	Error     string           `json:"error,omitempty"`
-	ErrorCode errorCode        `json:"error_code,omitempty"`
-	Targets   []string         `json:"targets,omitempty"`
-	Data      []byte           `json:"data,omitempty"`
-	Hook      *HookResult      `json:"hook,omitempty"`
-	WriteBack *WriteBackResult `json:"write_back,omitempty"`
-	// Path is where a laptop save went.
-	Path string `json:"path,omitempty"`
+	Error      string            `json:"error,omitempty"`
+	ErrorCode  errorCode         `json:"error_code,omitempty"`
+	Targets    []string          `json:"targets,omitempty"`
+	Data       []byte            `json:"data,omitempty"`
+	Hook       *HookResult       `json:"hook,omitempty"`
+	WriteBack  *WriteBackResult  `json:"write_back,omitempty"`
+	LaptopSave *LaptopSaveResult `json:"laptop_save,omitempty"`
 }
 
 // Err is the failure the response carries, mapped back to the sentinel errors.
@@ -167,7 +175,7 @@ type Handler interface {
 	ClipboardWrite(ctx context.Context, mime string, data []byte) error
 	Hook(ctx context.Context, req HookRequest) (HookResult, error)
 	WriteBack(ctx context.Context, req WriteBackRequest) (WriteBackResult, error)
-	LaptopSave(ctx context.Context, req LaptopSaveRequest) (string, error)
+	LaptopSave(ctx context.Context, req LaptopSaveRequest) (LaptopSaveResult, error)
 }
 
 func dispatch(ctx context.Context, h Handler, req Request) Response {
@@ -191,7 +199,9 @@ func dispatch(ctx context.Context, h Handler, req Request) Response {
 		res, err = h.WriteBack(ctx, *req.WriteBack)
 		resp.WriteBack = &res
 	case req.LaptopSave != nil:
-		resp.Path, err = h.LaptopSave(ctx, *req.LaptopSave)
+		var res LaptopSaveResult
+		res, err = h.LaptopSave(ctx, *req.LaptopSave)
+		resp.LaptopSave = &res
 	case req.Notice != nil:
 		err = errors.New("notices are for session wrappers, not the link daemon")
 	}
@@ -298,13 +308,13 @@ func (c Client) WriteBack(ctx context.Context, req WriteBackRequest) (WriteBackR
 	return *resp.WriteBack, nil
 }
 
-func (c Client) LaptopSave(ctx context.Context, req LaptopSaveRequest) (string, error) {
+func (c Client) LaptopSave(ctx context.Context, req LaptopSaveRequest) (LaptopSaveResult, error) {
 	resp, err := c.call(ctx, Request{LaptopSave: &req})
 	if err != nil {
-		return "", err
+		return LaptopSaveResult{}, err
 	}
-	if resp.Path == "" {
-		return "", errors.New("laptop: save response without a path")
+	if resp.LaptopSave == nil {
+		return LaptopSaveResult{}, errors.New("laptop: save response without result")
 	}
-	return resp.Path, nil
+	return *resp.LaptopSave, nil
 }
