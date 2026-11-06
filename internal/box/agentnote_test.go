@@ -86,3 +86,13 @@ func TestTheNoteSaysASaveWaitsForTheUserAndMayGoAnywhere(t *testing.T) {
 		}
 	}
 }
+
+// An agent on the box whose paths mirror the laptop's must not take a file
+// here for one on the laptop, nor reach for another way across.
+func TestTheNoteSaysTheBoxIsNotTheLaptop(t *testing.T) {
+	for _, want := range []string{"remote Linux box, not on the user's laptop", "separate disk", "Never say a file is on the laptop", "Taildrop", "later changes reach the same laptop file on their own"} {
+		if !strings.Contains(agentNote, want) {
+			t.Errorf("the note does not say %q: %s", want, agentNote)
+		}
+	}
+}
