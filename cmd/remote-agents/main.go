@@ -32,6 +32,7 @@ import (
 	"remote-agents/internal/agentcli"
 	"remote-agents/internal/cmuxcapture"
 	"remote-agents/internal/cmuxcodex"
+	"remote-agents/internal/cmuxtranscript"
 	"remote-agents/internal/config"
 	"remote-agents/internal/control"
 	"remote-agents/internal/entrypoint"
@@ -211,7 +212,11 @@ func runAgent(agentName string, args []string) (int, error) {
 	if err := s.Follow(agent.Kind, followed); err != nil {
 		return 1, err
 	}
-	return runSession(e, s, hint, hooks, resume.NewTracker(plan.SessionID, plan.Resumes, resumeCommand))
+	standIns, err := transcriptStandIns(agent.Kind, hooks)
+	if err != nil {
+		return 1, err
+	}
+	return runSession(e, s, hint, hooks, standIns, resume.NewTracker(plan.SessionID, plan.Resumes, resumeCommand))
 }
 
 // resumeCommandOf gives the laptop command line that resumes a session of the agent.
@@ -259,6 +264,23 @@ func cmuxHooks(e env, agentName string, kind config.Kind, args, userArgs []strin
 	return captured.Args, &hookexec.Executor{BaseEnv: os.Environ(), Env: captured.HookEnv, Allowed: allowed}, nil
 }
 
+// transcriptStandIns is set for a Claude session whose hooks reach cmux: cmux
+// restores the tab only when it finds the session's transcript on the laptop.
+func transcriptStandIns(kind config.Kind, hooks *hookexec.Executor) (*cmuxtranscript.StandIns, error) {
+	if hooks == nil || kind != config.KindClaude {
+		return nil, nil
+	}
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolving home directory: %w", err)
+		}
+		dir = filepath.Join(home, ".claude")
+	}
+	return &cmuxtranscript.StandIns{ClaudeDir: dir}, nil
+}
+
 // agentEntry is the r<agent> symlink next to this binary. cmux records the
 // launching executable to resume sessions later, so it must be a command that
 // takes the agent's own arguments.
@@ -304,7 +326,7 @@ func requireDaemon(e env) (control.Client, error) {
 
 // runSession prints how to resume the session on the box after the agent
 // exits; tracker follows its id through the hooks the box relays.
-func runSession(e env, s spec.Spec, hint string, hooks *hookexec.Executor, tracker *resume.Tracker) (int, error) {
+func runSession(e env, s spec.Spec, hint string, hooks *hookexec.Executor, standIns *cmuxtranscript.StandIns, tracker *resume.Tracker) (int, error) {
 	ctl, err := requireDaemon(e)
 	if err != nil {
 		return 1, err
@@ -335,6 +357,12 @@ func runSession(e env, s spec.Spec, hint string, hooks *hookexec.Executor, track
 	}
 	if hooks != nil {
 		run := func(ctx context.Context, req linkproto.HookRequest) (linkproto.HookResult, error) {
+			// Before the hook: cmux looks for the transcript while it handles one.
+			if standIns != nil {
+				if serr := standIns.Observe(req.Stdin); serr != nil {
+					logger.Printf("%s: cmux will not restore this session: %v", s.Session, serr)
+				}
+			}
 			res, err := hooks.Run(ctx, req)
 			// Only hooks cmux injected run, so only their payloads name the session.
 			if err == nil {
@@ -386,7 +414,11 @@ func attach(name string) (int, error) {
 		return 1, err
 	}
 	s := spec.Spec{Mode: spec.ModeReattach, Session: name, RunID: uuid.NewString()}
-	return runSession(e, s, "remote-agents attach "+name, hooks, resume.NewTracker("", false, resumeCommandOf(agentName, agent.CLI())))
+	standIns, err := transcriptStandIns(agent.Kind, hooks)
+	if err != nil {
+		return 1, err
+	}
+	return runSession(e, s, "remote-agents attach "+name, hooks, standIns, resume.NewTracker("", false, resumeCommandOf(agentName, agent.CLI())))
 }
 
 // runCommand runs a one-shot agent invocation without shpool or reconnects.

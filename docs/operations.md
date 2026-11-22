@@ -187,6 +187,11 @@ before its first turn has no session yet and starts again.
   session on the box (Claude's own `claude --resume` line would look for it locally). With
   `--continue` or the resume picker the id comes from the SessionStart hook cmux injects; outside
   cmux only `rclaude --resume <id>` gets the line, since a new session may never have started.
+- cmux reopens a tab's session after a restart only when it finds the session's transcript on
+  the laptop, and a box session's transcript is on the box. For each Claude session `rclaude`
+  therefore writes a one-line stand-in under the laptop's Claude directory, at
+  `projects/<the box's project directory>/<session id>.jsonl`; a file already there is left
+  alone. Claude reads no conversation from it.
 - `rcodex [args]` starts Codex the same way, and `rcodex resume <id>` resumes a session. Codex
   picks a new session's id at its first turn, so `rcodex` prints the resume line only when the
   laptop knows the id: when it resumed one, or inside cmux, which relays the hooks reporting it.
