@@ -12,7 +12,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -88,8 +91,12 @@ func LaunchedByCmux(entry string, args, env []string, pid int) (Captured, bool) 
 	return c, true
 }
 
-// sessionStartArgv is the hook from which cmux records the launch it restores.
-var sessionStartArgv = []string{"hooks", "claude", "session-start"}
+// sessionStartArgvs are the hook from which cmux records the launch it
+// restores: called directly by older cmux, queued by cmux 0.65.
+var sessionStartArgvs = [][]string{
+	{"hooks", "claude", "session-start"},
+	{"hooks", "enqueue", "claude", "session-start"},
+}
 
 // HookEnv is the environment a relayed hook runs with. cmux restores a
 // session by running its claude wrapper with the CMUX_CUSTOM_CLAUDE_PATH the
@@ -98,7 +105,7 @@ var sessionStartArgv = []string{"hooks", "claude", "session-start"}
 // summarizer can, and that must not become a run on the box.
 func (c Captured) HookEnv(argv []string) map[string]string {
 	env := maps.Clone(c.Env)
-	if !slices.Equal(argv, sessionStartArgv) {
+	if !slices.ContainsFunc(sessionStartArgvs, func(a []string) bool { return slices.Equal(a, argv) }) {
 		delete(env, customClaudeEnvVar)
 	}
 	return env
@@ -122,47 +129,160 @@ const shellSyntax = "\"'`$\\|&;<>()*?[]{}~#!\t\n"
 // hookBinRef is how cmux's injected hook commands invoke its CLI.
 const hookBinRef = `"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}"`
 
-type settings struct {
-	Hooks map[string][]struct {
-		Hooks []struct {
-			Command string `json:"command"`
-		} `json:"hooks"`
-	} `json:"hooks"`
+// quietFallback ends hook commands whose output Claude parses as JSON:
+// "{}" stands in when the CLI fails. The relay answers a failed delivery
+// with no output, which Claude reads the same way.
+const quietFallback = ` 2>/dev/null || echo '{}'`
+
+// cmuxCLIRun is how cmux 0.65's hook scripts invoke the CLI they resolve from
+// CMUX_CLAUDE_HOOK_CMUX_BIN, with or without an explicit socket, up to the
+// redirect that starts their failure handling.
+var cmuxCLIRun = regexp.MustCompile(`"\$cmux_cli" (--socket "\$CMUX_SOCKET_PATH" )?([^"'$|&;<>(){}\n]*?) 2>/dev/null`)
+
+// BoxLaunch is what the box needs to run claude with cmux's hooks relayed.
+type BoxLaunch struct {
+	// Args are the captured arguments with cmux's settings given inline, as
+	// the box cannot read a settings file on the laptop, and each cmux hook
+	// reduced to a plain call of the CLI that the box relays.
+	Args []string
+	// Allowed are the cmux CLI argument lists of those hooks; the relay runs
+	// nothing else. Hooks from the user's own settings run on the box.
+	Allowed [][]string
 }
 
-// HookArgvs lists the cmux CLI argument lists of the hooks cmux injected; the
-// relay runs nothing else. Hooks from the user's own settings run on the box.
-func (c Captured) HookArgvs() ([][]string, error) {
-	raw := ""
+// ForBox prepares the captured launch for the box. Older cmux passes its
+// settings as JSON whose hooks call the CLI directly; cmux 0.65 passes a file
+// path, and its hooks are scripts that spool the event or fall back to
+// calling the CLI. On the box only that call can reach cmux, through the relay.
+func (c Captured) ForBox() (BoxLaunch, error) {
+	at, value, prefix := -1, "", ""
 	for i, a := range c.Args {
 		if a == "--settings" && i+1 < len(c.Args) {
-			raw = c.Args[i+1]
+			at, value = i+1, c.Args[i+1]
+			break
+		}
+		if v, ok := strings.CutPrefix(a, "--settings="); ok {
+			at, value, prefix = i, v, "--settings="
 			break
 		}
 	}
-	if raw == "" {
-		return nil, errors.New("cmux injected no --settings")
+	if at < 0 {
+		return BoxLaunch{}, errors.New("cmux injected no --settings")
 	}
-	var s settings
-	if err := json.Unmarshal([]byte(raw), &s); err != nil {
-		return nil, fmt.Errorf("parsing cmux --settings: %w", err)
+	raw, err := loadSettings(value)
+	if err != nil {
+		return BoxLaunch{}, err
 	}
-	var out [][]string
-	for _, groups := range s.Hooks {
-		for _, g := range groups {
-			for _, h := range g.Hooks {
-				rest, ok := strings.CutPrefix(h.Command, hookBinRef+" ")
+	settings, allowed, err := relayedSettings(raw)
+	if err != nil {
+		return BoxLaunch{}, err
+	}
+	args := slices.Clone(c.Args)
+	args[at] = prefix + settings
+	return BoxLaunch{Args: args, Allowed: allowed}, nil
+}
+
+// loadSettings reads a --settings value the way Claude does: inline JSON, or
+// the path of a JSON file.
+func loadSettings(value string) ([]byte, error) {
+	text := strings.TrimSpace(value)
+	if strings.HasPrefix(text, "{") {
+		return []byte(text), nil
+	}
+	if rest, ok := strings.CutPrefix(text, "~/"); ok {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolving cmux --settings %s: %w", text, err)
+		}
+		text = filepath.Join(home, rest)
+	}
+	data, err := os.ReadFile(text)
+	if err != nil {
+		return nil, fmt.Errorf("reading cmux --settings: %w", err)
+	}
+	return data, nil
+}
+
+// relayedSettings rewrites each cmux hook command in the settings JSON raw to
+// a plain CLI call and returns the settings with the calls' argument lists.
+// Every other setting and hook is kept as it is.
+func relayedSettings(raw []byte) (string, [][]string, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var settings map[string]any
+	if err := dec.Decode(&settings); err != nil {
+		return "", nil, fmt.Errorf("parsing cmux --settings: %w", err)
+	}
+	if settings == nil {
+		return "", nil, errors.New("cmux --settings is null, not a JSON object")
+	}
+	var allowed [][]string
+	if hooks, ok := settings["hooks"]; ok {
+		events, ok := hooks.(map[string]any)
+		if !ok {
+			return "", nil, fmt.Errorf("cmux --settings hooks is %T, not an object", hooks)
+		}
+		for event, groups := range events {
+			groups, ok := groups.([]any)
+			if !ok {
+				return "", nil, fmt.Errorf("cmux --settings hooks.%s is not a list", event)
+			}
+			for _, g := range groups {
+				g, ok := g.(map[string]any)
 				if !ok {
-					continue
+					return "", nil, fmt.Errorf("cmux --settings hooks.%s holds a %T, not an object", event, g)
 				}
-				// The box sends argv after its shell parsed the command; splitting
-				// on spaces only matches that for commands without shell syntax.
-				if strings.ContainsAny(rest, shellSyntax) {
-					return nil, fmt.Errorf("cmux hook command %q uses shell syntax the relay cannot match", h.Command)
+				entries, _ := g["hooks"].([]any)
+				for _, h := range entries {
+					h, ok := h.(map[string]any)
+					if !ok {
+						continue
+					}
+					command, _ := h["command"].(string)
+					argv, ok, err := cmuxArgv(command)
+					if err != nil {
+						return "", nil, err
+					}
+					if !ok {
+						continue
+					}
+					h["command"] = hookBinRef + " " + strings.Join(argv, " ")
+					allowed = append(allowed, argv)
 				}
-				out = append(out, strings.Fields(rest))
 			}
 		}
 	}
-	return out, nil
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return "", nil, fmt.Errorf("encoding cmux settings: %w", err)
+	}
+	return string(data), allowed, nil
+}
+
+// cmuxArgv is the cmux CLI argument list a hook command runs, ok false when
+// the command is not one of cmux's.
+func cmuxArgv(command string) ([]string, bool, error) {
+	if rest, ok := strings.CutPrefix(command, hookBinRef+" "); ok {
+		rest = strings.TrimSuffix(rest, quietFallback)
+		// The box sends argv after its shell parsed the command; splitting
+		// on spaces only matches that for commands without shell syntax.
+		if strings.ContainsAny(rest, shellSyntax) {
+			return nil, false, fmt.Errorf("cmux hook command %q uses shell syntax the relay cannot match", command)
+		}
+		return strings.Fields(rest), true, nil
+	}
+	if !strings.Contains(command, `cmux_cli="${CMUX_CLAUDE_HOOK_CMUX_BIN:-`) {
+		return nil, false, nil
+	}
+	runs := cmuxCLIRun.FindAllStringSubmatch(command, -1)
+	if len(runs) == 0 {
+		return nil, false, fmt.Errorf("cmux hook script %.80q… calls its CLI in a way the relay does not know", command)
+	}
+	argv := runs[0][2]
+	for _, r := range runs[1:] {
+		if r[2] != argv {
+			return nil, false, fmt.Errorf("cmux hook script calls its CLI with both %q and %q", argv, r[2])
+		}
+	}
+	return strings.Fields(argv), true, nil
 }

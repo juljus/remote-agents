@@ -256,12 +256,12 @@ func cmuxHooks(e env, agentName string, kind config.Kind, args, userArgs []strin
 	if !captured.InCmux() {
 		return captured.Args, nil, nil
 	}
-	allowed, err := captured.HookArgvs()
+	launch, err := captured.ForBox()
 	if err != nil {
 		return nil, nil, err
 	}
 	captured.Env["CMUX_CLAUDE_PID"] = strconv.Itoa(os.Getpid())
-	return captured.Args, &hookexec.Executor{BaseEnv: os.Environ(), Env: captured.HookEnv, Allowed: allowed}, nil
+	return launch.Args, &hookexec.Executor{BaseEnv: os.Environ(), Env: captured.HookEnv, Allowed: launch.Allowed}, nil
 }
 
 // transcriptStandIns is set for a Claude session whose hooks reach cmux: cmux

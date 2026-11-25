@@ -2,6 +2,8 @@ package cmuxcapture
 
 import (
 	"context"
+	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -119,7 +121,10 @@ func TestOnlySessionStartNamesTheEntry(t *testing.T) {
 	if got := c.HookEnv([]string{"hooks", "claude", "session-start"}); got["CMUX_CUSTOM_CLAUDE_PATH"] != "/Users/me/.local/bin/rclaude" || got["CMUX_SURFACE_ID"] != "surface-1" {
 		t.Fatalf("session-start env = %v", got)
 	}
-	for _, argv := range [][]string{{"hooks", "claude", "stop"}, {"hooks", "claude", "auto-name"}, {"hooks", "feed", "--source", "claude"}} {
+	if got := c.HookEnv([]string{"hooks", "enqueue", "claude", "session-start"}); got["CMUX_CUSTOM_CLAUDE_PATH"] != "/Users/me/.local/bin/rclaude" {
+		t.Fatalf("queued session-start env = %v", got)
+	}
+	for _, argv := range [][]string{{"hooks", "claude", "stop"}, {"hooks", "enqueue", "claude", "stop"}, {"hooks", "claude", "auto-name"}, {"hooks", "feed", "--source", "claude"}} {
 		got := c.HookEnv(argv)
 		if _, ok := got["CMUX_CUSTOM_CLAUDE_PATH"]; ok || got["CMUX_SURFACE_ID"] != "surface-1" {
 			t.Fatalf("%q env = %v", argv, got)
@@ -156,52 +161,142 @@ func TestCaptureWrapperThatDoesNotExecUs(t *testing.T) {
 	}
 }
 
-func TestHookArgvs(t *testing.T) {
+func joined(argvs [][]string) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range argvs {
+		out[strings.Join(a, " ")] = true
+	}
+	return out
+}
+
+// hookCommands lists the command of every hook in the settings JSON raw.
+func hookCommands(t *testing.T, raw string) []string {
+	t.Helper()
+	var s struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal([]byte(raw), &s); err != nil {
+		t.Fatalf("settings sent to the box are not JSON: %v", err)
+	}
+	var out []string
+	for _, groups := range s.Hooks {
+		for _, g := range groups {
+			for _, h := range g.Hooks {
+				out = append(out, h.Command)
+			}
+		}
+	}
+	return out
+}
+
+func TestForBoxInlineSettings(t *testing.T) {
 	c := Captured{Args: []string{"--settings", `{"preferredNotifChannel":"x","hooks":{
 		"Stop":[{"matcher":"","hooks":[{"type":"command","command":"\"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}\" hooks claude stop"},
 		                                {"type":"command","command":"\"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}\" hooks feed --source claude"}]}],
 		"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-own-hook --check"}]}]}}`, "--session-id", "x"}}
-	got, err := c.HookArgvs()
+	got, err := c.ForBox()
 	if err != nil {
-		t.Fatalf("HookArgvs: %v", err)
+		t.Fatalf("ForBox: %v", err)
 	}
 	want := map[string]bool{"hooks claude stop": true, "hooks feed --source claude": true}
-	if len(got) != len(want) {
-		t.Fatalf("argvs = %q", got)
+	if len(got.Allowed) != len(want) || !maps.Equal(joined(got.Allowed), want) {
+		t.Fatalf("allowed = %q", got.Allowed)
 	}
-	for _, a := range got {
-		if !want[strings.Join(a, " ")] {
-			t.Fatalf("unexpected argv %q", a)
-		}
+	if len(got.Args) != 4 || got.Args[0] != "--settings" || !slices.Equal(got.Args[2:], []string{"--session-id", "x"}) {
+		t.Fatalf("args = %q", got.Args)
 	}
-	if _, err := (Captured{Args: []string{"--resume"}}).HookArgvs(); err == nil {
+	commands := hookCommands(t, got.Args[1])
+	if !slices.Contains(commands, "my-own-hook --check") || !strings.Contains(got.Args[1], `"preferredNotifChannel":"x"`) {
+		t.Fatalf("settings lost the user's own parts: %s", got.Args[1])
+	}
+	if _, err := (Captured{Args: []string{"--resume"}}).ForBox(); err == nil {
 		t.Fatal("expected error without --settings")
 	}
 }
 
-func TestHookArgvsFromRealCmuxSettings(t *testing.T) {
+func TestForBoxFromCmux132Settings(t *testing.T) {
 	raw, err := os.ReadFile("testdata/cmux-1.3.2-settings.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Captured{Args: []string{"--settings", strings.TrimSpace(string(raw))}}.HookArgvs()
+	got, err := Captured{Args: []string{"--settings", strings.TrimSpace(string(raw))}}.ForBox()
 	if err != nil {
-		t.Fatalf("HookArgvs: %v", err)
+		t.Fatalf("ForBox: %v", err)
 	}
-	seen := map[string]bool{}
-	for _, a := range got {
-		seen[strings.Join(a, " ")] = true
-	}
+	seen := joined(got.Allowed)
 	for _, want := range []string{"hooks claude session-start", "hooks claude pre-tool-use", "hooks feed --source claude", "hooks claude cron-create-guard"} {
 		if !seen[want] {
-			t.Fatalf("missing %q in %v", want, got)
+			t.Fatalf("missing %q in %v", want, got.Allowed)
 		}
 	}
 }
 
-func TestHookArgvsRefusesShellSyntax(t *testing.T) {
+// cmux 0.65 passes its settings as a file, with hooks that are spooling
+// scripts; the box gets them inline, each as the CLI call it falls back to.
+func TestForBoxFromCmux0652SettingsFile(t *testing.T) {
+	raw, err := os.ReadFile("testdata/cmux-0.65.2-settings.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"--settings", path, "--resume", "x"}, {"--settings=" + path, "--resume", "x"}} {
+		got, err := Captured{Args: args}.ForBox()
+		if err != nil {
+			t.Fatalf("ForBox(%q): %v", args[0], err)
+		}
+		settings := strings.TrimPrefix(got.Args[len(got.Args)-3], "--settings=")
+		if !slices.Equal(got.Args[len(got.Args)-2:], []string{"--resume", "x"}) || !strings.HasPrefix(settings, "{") {
+			t.Fatalf("args = %.200q", got.Args)
+		}
+		seen := joined(got.Allowed)
+		for _, want := range []string{
+			"hooks enqueue claude session-start", "hooks enqueue claude stop", "hooks enqueue claude prompt-submit",
+			"hooks enqueue claude notification", "hooks enqueue claude feed", "hooks feed --source claude",
+			"hooks claude cron-create-guard", "hooks claude auto-name", "hooks claude inbox-wait", "hooks claude inbox-drain",
+		} {
+			if !seen[want] {
+				t.Fatalf("missing %q in %v", want, got.Allowed)
+			}
+		}
+		commands := hookCommands(t, settings)
+		if len(commands) != len(got.Allowed) {
+			t.Fatalf("%d hooks, %d relayed", len(commands), len(got.Allowed))
+		}
+		for _, c := range commands {
+			rest, ok := strings.CutPrefix(c, hookBinRef+" ")
+			if !ok || strings.ContainsAny(rest, shellSyntax) {
+				t.Fatalf("hook not reduced to a CLI call: %.120q", c)
+			}
+		}
+		if !strings.Contains(settings, `"asyncRewake":true`) || !strings.Contains(settings, `"timeout":86400`) {
+			t.Fatalf("hook options lost: %.300s", settings)
+		}
+	}
+}
+
+func TestForBoxRefusesShellSyntax(t *testing.T) {
 	c := Captured{Args: []string{"--settings", `{"hooks":{"Stop":[{"hooks":[{"command":"\"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}\" hooks claude stop || true"}]}]}}`}}
-	if _, err := c.HookArgvs(); err == nil {
+	if _, err := c.ForBox(); err == nil {
 		t.Fatal("expected refusal of a command with shell syntax")
+	}
+}
+
+func TestForBoxRefusesUnknownCmuxScript(t *testing.T) {
+	script := `cmux_cli="${CMUX_CLAUDE_HOOK_CMUX_BIN:-}"; "$cmux_cli" hooks claude stop | tee /tmp/x`
+	raw, _ := json.Marshal(map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"command": script}}}}}})
+	if _, err := (Captured{Args: []string{"--settings", string(raw)}}).ForBox(); err == nil {
+		t.Fatal("expected refusal of a cmux script whose CLI call is not recognised")
+	}
+	script = `cmux_cli="${CMUX_CLAUDE_HOOK_CMUX_BIN:-}"; "$cmux_cli" hooks claude stop 2>/dev/null; "$cmux_cli" set-status x 2>/dev/null`
+	raw, _ = json.Marshal(map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"command": script}}}}}})
+	if _, err := (Captured{Args: []string{"--settings", string(raw)}}).ForBox(); err == nil {
+		t.Fatal("expected refusal of a cmux script with two different CLI calls")
 	}
 }
