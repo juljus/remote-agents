@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"remote-agents/internal/hookexec"
 	"remote-agents/internal/linkproto"
 )
 
@@ -43,8 +44,8 @@ echo "args=$* surface=$CMUX_SURFACE_ID pid=$CMUX_CODEX_PID kind=${CMUX_AGENT_LAU
 	if err != nil || ex == nil {
 		t.Fatalf("executor = %+v, %v", ex, err)
 	}
-	if !slices.EqualFunc(ex.Allowed, Argvs(), slices.Equal) {
-		t.Fatalf("allowed = %q", ex.Allowed)
+	if !slices.EqualFunc(ex.Allowed, Argvs(), func(h hookexec.Hook, a []string) bool { return slices.Equal(h.Argv, a) && !h.Quiet }) {
+		t.Fatalf("allowed = %v", ex.Allowed)
 	}
 	res, err := ex.Run(context.Background(), linkproto.HookRequest{Argv: []string{"hooks", "codex", "stop"}})
 	if err != nil {

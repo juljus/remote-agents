@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"remote-agents/internal/hookexec"
 )
 
 func TestMain(m *testing.M) {
@@ -161,12 +163,23 @@ func TestCaptureWrapperThatDoesNotExecUs(t *testing.T) {
 	}
 }
 
-func joined(argvs [][]string) map[string]bool {
+func joined(hooks []hookexec.Hook) map[string]bool {
 	out := map[string]bool{}
-	for _, a := range argvs {
-		out[strings.Join(a, " ")] = true
+	for _, h := range hooks {
+		out[strings.Join(h.Argv, " ")] = true
 	}
 	return out
+}
+
+func hookOf(t *testing.T, hooks []hookexec.Hook, argv string) hookexec.Hook {
+	t.Helper()
+	for _, h := range hooks {
+		if strings.Join(h.Argv, " ") == argv {
+			return h
+		}
+	}
+	t.Fatalf("missing %q in %v", argv, hooks)
+	return hookexec.Hook{}
 }
 
 // hookCommands lists the command of every hook in the settings JSON raw.
@@ -204,7 +217,12 @@ func TestForBoxInlineSettings(t *testing.T) {
 	}
 	want := map[string]bool{"hooks claude stop": true, "hooks feed --source claude": true}
 	if len(got.Allowed) != len(want) || !maps.Equal(joined(got.Allowed), want) {
-		t.Fatalf("allowed = %q", got.Allowed)
+		t.Fatalf("allowed = %v", got.Allowed)
+	}
+	for _, h := range got.Allowed {
+		if h.Quiet || len(h.Env) != 0 {
+			t.Fatalf("plain hook %+v", h)
+		}
 	}
 	if len(got.Args) != 4 || got.Args[0] != "--settings" || !slices.Equal(got.Args[2:], []string{"--session-id", "x"}) {
 		t.Fatalf("args = %q", got.Args)
@@ -266,14 +284,24 @@ func TestForBoxFromCmux0652SettingsFile(t *testing.T) {
 			}
 		}
 		commands := hookCommands(t, settings)
-		if len(commands) != len(got.Allowed) {
-			t.Fatalf("%d hooks, %d relayed", len(commands), len(got.Allowed))
-		}
 		for _, c := range commands {
 			rest, ok := strings.CutPrefix(c, hookBinRef+" ")
 			if !ok || strings.ContainsAny(rest, shellSyntax) {
 				t.Fatalf("hook not reduced to a CLI call: %.120q", c)
 			}
+			if !seen[rest] {
+				t.Fatalf("hook %q is not allowed", rest)
+			}
+		}
+		// The scripts answer "{}" when the CLI fails and give it half a second.
+		if h := hookOf(t, got.Allowed, "hooks enqueue claude pre-tool-use"); !h.Quiet || h.Env["CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC"] != "0.5" || len(h.Env) != 1 {
+			t.Fatalf("pre-tool-use hook = %+v", h)
+		}
+		if h := hookOf(t, got.Allowed, "hooks claude inbox-drain"); !h.Quiet {
+			t.Fatalf("inbox-drain hook = %+v", h)
+		}
+		if h := hookOf(t, got.Allowed, "hooks claude cron-create-guard"); h.Quiet {
+			t.Fatalf("cron-create-guard must report its failure: %+v", h)
 		}
 		if !strings.Contains(settings, `"asyncRewake":true`) || !strings.Contains(settings, `"timeout":86400`) {
 			t.Fatalf("hook options lost: %.300s", settings)

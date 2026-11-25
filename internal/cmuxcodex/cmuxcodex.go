@@ -58,6 +58,15 @@ func Argvs() [][]string {
 	return out
 }
 
+// allowed are the relay's hooks for Codex, whose failures it reports.
+func allowed() []hookexec.Hook {
+	out := make([]hookexec.Hook, 0, len(Hooks))
+	for _, argv := range Argvs() {
+		out = append(out, hookexec.Hook{Argv: argv})
+	}
+	return out
+}
+
 // launchEnvPrefix starts the variables in which an agent wrapper describes
 // its launch to cmux. Inherited from an outer agent, they describe that one.
 const launchEnvPrefix = "CMUX_AGENT_LAUNCH_"
@@ -106,5 +115,5 @@ func NewExecutor(environ []string, pid int, launch Launch) (*hookexec.Executor, 
 	env[hookexec.BinEnvVar] = cli
 	env[PIDEnvVar] = strconv.Itoa(pid)
 	maps.Copy(env, launch.env())
-	return &hookexec.Executor{BaseEnv: base, Env: func([]string) map[string]string { return env }, Allowed: Argvs()}, nil
+	return &hookexec.Executor{BaseEnv: base, Env: func([]string) map[string]string { return env }, Allowed: allowed()}, nil
 }

@@ -28,7 +28,7 @@ func TestRunsHookWithCmuxEnv(t *testing.T) {
 	e := Executor{
 		BaseEnv: []string{"HOME=/Users/me", "CMUX_SURFACE_ID=stale"},
 		Env:     fixedEnv(map[string]string{BinEnvVar: fakeCmux(t), "CMUX_SURFACE_ID": "surface-1", "CMUX_CLAUDE_PID": "4242"}),
-		Allowed: [][]string{{"hooks", "claude", "stop"}},
+		Allowed: []Hook{{Argv: []string{"hooks", "claude", "stop"}}},
 	}
 	res, err := e.Run(context.Background(), linkproto.HookRequest{Argv: []string{"hooks", "claude", "stop"}, Stdin: []byte(`{"x":1}`)})
 	if err != nil {
@@ -41,14 +41,14 @@ func TestRunsHookWithCmuxEnv(t *testing.T) {
 }
 
 func TestNeedsAbsoluteBin(t *testing.T) {
-	e := Executor{Env: fixedEnv(map[string]string{BinEnvVar: "cmux"}), Allowed: [][]string{{"hooks"}}}
+	e := Executor{Env: fixedEnv(map[string]string{BinEnvVar: "cmux"}), Allowed: []Hook{{Argv: []string{"hooks"}}}}
 	if _, err := e.Run(context.Background(), linkproto.HookRequest{Argv: []string{"hooks"}}); err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestRefusesArgvCmuxDidNotInject(t *testing.T) {
-	e := Executor{Env: fixedEnv(map[string]string{BinEnvVar: fakeCmux(t)}), Allowed: [][]string{{"hooks", "claude", "stop"}}}
+	e := Executor{Env: fixedEnv(map[string]string{BinEnvVar: fakeCmux(t)}), Allowed: []Hook{{Argv: []string{"hooks", "claude", "stop"}}}}
 	for _, argv := range [][]string{
 		{"send", "rm -rf ~\n"},
 		{"hooks", "setup"},
@@ -58,5 +58,40 @@ func TestRefusesArgvCmuxDidNotInject(t *testing.T) {
 		if _, err := e.Run(context.Background(), linkproto.HookRequest{Argv: argv}); err == nil {
 			t.Fatalf("argv %q should be refused", argv)
 		}
+	}
+}
+
+// cmux's own hook commands answer "{}" when its CLI fails; quiet hooks do too.
+func TestQuietHookHidesFailure(t *testing.T) {
+	e := Executor{
+		Env: fixedEnv(map[string]string{BinEnvVar: fakeCmux(t)}),
+		Allowed: []Hook{
+			{Argv: []string{"hooks", "enqueue", "claude", "stop"}, Quiet: true},
+			{Argv: []string{"hooks", "claude", "inbox-drain"}, Quiet: true},
+		},
+	}
+	res, err := e.Run(context.Background(), linkproto.HookRequest{Argv: []string{"hooks", "enqueue", "claude", "stop"}})
+	if err != nil || string(res.Stdout) != "{}\n" || len(res.Stderr) != 0 || res.ExitCode != 0 {
+		t.Fatalf("result = %q / %q / %d, err %v", res.Stdout, res.Stderr, res.ExitCode, err)
+	}
+	e.Env = fixedEnv(map[string]string{BinEnvVar: "cmux"})
+	res, err = e.Run(context.Background(), linkproto.HookRequest{Argv: []string{"hooks", "claude", "inbox-drain"}})
+	if err != nil || string(res.Stdout) != "{}\n" {
+		t.Fatalf("unrunnable quiet hook: %q, err %v", res.Stdout, err)
+	}
+}
+
+func TestQuietHookPassesSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cmux")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho \"timeout=$CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := Executor{
+		Env:     fixedEnv(map[string]string{BinEnvVar: path}),
+		Allowed: []Hook{{Argv: []string{"hooks", "enqueue", "claude", "stop"}, Env: map[string]string{"CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC": "0.5"}, Quiet: true}},
+	}
+	res, err := e.Run(context.Background(), linkproto.HookRequest{Argv: []string{"hooks", "enqueue", "claude", "stop"}})
+	if err != nil || string(res.Stdout) != "timeout=0.5\n" || res.ExitCode != 0 {
+		t.Fatalf("result = %q / %d, err %v", res.Stdout, res.ExitCode, err)
 	}
 }

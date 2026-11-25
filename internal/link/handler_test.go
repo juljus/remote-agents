@@ -218,7 +218,7 @@ func TestHookIsRunByTheRegisteredWrapper(t *testing.T) {
 	env := map[string]string{"CMUX_SURFACE_ID": "surface-1", hookexec.BinEnvVar: fakeCmux(t)}
 	serveAndRegister(t, reg, "claude-x", hookexec.Executor{
 		Env:     func([]string) map[string]string { return env },
-		Allowed: [][]string{{"hooks", "claude", "stop"}},
+		Allowed: []hookexec.Hook{{Argv: []string{"hooks", "claude", "stop"}}},
 	})
 	res, err := h.Hook(context.Background(), linkproto.HookRequest{
 		Session: "claude-x", Argv: []string{"hooks", "claude", "stop"}, Stdin: []byte(`{"session_id":"x"}`),

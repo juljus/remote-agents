@@ -19,6 +19,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"remote-agents/internal/hookexec"
 )
 
 // EnvVar switches the remote-agents binary into capture mode.
@@ -135,9 +137,9 @@ const hookBinRef = `"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}"`
 const quietFallback = ` 2>/dev/null || echo '{}'`
 
 // cmuxCLIRun is how cmux 0.65's hook scripts invoke the CLI they resolve from
-// CMUX_CLAUDE_HOOK_CMUX_BIN, with or without an explicit socket, up to the
-// redirect that starts their failure handling.
-var cmuxCLIRun = regexp.MustCompile(`"\$cmux_cli" (--socket "\$CMUX_SOCKET_PATH" )?([^"'$|&;<>(){}\n]*?) 2>/dev/null`)
+// CMUX_CLAUDE_HOOK_CMUX_BIN: after the variables they set to literal values,
+// with or without an explicit socket, and answering "{}" when it fails.
+var cmuxCLIRun = regexp.MustCompile(`((?:[A-Z][A-Z0-9_]*=[^\s"'$;|&]+ )*)"\$cmux_cli" (?:--socket "\$CMUX_SOCKET_PATH" )?([^"'$|&;<>(){}\n]*?) 2>/dev/null \|\| \{ cat >/dev/null; echo `)
 
 // BoxLaunch is what the box needs to run claude with cmux's hooks relayed.
 type BoxLaunch struct {
@@ -145,9 +147,9 @@ type BoxLaunch struct {
 	// the box cannot read a settings file on the laptop, and each cmux hook
 	// reduced to a plain call of the CLI that the box relays.
 	Args []string
-	// Allowed are the cmux CLI argument lists of those hooks; the relay runs
-	// nothing else. Hooks from the user's own settings run on the box.
-	Allowed [][]string
+	// Allowed are the cmux CLI calls of those hooks; the relay runs nothing
+	// else. Hooks from the user's own settings run on the box.
+	Allowed []hookexec.Hook
 }
 
 // ForBox prepares the captured launch for the box. Older cmux passes its
@@ -204,9 +206,9 @@ func loadSettings(value string) ([]byte, error) {
 }
 
 // relayedSettings rewrites each cmux hook command in the settings JSON raw to
-// a plain CLI call and returns the settings with the calls' argument lists.
-// Every other setting and hook is kept as it is.
-func relayedSettings(raw []byte) (string, [][]string, error) {
+// a plain CLI call and returns the settings with those calls. Every other
+// setting and hook is kept as it is.
+func relayedSettings(raw []byte) (string, []hookexec.Hook, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var settings map[string]any
@@ -216,7 +218,7 @@ func relayedSettings(raw []byte) (string, [][]string, error) {
 	if settings == nil {
 		return "", nil, errors.New("cmux --settings is null, not a JSON object")
 	}
-	var allowed [][]string
+	var allowed []hookexec.Hook
 	if hooks, ok := settings["hooks"]; ok {
 		events, ok := hooks.(map[string]any)
 		if !ok {
@@ -239,15 +241,15 @@ func relayedSettings(raw []byte) (string, [][]string, error) {
 						continue
 					}
 					command, _ := h["command"].(string)
-					argv, ok, err := cmuxArgv(command)
+					hook, ok, err := cmuxHook(command)
 					if err != nil {
 						return "", nil, err
 					}
 					if !ok {
 						continue
 					}
-					h["command"] = hookBinRef + " " + strings.Join(argv, " ")
-					allowed = append(allowed, argv)
+					h["command"] = hookBinRef + " " + strings.Join(hook.Argv, " ")
+					allowed = addHook(allowed, hook)
 				}
 			}
 		}
@@ -259,30 +261,45 @@ func relayedSettings(raw []byte) (string, [][]string, error) {
 	return string(data), allowed, nil
 }
 
-// cmuxArgv is the cmux CLI argument list a hook command runs, ok false when
-// the command is not one of cmux's.
-func cmuxArgv(command string) ([]string, bool, error) {
+// addHook adds hook to hooks. The box relays only the argument list, so one
+// that several commands share is quiet if any of them hides its failure.
+func addHook(hooks []hookexec.Hook, hook hookexec.Hook) []hookexec.Hook {
+	i := slices.IndexFunc(hooks, func(h hookexec.Hook) bool { return slices.Equal(h.Argv, hook.Argv) })
+	if i < 0 {
+		return append(hooks, hook)
+	}
+	hooks[i].Quiet = hooks[i].Quiet || hook.Quiet
+	return hooks
+}
+
+// cmuxHook is the cmux CLI call a hook command makes, ok false when the
+// command is not one of cmux's.
+func cmuxHook(command string) (hookexec.Hook, bool, error) {
 	if rest, ok := strings.CutPrefix(command, hookBinRef+" "); ok {
-		rest = strings.TrimSuffix(rest, quietFallback)
+		rest, quiet := strings.CutSuffix(rest, quietFallback)
 		// The box sends argv after its shell parsed the command; splitting
 		// on spaces only matches that for commands without shell syntax.
 		if strings.ContainsAny(rest, shellSyntax) {
-			return nil, false, fmt.Errorf("cmux hook command %q uses shell syntax the relay cannot match", command)
+			return hookexec.Hook{}, false, fmt.Errorf("cmux hook command %q uses shell syntax the relay cannot match", command)
 		}
-		return strings.Fields(rest), true, nil
+		return hookexec.Hook{Argv: strings.Fields(rest), Quiet: quiet}, true, nil
 	}
 	if !strings.Contains(command, `cmux_cli="${CMUX_CLAUDE_HOOK_CMUX_BIN:-`) {
-		return nil, false, nil
+		return hookexec.Hook{}, false, nil
 	}
 	runs := cmuxCLIRun.FindAllStringSubmatch(command, -1)
 	if len(runs) == 0 {
-		return nil, false, fmt.Errorf("cmux hook script %.80q… calls its CLI in a way the relay does not know", command)
+		return hookexec.Hook{}, false, fmt.Errorf("cmux hook script %.80q… calls its CLI in a way the relay does not know", command)
 	}
-	argv := runs[0][2]
 	for _, r := range runs[1:] {
-		if r[2] != argv {
-			return nil, false, fmt.Errorf("cmux hook script calls its CLI with both %q and %q", argv, r[2])
+		if r[1] != runs[0][1] || r[2] != runs[0][2] {
+			return hookexec.Hook{}, false, fmt.Errorf("cmux hook script calls its CLI both as %q and as %q", runs[0][1]+runs[0][2], r[1]+r[2])
 		}
 	}
-	return strings.Fields(argv), true, nil
+	env := map[string]string{}
+	for _, kv := range strings.Fields(runs[0][1]) {
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+	}
+	return hookexec.Hook{Argv: strings.Fields(runs[0][2]), Env: env, Quiet: true}, true, nil
 }
